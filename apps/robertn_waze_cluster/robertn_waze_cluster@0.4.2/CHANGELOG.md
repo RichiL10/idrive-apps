@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.2
+
+Kiro test changes, not published and not yet run on a car. Enable map on a
+CarPlay build outside the patcher's proven list first asks to confirm, and
+only the confirmed press patches it. When boot recovery has marked the map
+patch failed (CarPlay keeps crashing while patched and no backup can
+restore it), the status line says so: "Map patch failed: CarPlay keeps
+crashing and cannot be restored automatically. Unplug the phone and restore
+CarPlay by hand", from waze-on-cluster 0.7.10 on. waze-on-cluster 0.7.10
+needs this version to enable the map on a build outside the proven list
+(an older app gets a refusal), so install the two together. A confirming
+press less than a second after the first (a doubled event) is ignored.
+
 ## 0.4.1
 
 While CarPlay's stream is live but shows no map, the status says why, from

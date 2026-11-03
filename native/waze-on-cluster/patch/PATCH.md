@@ -407,6 +407,19 @@ has the target's size, `--force` or not. `status` prints `restorable: yes`
 when the revert would change the target, else `no` with why. Every write is
 an atomic rename.
 
+The temporary file gets the target's owner, group and mode, and its
+extended attributes (file capabilities, security labels) by `getfattr` and
+`setfattr`, checked read back; an attribute that cannot be copied refuses
+the write, target unchanged. Node 8 has no xattr API, so without `getfattr`
+on the unit the attributes are not checked: the patcher prints a note and
+the rename would drop any. OPEN, not verified (Kiro test change, 0.7.10):
+whether the unit's root file system has `getfattr` and whether
+`/usr/bin/carplay` carries any extended attribute. No copy of the unit's
+root file system was at hand to check. Check on one (`ls -l
+<ROOTFS>/usr/bin/getfattr`, `getfattr -d -m - <ROOTFS>/usr/bin/carplay`)
+or over SSH before relying on it; if carplay has attributes and the unit no
+`getfattr`, the patcher must refuse instead of noting it.
+
 ## Boot recovery
 
 A CarPlay crash reboots the head unit with the patched binary still on
@@ -519,6 +532,27 @@ shared remount lock (`remount_lock.js`) keeps it and `patchd` from remounting
 `/` at once; recovery yields to `patchd`. Recovery never stops, kills,
 restarts or reboots anything; its only action on a service is the start
 above.
+
+**Failed.** A binary with Edit 3 (self-start) is counted as patched even
+when `status` reads `restorable: no` (the backup is not a verified original
+of its build), so its crashes count and are not taken for a stock binary.
+At the threshold such a binary cannot be restored: recovery writes
+`failed: {since, boot, fails, why}` to the state, logs an ERROR at every
+boot step and crash, schedules no CarPlay start of its own after a crash,
+and `patchd` adds `failed` (the reason text) to its status, which the app
+shows as its status line (not while `status` reads carplay as stock, for
+example after a restore by hand: the mark is stale then and goes at the next
+boot step or crash). A SIGKILL `patchd` did not send (the OOM killer, a
+shell) is not a crash of the patch: the watcher still starts CarPlay after
+it, bounded per boot as always, and logs that it does so while marked
+failed. CarPlay is left as it is: writing anything
+else over it, or stopping or masking `carplay.service`, could leave the head
+unit worse off than a crashing CarPlay, and stopping the render would not
+stop the crash (it is in CarPlay's own process). So where a crash restarts
+the head unit (`OnFailure=`), only a restore by hand ends the loop. The mark
+goes when CarPlay reads stock again, a backup restores it, a boot brings
+`fails` below the threshold, or our backup is gone. (Kiro test change,
+0.7.10.)
 
 **By hand.** Keep the phone from connecting (unplug it, or turn off its
 Wi-Fi and Bluetooth) so CarPlay has no session to crash in, then over SSH run

@@ -34,7 +34,7 @@ One `LT_State_Wide` page:
 
 | Row | What it does |
 |---|---|
-| status | the patch and map state: `Patch pending — reboot to activate`, `Removal pending — reboot to finish`, `Original — enable the map`, `Not patched — <reason>`, `Applying patch…`, `Patched — waiting for CarPlay`, `Waiting for the phone's map — start navigation`, `Stream lost — reconnect CarPlay`, `Starting map…`, `Showing: Waze map — 16 frames/s …`, `Map frozen — reconnect CarPlay`, `Map error: …`, `Patch service unavailable (reboot may be needed)` |
+| status | the patch and map state: `Patch pending — reboot to activate`, `Removal pending — reboot to finish`, `Original — enable the map`, `Not patched — <reason>`, `Applying patch…`, `Patched — waiting for CarPlay`, `Waiting for the phone's map — start navigation`, `Stream lost — reconnect CarPlay`, `Starting map…`, `Showing: Waze map — 16 frames/s …`, `Map frozen — reconnect CarPlay`, `Map error: …`, `Patch service unavailable (reboot may be needed)`, `Map patch failed: CarPlay keeps crashing and cannot be restored automatically. Unplug the phone and restore CarPlay by hand` |
 | setup | `Set Instrument cluster > Central display area to Map view`, always shown |
 | Enable map | applies the patch; shown while it is off, unknown or out of date and no change is pending |
 | Disable map | reverts the patch, which turns the map off; shown while patched and no change is pending |
@@ -61,7 +61,10 @@ tools keep running when it closes them.
   `{"cmd":"reboot"}`, `{"cmd":"capture-start"|"capture-stop"}`. The daemon sends
   `{"ev":"status","state","panel","mode","res","safe","carplay","reason","pending","conflict"}`
   (`state` original, patched, unknown, busy or error; `carplay: "deferred"`
-  while a change waits for the next start), `{"ev":"capture",…}`,
+  while a change waits for the next start; `unproven: true` for a CarPlay
+  build outside the proven list, which Enable map patches only after the
+  user confirms, sending `"unproven":true`; `failed`, the reason, while boot
+  recovery has marked the patch failed), `{"ev":"capture",…}`,
   `{"ev":"reboot-reply","ok","reason"}` and `{"ev":"log","line"}`.
 
 A patch with another sink, panel, size (not `1088x480`) or safe area (not
@@ -72,8 +75,8 @@ A patch with another sink, panel, size (not `1088x480`) or safe area (not
 ```sh
 node tools/test_control.js           # the socket client against fake sockets
 node tools/test_page.js              # the page against a fake SDK and HMI
-node tools/build.js                  # robertn_waze_cluster@0.4.1.src.tgz
-node tools/build.js --sdk <donor>    # also robertn_waze_cluster@0.4.1.tgz
+node tools/build.js                  # robertn_waze_cluster@0.4.2.src.tgz
+node tools/build.js --sdk <donor>    # also robertn_waze_cluster@0.4.2.tgz
 ```
 
 The app ships as a source package (`mgu-app.json`; `"build": "unit"` in the
@@ -92,7 +95,7 @@ Enter starts or stops a fake CarPlay stream.
 | `src/robertn_waze_cluster.js` | the app |
 | `src/waze_cluster_control.js` | both socket clients and the status logic |
 | `tools/` | build, fakes, tests, icon |
-| `robertn_waze_cluster@0.4.1/` | the package tree (manifest, RHMI UI, config) |
+| `robertn_waze_cluster@0.4.2/` | the package tree (manifest, RHMI UI, config) |
 
 ## License
 

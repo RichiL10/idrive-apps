@@ -523,26 +523,117 @@ function cmdVerify(target) {
         ', res ' + (c.res.state === 'patched' ? c.res.res.w + 'x' + c.res.res.h : 'stock') + '\n');
 }
 
-/* Write by atomic rename so a crash mid-write cannot leave carplay half
- * patched; fall back to in-place rewrite on a cross-device/busy rename. The
- * caller remounts / read-write around this (deploy's remount window). */
+/* Write by atomic rename only, so a crash or power loss mid-write cannot
+ * leave carplay half patched: a rename that fails leaves the target as it
+ * was and the write is refused (never rewritten in place). The caller
+ * remounts / read-write around this (deploy's remount window). */
 function fsyncFile(path) {
     var fd = fs.openSync(path, 'r+');
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
+function fsyncDir(dir) {
+    var fd;
+    try { fd = fs.openSync(dir, 'r'); } catch (e) { return; }
+    try { fs.fsyncSync(fd); } catch (e) {} finally { fs.closeSync(fd); }
+}
+
+/* Temp files of earlier writes cut short (a power loss, a kill): the legacy
+ * fixed name, and per-process names whose process is gone. */
+function dropStaleTemps(target) {
+    var dir = path.dirname(target), base = path.basename(target) + '.woc-tmp';
+    var names = [];
+    try { names = fs.readdirSync(dir); } catch (e) { return; }
+    names.forEach(function (n) {
+        if (n !== base && n.indexOf(base + '.') !== 0) return;
+        var pid = parseInt(n.slice(base.length + 1), 10);
+        if (n !== base && pid > 0 && pid !== process.pid) {
+            try { process.kill(pid, 0); return; } catch (e) { if (e.code !== 'ESRCH') return; }
+        }
+        try { fs.unlinkSync(path.join(dir, n)); } catch (e) {}
+    });
+}
+
+/* Extended attributes of a file (file capabilities, security labels), by
+ * getfattr when the system has it: { names: [...] }, or { unknown: reason }.
+ * Node 8 has no xattr API. */
+function readXattrs(file) {
+    var cp = require('child_process'), r;
+    try { r = cp.spawnSync('getfattr', ['-d', '-m', '-', '-e', 'hex', '--absolute-names', file], { encoding: 'latin1', timeout: 5000 }); }
+    catch (e) { return { unknown: e.message }; }
+    if (r.error) return { unknown: r.error.code === 'ENOENT' ? 'no getfattr' : r.error.message };
+    if (r.status !== 0) return { unknown: 'getfattr exited ' + r.status };
+    var attrs = [];
+    String(r.stdout).split('\n').forEach(function (l) {
+        var m = /^([^#=\s][^=]*)=(0x[0-9a-fA-F]*)$/.exec(l.trim());
+        if (m) attrs.push({ name: m[1], value: m[2] });
+    });
+    return { attrs: attrs };
+}
+
+/* Copy the target's extended attributes to the temp file. Refuses (target
+ * unchanged) when the target has some that cannot be copied; reports when
+ * they cannot be read at all. */
+function copyXattrs(target, tmp, fail) {
+    var x = readXattrs(target);
+    if (x.unknown) { process.stdout.write('note: extended attributes of ' + target + ' not checked (' + x.unknown + ')\n'); return; }
+    if (!x.attrs.length) return;
+    var cp = require('child_process');
+    process.stdout.write('note: ' + target + ' carries extended attributes: ' +
+        x.attrs.map(function (a) { return a.name; }).join(', ') + '; copying them\n');
+    x.attrs.forEach(function (a) {
+        var r = cp.spawnSync('setfattr', ['-n', a.name, '-v', a.value, tmp], { encoding: 'latin1', timeout: 5000 });
+        if (r.error || r.status !== 0)
+            fail('cannot copy extended attribute ' + a.name + ' (' + (r.error ? r.error.message : String(r.stderr).trim()) + ')');
+    });
+    var y = readXattrs(tmp);
+    var miss = x.attrs.filter(function (a) { return !y.attrs || !y.attrs.some(function (b) { return b.name === a.name && b.value === a.value; }); });
+    if (miss.length) fail('extended attributes not preserved: ' + miss.map(function (a) { return a.name; }).join(', '));
+}
+
+/* Atomic only: write a per-process temp file beside the target with the
+ * target's owner, group, mode and extended attributes, fsync it, check its
+ * bytes read back by hash, rename it over the target, fsync the folder.
+ * One descriptor, opened before the mode is set, does the write, owner,
+ * mode, fsync and read-back, so a target mode without owner write (0555)
+ * does not stop a caller that is not root. */
 function writeInPlace(target, buf) {
-    var tmp = target + '.woc-tmp';
-    var st;
-    try { st = fs.statSync(target); } catch (e) { st = { mode: 0o755 }; }
-    fs.writeFileSync(tmp, buf, { mode: st.mode & 0o777 });
-    fsyncFile(tmp);   /* the bytes must be on disk before the rename */
-    try { fs.renameSync(tmp, target); }
-    catch (e) {
-        try { fs.unlinkSync(tmp); } catch (e2) {}
-        var fd = fs.openSync(target, 'r+');
-        try { fs.writeSync(fd, buf, 0, buf.length, 0); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    dropStaleTemps(target);
+    var tmp = target + '.woc-tmp.' + process.pid;
+    var fd = null;
+    function fail(why) {
+        if (fd !== null) { try { fs.closeSync(fd); } catch (e) {} fd = null; }
+        try { fs.unlinkSync(tmp); } catch (e) {}
+        die(why + '; ' + target + ' unchanged');
     }
+    var st = null;
+    try { st = fs.statSync(target); } catch (e) {}
+    try { fs.unlinkSync(tmp); } catch (e) {}
+    try {
+        fd = fs.openSync(tmp, 'wx+', 0o600);
+        for (var off = 0; off < buf.length;) off += fs.writeSync(fd, buf, off, buf.length - off, off);
+    } catch (e) { fail('writing ' + tmp + ': ' + e.message); }
+    try {
+        /* chown first: it clears set-id bits, which the chmod then restores. */
+        if (st) {
+            try { fs.fchownSync(fd, st.uid, st.gid); }
+            catch (e) { if (process.getuid && process.getuid() === 0) throw e; }
+        }
+        fs.fchmodSync(fd, st ? st.mode & 0o7777 : 0o755);
+    } catch (e) { fail('setting owner/mode of ' + tmp + ': ' + e.message); }
+    if (st) copyXattrs(target, tmp, fail);
+    try { fs.fsyncSync(fd); }   /* the bytes must be on disk before the rename */
+    catch (e) { fail('fsync ' + tmp + ': ' + e.message); }
+    var back = Buffer.alloc(buf.length + 1), got = 0, n;
+    try {
+        while (got < back.length && (n = fs.readSync(fd, back, got, back.length - got, got)) > 0) got += n;
+    } catch (e) { fail('reading back ' + tmp + ': ' + e.message); }
+    if (got !== buf.length || sha256(back.slice(0, got)) !== sha256(buf)) fail('temp file verification failed');
+    try { fs.closeSync(fd); } catch (e) { fd = null; fail('closing ' + tmp + ': ' + e.message); }
+    fd = null;
+    try { fs.renameSync(tmp, target); }
+    catch (e) { fail('rename ' + tmp + ' -> ' + target + ' failed (' + e.message + '); not rewritten in place'); }
+    fsyncDir(path.dirname(target));
 }
 
 function onlyRegionsDiffer(a, b, regions) {

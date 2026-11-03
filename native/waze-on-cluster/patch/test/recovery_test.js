@@ -17,7 +17,7 @@ const path = require('path');
 const cp = require('child_process');
 const crypto = require('crypto');
 
-const { Recovery, tally, RESTORE_BOUND_MS } = require('../recovery.js');
+const { Recovery, tally, RESTORE_BOUND_MS, failedReason, classifyStatus } = require('../recovery.js');
 
 const RECOVERY_PATH = path.join(__dirname, '..', 'recovery.js');
 const MARK_SH = path.join(__dirname, '..', 'shutdown_mark.sh');
@@ -60,6 +60,7 @@ function makeWorld(opts) {
         killed: '',
         lockHeld: false,
         events: [],
+        logs: [],
         now: opts.now || clock(),
     };
     let nextPid = 100;
@@ -100,7 +101,7 @@ function makeWorld(opts) {
         killed: () => w.killed,
         recmgrLoaded: (name) => name === 'carplay' && w.recmgr,
         lock: { tryAcquire: () => !w.lockHeld, release: () => {} },
-        log: () => {},
+        log: (m) => { w.logs.push(m); },
     }, extra || {}));
     return w;
 }
@@ -229,7 +230,7 @@ test('no patch of ours on disk: the boot step neither classifies nor restores, a
     const r = await startBoot(w.recovery('B', { classify: () => { throw new Error('classified'); } }));
     assert.strictEqual(r.action, 'idle');
     assert(Date.now() - t0 < 100);
-    assert.deepStrictEqual(readState(w.statePath), { fails: 0, arm: null, starts: null, ended: null });
+    assert.deepStrictEqual(readState(w.statePath), { fails: 0, arm: null, starts: null, ended: null, failed: null });
 });
 
 test('below the threshold the boot step arms without classifying', async () => {
@@ -247,7 +248,7 @@ test('the watcher counts nothing twice and retries a restore the boot step did n
     assert.strictEqual((await startBoot(w.recovery('B', { restore }))).action, 'restore-failed');
     assert.strictEqual(readState(w.statePath).fails, 2);
     assert.strictEqual((await startBoot(w.recovery('B', { restore }))).action, 'restored');
-    assert.deepStrictEqual(readState(w.statePath), { fails: 0, arm: null, starts: null, ended: null });
+    assert.deepStrictEqual(readState(w.statePath), { fails: 0, arm: null, starts: null, ended: null, failed: null });
 });
 
 test('a firmware-replaced binary at the threshold is never restored, and the counter clears', async () => {
@@ -263,6 +264,98 @@ test('patched with no verified backup: not restored, flagged unavailable', async
     fs.writeFileSync(w.statePath, JSON.stringify({ fails: 2, arm: { boot: 'A', crashes: 1 } }));
     assert.strictEqual((await startBoot(w.recovery('B'))).action, 'restore-unavailable');
     assert(!w.events.includes('restore'));
+});
+
+test('patched with no verified backup: the tool is marked failed, says so loudly, and patchd can report it', async () => {
+    const w = makeWorld({ restorable: false });
+    fs.writeFileSync(w.statePath, JSON.stringify({ fails: 2, arm: { boot: 'A', crashes: 1 } }));
+    const logs = [];
+    const r = await startBoot(w.recovery('B', {
+        log: (l) => logs.push(l),
+        classify: (cb) => cb({ ok: true, patchActive: true, restorable: false, why: 'backup sha256 mismatch' }),
+    }));
+    assert.strictEqual(r.action, 'restore-unavailable');
+    const st = readState(w.statePath);
+    assert(st.failed && st.failed.boot === 'B' && st.failed.fails === 3 && st.failed.why === 'backup sha256 mismatch', JSON.stringify(st));
+    assert(st.fails === 3, 'the counter is kept, not cleared as for a stock binary');
+    assert(logs.some((l) => /^ERROR: the map patch is marked FAILED/.test(l) && /backup sha256 mismatch/.test(l)), logs.join('\n'));
+    const reason = failedReason(w.statePath);
+    assert(/crashed 3 times/.test(reason) && /by hand/.test(reason) && !/\u2014/.test(reason), reason);
+    assert.strictEqual(failedReason(tmpState()), '', 'no state: not failed');
+});
+
+test('marked failed: the watcher starts carplay no more after a crash, but still after a SIGKILL patchd did not send', async () => {
+    const w = makeWorld({ recmgr: true, restorable: false });
+    fs.writeFileSync(w.statePath, JSON.stringify({ fails: 2, arm: { boot: 'A', crashes: 1 } }));
+    const { step, watcher } = await bootUp(w, 'B');
+    assert.strictEqual(step.action, 'restore-unavailable');
+    assert.strictEqual(starts(w), 1, 'only carplay\'s own start');
+    w.carplayCrashes();
+    w.now.advance(5000);
+    const r = await tick(watcher);
+    assert.deepStrictEqual([r.action, r.restore], ['crash', 'restore-unavailable']);
+    for (let i = 0; i < 4; i++) { w.now.advance(61000); await tick(watcher); }
+    assert.strictEqual(starts(w), 1, 'no start of a carplay that crashes while patched and cannot be restored');
+    w.carplayStarts();   /* started by hand */
+    w.now.advance(5000);
+    await tick(watcher);
+    w.carplayEnds('2', '9');   /* a SIGKILL patchd did not send */
+    w.now.advance(5000);
+    assert.strictEqual((await tick(watcher)).action, 'killed');
+    w.now.advance(5000);
+    assert.strictEqual((await tick(watcher)).action, 'started', 'a kill the patch did not cause still restarts carplay');
+    assert.strictEqual(starts(w), 3);
+    assert(w.logs.some((l) => /killed while the map patch is marked failed/.test(l)), w.logs.join('\n'));
+    assert(readState(w.statePath).failed, 'still marked');
+});
+
+test('the failed mark clears once carplay is stock again, or a backup restores it, or carplay ran healthy', async () => {
+    /* Restored by hand: the next classify reads stock. */
+    const w = makeWorld({ restorable: false });
+    fs.writeFileSync(w.statePath, JSON.stringify({ fails: 2, arm: { boot: 'A', crashes: 1 } }));
+    assert.strictEqual((await startBoot(w.recovery('B'))).action, 'restore-unavailable');
+    assert(readState(w.statePath).failed);
+    w.patched = false;
+    assert.strictEqual((await startBoot(w.recovery('C'))).action, 'idle');
+    assert.strictEqual(readState(w.statePath).failed, null);
+    assert.strictEqual(readState(w.statePath).fails, 0);
+
+    /* The backup fixed by hand: the next boot step restores, the mark goes. */
+    const v = makeWorld({ restorable: false });
+    fs.writeFileSync(v.statePath, JSON.stringify({ fails: 2, arm: { boot: 'A', crashes: 1 } }));
+    await startBoot(v.recovery('B'));
+    v.restorable = true;
+    assert.strictEqual((await startBoot(v.recovery('C'))).action, 'restored');
+    assert.strictEqual(readState(v.statePath).failed, null);
+
+    /* A boot in which carplay ran healthy brings the counter below the
+     * threshold: no longer failed, and starts are allowed again. */
+    const u = makeWorld({ restorable: false });
+    fs.writeFileSync(u.statePath, JSON.stringify({ fails: 2, arm: { boot: 'A', crashes: 0, confirmed: true },
+        failed: { since: 'x', boot: 'A', fails: 2, why: '' } }));
+    assert.strictEqual((await startBoot(u.recovery('B'))).action, 'armed');
+    assert.strictEqual(readState(u.statePath).failed, null);
+
+    /* Our backup gone: nothing of ours, nothing failed. */
+    const n = makeWorld({ backup: false });
+    fs.writeFileSync(n.statePath, JSON.stringify({ fails: 3, arm: null, failed: { boot: 'A', fails: 3 } }));
+    assert.strictEqual((await startBoot(n.recovery('B'))).action, 'idle');
+    assert.strictEqual(readState(n.statePath).failed, null);
+});
+
+test('the patcher\'s status: self-start without a restorable backup is our patch, not stock', () => {
+    const head = 'target:    /usr/bin/carplay\nsize:      3600000\nsha256:    ab\n';
+    const tail = (ss) => 'known:     yes, modified build\nproven:    yes\nvariant:   PATCHED -> IC_HIGH\n' +
+        'selfstart: ' + ss + '\n';
+    assert.deepStrictEqual(classifyStatus(head + 'restorable: yes\n' + tail('SELF-START (CarPlay starts the cluster stream itself)')),
+        { ok: true, patchActive: true, restorable: true, why: '' });
+    assert.deepStrictEqual(classifyStatus(head + 'restorable: no (backup sha256 mismatch)\n' + tail('SELF-START (CarPlay starts the cluster stream itself)')),
+        { ok: true, patchActive: true, restorable: false, why: 'backup sha256 mismatch' });
+    assert.deepStrictEqual(classifyStatus(head + 'restorable: no\n' + tail('ORIGINAL (waits for NavController; stream never starts)')),
+        { ok: true, patchActive: false, restorable: false, why: '' }, 'stock');
+    assert.deepStrictEqual(classifyStatus(head + 'restorable: no (another build: x)\nknown:     NO - not found\n'),
+        { ok: true, patchActive: false, restorable: false, why: 'another build: x' }, 'a firmware update');
+    assert.deepStrictEqual(classifyStatus(''), { ok: false });
 });
 
 test('an unreadable carplay state at the threshold leaves the counter', async () => {
@@ -426,8 +519,9 @@ test('an unwritable state file restores a patch at its first crash, and does not
     try {
         const w = makeWorld({ recmgr: true, statePath: path.join(dir, 'state.json') });
         const { watcher } = await bootUp(w, 'A');
-        fs.chmodSync(dir, 0o500);
-        fs.chmodSync(path.join(dir, 'state.json'), 0o400);
+        /* A directory where the save writes its temp file: no write can
+         * succeed, for root too (permissions alone do not stop root). */
+        fs.mkdirSync(path.join(dir, 'state.json.tmp'));
         w.carplayCrashes();
         w.now.advance(5000);
         const r = await tick(watcher);
@@ -440,7 +534,7 @@ test('an unwritable state file restores a patch at its first crash, and does not
             await tick(watcher);
         }
         assert.strictEqual(starts(w), 1 + 3);
-    } finally { fs.chmodSync(dir, 0o700); cp.execFileSync('rm', ['-rf', dir]); }
+    } finally { cp.execFileSync('rm', ['-rf', dir]); }
 });
 
 test('recmgr loaded carplay: no start while patchd holds the lock, the system stops, or carplay is up again', async () => {
@@ -549,7 +643,7 @@ test('a save that fails leaves the previous state whole', () => {
         assert.strictEqual(fs.readFileSync(w.statePath, 'utf8'), before);
     } finally { unblockSave(w.statePath); }
     assert.strictEqual(w.recovery('B')._save({ fails: 2, arm: null }), true);
-    assert.deepStrictEqual(readState(w.statePath), { fails: 2, arm: null, starts: null, ended: null });
+    assert.deepStrictEqual(readState(w.statePath), { fails: 2, arm: null, starts: null, ended: null, failed: null });
     assert(!fs.existsSync(w.statePath + '.tmp'), 'no temporary file left');
 });
 
@@ -561,7 +655,7 @@ test('a folder that cannot be synced after the rename is a saved state', () => {
         const w = makeWorld({ statePath });
         assert.strictEqual(w.recovery('A')._save({ fails: 1, arm: null }), true);
         fs.chmodSync(dir, 0o700);
-        assert.deepStrictEqual(readState(statePath), { fails: 1, arm: null, starts: null, ended: null });
+        assert.deepStrictEqual(readState(statePath), { fails: 1, arm: null, starts: null, ended: null, failed: null });
     } finally { fs.chmodSync(dir, 0o700); cp.execFileSync('rm', ['-rf', dir]); }
 });
 
@@ -683,7 +777,7 @@ test('the boot unit orders itself before carplay, never blocks it, and is whitel
     assert(c.files.some((f) => f.path === 'shutdown_mark.sh') && c.files.some((f) => f.path === 'recmgr_list.js'));
 });
 
-test('remount lock: mutual exclusion and stale break', () => {
+test('remount lock: mutual exclusion; broken only when its holder is gone (or holds no pid and is old)', () => {
     const lockPath = path.join(os.tmpdir(), `woc-lock-${process.pid}.lock`);
     try { fs.unlinkSync(lockPath); } catch (e) {}
     process.env.WOC_REMOUNT_LOCK = lockPath;
@@ -696,10 +790,25 @@ test('remount lock: mutual exclusion and stale break', () => {
     lock.release();
     assert.strictEqual(lock.tryAcquire(), true, 'reacquire after release');
 
-    /* Age the lock past STALE_MS and confirm it is broken and retaken. */
+    /* An old lock whose holder still runs (this process) is kept, however
+     * old: a holder that works longer than expected is never cut short. */
     const old = Date.now() / 1000 - 10;
     fs.utimesSync(lockPath, old, old);
-    assert.strictEqual(lock.tryAcquire(), true, 'stale lock broken');
+    assert.strictEqual(lock.tryAcquire(), false, 'an old lock held by a live pid is not broken');
+    assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid), 'the holder keeps it');
+
+    /* A lock whose holder is gone is broken at once, whatever its age. */
+    const dead = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+    fs.writeFileSync(lockPath, dead.stdout + ' 2026-01-01T00:00:00.000Z\n');
+    assert.strictEqual(lock.tryAcquire(), true, 'a lock of a pid that is gone is broken and retaken');
+    assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid));
+    lock.release();
+
+    /* No pid in it: broken only once older than STALE_MS. */
+    fs.writeFileSync(lockPath, '');
+    assert.strictEqual(lock.tryAcquire(), false, 'a fresh lock with no pid yet is kept');
+    fs.utimesSync(lockPath, old, old);
+    assert.strictEqual(lock.tryAcquire(), true, 'an old lock with no pid is broken');
     lock.release();
     try { fs.unlinkSync(lockPath); } catch (e) {}
     delete process.env.WOC_REMOUNT_LOCK;
@@ -881,7 +990,7 @@ test('the boot step at the threshold restores a patched copy before carplay woul
         assert.strictEqual(sha(fs.readFileSync(b.tgt)), sha(fs.readFileSync(CARPLAY_BIN)), 'carplay starts the verified stock');
         assert(/\bro\b/.test(b.mounts), '/ is read-only again');
         assert(!fs.existsSync(b.tgt + '.woc-running'), 'nothing ran it: no link');
-        assert.deepStrictEqual(b.state, { fails: 0, arm: null, starts: null, ended: null });
+        assert.deepStrictEqual(b.state, { fails: 0, arm: null, starts: null, ended: null, failed: null });
     } finally { cp.execFileSync('rm', ['-rf', dir]); }
 });
 
@@ -902,7 +1011,7 @@ test('the boot step at the threshold restores what an older release patched wher
             assert(/boot check: restored/.test(b.r.stdout), f.name + ': ' + b.r.stdout);
             assert(fs.readFileSync(b.tgt).equals(f.original), f.name + ': carplay starts the original');
             assert(/\bro\b/.test(b.mounts), f.name + ': / is read-only again');
-            assert.deepStrictEqual(b.state, { fails: 0, arm: null, starts: null, ended: null });
+            assert.deepStrictEqual(b.state, { fails: 0, arm: null, starts: null, ended: null, failed: null });
         } finally { cp.execFileSync('rm', ['-rf', dir]); }
     });
 });

@@ -92,6 +92,17 @@ int main()
     const StreamHealth::Minute none = h.take_minute();
     ok("and starts over", none.losses == 0 && none.lost == 0 && none.corrupted == 0);
 
+    StreamHealth caps;
+    ok("no overflow: nothing logged or counted", caps.overflow(1000, "RTP fragment buffer (FU-A)", 0).empty());
+    ok("an overflow is logged with what and how many",
+       caps.overflow(1000, "RTP fragment buffer (FU-A)", 1) ==
+           "waze: the RTP fragment buffer (FU-A) overran its size cap (1 dropped); resynchronising at the next start");
+    caps.overflow(1001, "decoder's NAL/access unit buffer", 2);
+    ok("an overflow does not make the stream lost or give it a reason", !caps.lost() && caps.reason().empty());
+    const StreamHealth::Minute cm = caps.take_minute();
+    ok("the minute counts every buffer dropped", cm.overflows == 3 && cm.losses == 0);
+    ok("and starts over", caps.take_minute().overflows == 0);
+
     StreamHealth burst;
     unsigned logged = 0;
     for (int i = 0; i < 25; i++)

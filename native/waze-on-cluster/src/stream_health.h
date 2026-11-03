@@ -34,6 +34,7 @@ public:
 
     struct Minute {
         uint32_t losses = 0, lost = 0, corrupted = 0;
+        uint32_t overflows = 0;   /* buffers dropped at their size cap */
     };
 
     /* A sequence gap at now_ms (monotonic) and wall_ms (since the epoch):
@@ -52,6 +53,10 @@ public:
     /* The decoder gave up its sequence (on) or started a new one. The line
      * to log for a new one after a wait, or empty. */
     std::string waiting(int64_t now_ms, int64_t wall_ms, bool on);
+    /* `count` buffers of `what` (the RTP fragment buffer, the decoder's
+     * framing) dropped at their size cap; the stream resynchronises at the
+     * next start. Counted in the minute; the line to log, or empty. */
+    std::string overflow(int64_t now_ms, const char *what, uint32_t count);
 
     /* The keyframe wait (keyframe_wait.h) as sampled at wall_ms: from
      * kLostMs the stream is lost, since wall_ms - keyframe_wait_ms. */
