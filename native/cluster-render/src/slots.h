@@ -29,7 +29,10 @@
  *   until the display shows it. A contending target whose slot shows the
  *   stock HMI's content and that takes over from the stock HMI
  *   (TargetSpec::take_over_stock) unmaps that content as the HMI
- *   (Port::take_over), at most once per kTakeOverMs[] step: 1.5 s apart
+ *   (Port::take_over), only when it is one of the target's
+ *   take_over_contents (the HMI's map; never its speech dialog or any
+ *   other stock content, which the target stays parked behind), at most
+ *   once per kTakeOverMs[] step: 1.5 s apart
  *   four times, then 10 s, then every 30 s, the count starting over once
  *   the target has been shown kTakeOverSettleMs, or when it is released.
  *   The KOMBI shows ours when the HMI's map is not mapped again first, a
@@ -119,6 +122,16 @@ struct TargetSpec {
     /* Parked behind the stock HMI's content while a layer contends: unmap
      * that content as the HMI (SlotManager, Port::take_over). */
     bool take_over_stock = false;
+    /* The only stock contents a take-over may unmap (the HMI's map in Map
+     * view, 0x01000300, as <target>_take_over_contents defaults to for the
+     * map). Any other stock content (the speech dialog 0x01000400, a route
+     * preview, the assisted-driving view) is left alone and the target
+     * stays parked behind it. Empty: no take-over. */
+    std::vector<uint64_t> take_over_contents{0x01000300};
+    /* A take-over sends, back to back: an unmap of our parked map, the
+     * unmap of the stock content as the HMI, and our map again, our fetch
+     * kept (Port::take_over). Off: the stock unmap alone. */
+    bool take_over_remap = false;
 };
 
 /* Who the display reports in a slot. */
@@ -159,7 +172,10 @@ public:
      * last requested. */
     virtual bool confirmed(const TargetSpec &) const { return true; }
     /* Unmap content of the stock HMI shown in t's slot, as the HMI, so the
-     * display shows t's parked scene. No answer is awaited. */
+     * display shows t's parked scene. No answer is awaited. With
+     * t.take_over_remap, t's parked scene is unmapped first and mapped
+     * again right after, its fetch kept; a refused remap is a loss
+     * (SlotManager::on_lost). */
     virtual void take_over(const TargetSpec &t, uint64_t content) = 0;
     /* Ask for the slot table (SlotManager::on_slots). */
     virtual void refresh_slots() = 0;
@@ -327,6 +343,9 @@ private:
          * may go. */
         int takeovers = 0;
         int64_t takeover_ms = 0, takeover_sent_ms = -1000000;
+        /* The last stock content left alone (not in take_over_contents), so
+         * it is logged once; 0: none. */
+        uint64_t takeover_skipped = 0;
         /* Acquiring: the table has reported the slot disabled since the
          * request, or did when it was sent. */
         bool lock_seen = false;

@@ -86,11 +86,12 @@ struct Rig {
     SlotManager m{&port, &scenes};
     std::vector<std::string> evidence;
     int64_t now = 10000;
-    Rig()
+    explicit Rig(bool remap = false)
     {
         TargetSpec a;
         a.name = "map"; a.slot = 0x100; a.scene_id = kMap; a.width = 1088; a.height = 480;
         a.take_over_stock = true;
+        a.take_over_remap = remap;
         TargetSpec b;
         b.name = "panel"; b.slot = 0x203; b.scene_id = kPanel; b.width = 1920; b.height = 720; b.content_class = 3;
         m.add(a);
@@ -210,6 +211,96 @@ static void take_over()
     h.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", h.now);
     h.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", h.now);
     ok("unmap replies, more than were sent: nothing breaks", h.m.status(0).state == TargetState::Idle);
+}
+
+/* take_over_remap: our parked map unmapped, the stock map unmapped as the
+ * HMI, ours mapped again, back to back, the fetch kept; the UNMAPPED of our
+ * own unmap is no loss; a refused remap is a loss, retried on the ladder. */
+static void take_over_remap()
+{
+    Rig r(true);
+    r.port.set_hmi_client_handle(1);
+    r.map_asked(true);
+    r.table(1, 3);
+    r.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_MAPPED_INVISIBLE, r.now);
+    calls.clear();
+    r.tick();
+    ok("remap: unmap ours, unmap the stock map as client 1, map ours again; no fetch",
+       calls_are("unmap 0x10004f0; unmap 0x1000300 as 0x1; map 0x10004f0 class 0 slot 0x100; slots?"));
+    r.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", r.now);
+    r.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", r.now);
+    r.port.on_map_status(kMap, 3, dcsm::E_MAP_STATUS_UNMAPPED, r.now);
+    r.port.on_reply(dcsm::kReqMapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", r.now);
+    ok("the UNMAPPED of our own unmap: not lost, still parked, nothing sent",
+       r.m.status(0).state == TargetState::Parked && calls_are(""));
+    r.table(3, 1);
+    r.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_MAPPED_FOREGROUND, r.now);
+    ok("ours mapped again on top: shown", r.m.status(0).state == TargetState::Shown);
+    r.port.on_map_status(kMap, 1, dcsm::E_MAP_STATUS_UNMAPPED, r.now);
+    ok("an UNMAPPED once shown is a loss again", r.m.status(0).state == TargetState::Waiting &&
+                                                 calls_are("unfetch 0x10004f0; slots?"));
+
+    Rig p(true);
+    p.map_asked(true);
+    p.table(1, 3);
+    p.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_MAPPED_INVISIBLE, p.now);
+    p.tick();
+    p.port.on_map_status(kMap, 3, dcsm::E_MAP_STATUS_UNMAPPED, p.now);
+    p.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_MAPPED_INVISIBLE, p.now);
+    calls.clear();
+    p.tick();
+    ok("the HMI's map back first, ours parked again: the next take-over waits its 1.5 s",
+       p.m.status(0).state == TargetState::Parked && calls_are(""));
+
+    Rig f(true);
+    f.map_asked(true);
+    f.table(1, 3);
+    f.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_MAPPED_INVISIBLE, f.now);
+    f.tick();
+    f.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", f.now);
+    f.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", f.now);
+    f.port.on_map_status(kMap, 3, dcsm::E_MAP_STATUS_UNMAPPED, f.now);
+    calls.clear();
+    f.port.on_reply(dcsm::kReqMapContent, true, dcsm::E_DCSM_PRIOTOOLOW, "E_DCSM_PRIOTOOLOW", f.now);
+    ok("the remap refused: lost, unfetched with no unmap, waiting on the ladder",
+       calls_are("unfetch 0x10004f0") && f.m.status(0).state == TargetState::Waiting &&
+           f.m.status(0).retry_ms > f.now && f.m.status(0).reason.find("remap") != std::string::npos);
+
+    /* The remap accepted, then UNMAPPED again (the HMI's map won and ours
+     * was dropped, not parked): a loss, not swallowed, so no take-over is
+     * sent later with nothing of ours behind it. */
+    Rig d(true);
+    d.port.set_hmi_client_handle(1);
+    d.map_asked(true);
+    d.table(1, 3);
+    d.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_MAPPED_INVISIBLE, d.now);
+    d.tick();
+    d.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", d.now);
+    d.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", d.now);
+    d.port.on_map_status(kMap, 3, dcsm::E_MAP_STATUS_UNMAPPED, d.now);
+    d.port.on_reply(dcsm::kReqMapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", d.now);
+    calls.clear();
+    d.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_UNMAPPED, d.now);
+    ok("the remap accepted, then a second UNMAPPED: lost, unfetched with no unmap, waiting",
+       calls_are("unfetch 0x10004f0") && d.m.status(0).state == TargetState::Waiting &&
+           d.m.status(0).reason.find("remap unmapped") != std::string::npos);
+    bool stock_unmapped = false;
+    for (int k = 0; k < 4000; k++) {   /* 40 s */
+        d.tick();
+        for (auto &c : calls)
+            if (c.find(" as 0x1") != std::string::npos)
+                stock_unmapped = true;
+        calls.clear();
+    }
+    ok("lost after the remap: no take-over unmap with nothing of ours mapped", !stock_unmapped);
+
+    Rig n;
+    n.map_asked(true);
+    n.table(1, 3);
+    n.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_MAPPED_INVISIBLE, n.now);
+    calls.clear();
+    n.tick();
+    ok("take_over_remap off (the default): the stock unmap alone", calls_are("unmap 0x1000300 as 0x1; slots?"));
 }
 
 static void basics()
@@ -487,6 +578,7 @@ int main()
     basics();
     parked();
     take_over();
+    take_over_remap();
     diagnostics();
     confirmation();
     fresh_fetch_failed();

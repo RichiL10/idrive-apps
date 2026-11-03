@@ -49,15 +49,22 @@ void define_keys(cld::Config *cfg)
     cfg->define("map_size", "1088x480");
     cfg->define("map_linger_ms", "0");
     cfg->define("map_take_over_stock", "1");
+    cfg->define("map_take_over_contents", "0x01000300");
+    cfg->define("map_take_over_remap", "0");
     cfg->define("panel_slot", "0x203");
     cfg->define("panel_content_class", "0");
     cfg->define("panel_scene_id", "0x01000400");
     cfg->define("panel_size", "1920x720");
     cfg->define("panel_linger_ms", "3000");
     cfg->define("panel_take_over_stock", "0");
+    cfg->define("panel_take_over_contents", "");
+    cfg->define("panel_take_over_remap", "0");
     cfg->define("hud_linger_ms", "3000");
     cfg->define("hud_take_over_stock", "0");
+    cfg->define("hud_take_over_contents", "");
+    cfg->define("hud_take_over_remap", "0");
     cfg->define("dcsm_hmi_client_handle", "1");
+    cfg->define("dcsm_liveness_ms", "3000");
     /* iDrive 8: a target's slot is a DCSM category, its content the content
      * offered there (README.md "iDrive 8"). */
     cfg->define("id8_targets", "map,hud,widget");
@@ -81,7 +88,7 @@ void define_keys(cld::Config *cfg)
     cfg->define("id8_widget_order", "50");
     cfg->define("id8_widget_preview", "");
     cfg->define("fade_ms", "250");
-    cfg->define("upload_kb_per_s", "5500");
+    cfg->define("upload_kb_per_s", "4500");
     cfg->define("upload_floor_kb_per_s", "2000");
     cfg->define("upload_step_kb_per_s", "500");
     cfg->define("upload_burst_ms", "250");
@@ -130,6 +137,35 @@ bool load_targets(const cld::Config &cfg, int generation, std::vector<TargetSpec
         } else {
             t.content_class = (uint32_t)cfg.num((p + "content_class").c_str());
             t.take_over_stock = cfg.num((p + "take_over_stock").c_str()) != 0;
+            t.take_over_remap = cfg.num((p + "take_over_remap").c_str()) != 0;
+            /* The stock contents a take-over may unmap; empty: none. */
+            t.take_over_contents.clear();
+            std::stringstream cs(cfg.str((p + "take_over_contents").c_str()));
+            std::string id;
+            while (std::getline(cs, id, ',')) {
+                const size_t a = id.find_first_not_of(" \t"), b = id.find_last_not_of(" \t");
+                if (a == std::string::npos)
+                    continue;
+                id = id.substr(a, b - a + 1);
+                char *end = nullptr;
+                errno = 0;
+                const uint64_t v = id[0] == '-' || id[0] == '+' ? 0 : std::strtoull(id.c_str(), &end, 0);
+                if (!v || !end || *end || errno == ERANGE) {
+                    *err = "target " + name + ": " + p + "take_over_contents must be scene ids separated by commas, not \"" +
+                           id + "\"";
+                    return false;
+                }
+                /* Only the stock HMI's contents (0x0100xxxx), never ours. */
+                bool own = false;
+                for (uint64_t a : allowed)
+                    own = own || a == v;
+                if ((v >> 16) != 0x0100 || own) {
+                    *err = "target " + name + ": " + p + "take_over_contents: \"" + id +
+                           "\" is not a stock HMI content (0x0100xxxx, not one of scene_ids_allowed)";
+                    return false;
+                }
+                t.take_over_contents.push_back(v);
+            }
         }
         if (!cfg.size((p + "size").c_str(), &t.width, &t.height) || t.width < 16 || t.height < 16 ||
             t.width > 4096 || t.height > 4096) {

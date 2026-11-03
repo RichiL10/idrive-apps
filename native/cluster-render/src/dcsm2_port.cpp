@@ -113,11 +113,39 @@ void Dcsm2Port::release(const TargetSpec &t)
     contents_.erase(it);
 }
 
-void Dcsm2Port::take_over(const TargetSpec &, uint64_t content)
+/* With take_over_remap, our parked map is unmapped, the stock content
+ * unmapped as the HMI and ours mapped again, back to back on the one
+ * connection, so our map reaches the KOMBI before the HMI maps its own
+ * again. The fetch stays: the scene is not sent again. Until the KOMBI
+ * answers, the content is Mapping: the UNMAPPED of our own unmap is not a
+ * loss, and a refused map (or the fetch removed) is (refuse). */
+void Dcsm2Port::take_over(const TargetSpec &t, uint64_t content)
 {
+    auto it = contents_.find(t.scene_id);
+    Content *ours = t.take_over_remap && it != contents_.end() && it->second.phase == Phase::Parked &&
+                            it->second.fetched && it->second.map_asked
+                        ? &it->second
+                        : nullptr;
+    if (ours) {
+        ours->phase = Phase::Mapping;
+        ours->remap = true;
+        ours->remap_unmaps = 1;   /* the UNMAPPED of the unmap below; any further one is a loss */
+        if (up_)
+            unmaps_.push_back(Unmap{t.scene_id, 0});
+        wire_->unmap(t.scene_id);
+    }
     if (up_)
         unmaps_.push_back(Unmap{content, hmi_handle_});
     wire_->unmap_as(hmi_handle_, content);
+    if (ours) {
+        if (up_)
+            maps_.push_back(t.scene_id);
+        wire_->map(t.scene_id, ours->spec.content_class, ours->spec.slot);
+        log_info("dcsm: take-over with remap: content 0x%llx unmapped, 0x%llx unmapped as client 0x%llx, 0x%llx "
+                 "mapped again into slot 0x%llx",
+                 (unsigned long long)t.scene_id, (unsigned long long)content, (unsigned long long)hmi_handle_,
+                 (unsigned long long)t.scene_id, (unsigned long long)ours->spec.slot);
+    }
 }
 
 uint64_t Dcsm2Port::take(std::deque<uint64_t> *q)
@@ -139,8 +167,18 @@ void Dcsm2Port::settle(uint64_t scene, Pending &p)
 
 void Dcsm2Port::refuse(uint64_t scene, Content &c, Refusal r, const std::string &why, int64_t now_ms)
 {
-    c.phase = Phase::Refused;
     c.map_asked = false;
+    if (c.remap) {
+        /* A take-over's remap refused: the target was parked, so for the
+         * slot manager this is a loss, retried on its ladder. */
+        c.remap = false;
+        c.remap_unmaps = 0;
+        c.phase = Phase::Lost;
+        if (manager_)
+            manager_->on_lost(scene, "remap " + why, now_ms);
+        return;
+    }
+    c.phase = Phase::Refused;
     if (manager_)
         manager_->on_refused(scene, r, why, now_ms);
 }
@@ -282,6 +320,27 @@ void Dcsm2Port::on_map_status(uint64_t scene, uint32_t initial, uint32_t final_,
         return;
     Content &c = it->second;
     const bool showing = final_ == dcsm::E_MAP_STATUS_MAPPED_FOREGROUND || final_ == dcsm::E_MAP_STATUS_MAPPED_BACKGROUND;
+    if (c.remap && final_ == dcsm::E_MAP_STATUS_UNMAPPED) {
+        if (c.remap_unmaps > 0) {
+            c.remap_unmaps--;
+            return;   /* our own unmap of a take-over's remap: the map follows */
+        }
+        /* A further UNMAPPED while the remap is out: the KOMBI dropped our
+         * map again (the HMI's map won). Not answered by anything else, so
+         * a loss for the slot manager, retried on its ladder. */
+        c.remap = false;
+        if (c.phase == Phase::Mapping) {
+            c.phase = Phase::Lost;
+            c.map_asked = false;
+            if (manager_)
+                manager_->on_lost(scene, "remap unmapped", now_ms);
+        }
+        return;
+    }
+    if (final_ != dcsm::E_MAP_STATUS_UNMAPPED) {
+        c.remap = false;
+        c.remap_unmaps = 0;
+    }
     if (showing && (c.phase == Phase::Mapping || c.phase == Phase::Parked)) {
         c.phase = Phase::Mapped;
         if (manager_)

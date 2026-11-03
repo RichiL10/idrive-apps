@@ -383,8 +383,9 @@ void SlotManager::park(int i, int64_t now_ms)
 
 /* Parked behind the stock HMI's content while a layer contends: that
  * content is unmapped as the HMI, so the display shows ours (and the HMI's,
- * mapped again, parks behind it). Only content of the stock HMI, only in the
- * target's own slot, and spaced by kTakeOverMs[]. */
+ * mapped again, parks behind it). Only content of the stock HMI that the
+ * target lists in take_over_contents, only in the target's own slot, and
+ * spaced by kTakeOverMs[]. */
 void SlotManager::take_over(int i, int64_t now_ms)
 {
     Target &t = t_[i];
@@ -394,6 +395,21 @@ void SlotManager::take_over(int i, int64_t now_ms)
     const SlotInfo *row = holder_row(i);
     if (!row || holder_of(row->content) != Holder::Stock)
         return;
+    /* Only the stock contents the target lists (the HMI's map): the speech
+     * dialog, a route preview or the assisted-driving view are left alone,
+     * the target parked behind them. Logged once per content. */
+    const std::vector<uint64_t> &allowed = spec.take_over_contents;
+    if (std::find(allowed.begin(), allowed.end(), row->content) == allowed.end()) {
+        if (t.takeover_skipped != row->content) {
+            t.takeover_skipped = row->content;
+            log_info("target %s: parked behind the stock HMI's 0x%llx in slot 0x%llx, not in %s_take_over_contents: "
+                     "left alone",
+                     spec.name.c_str(), (unsigned long long)row->content, (unsigned long long)spec.slot,
+                     spec.name.c_str());
+        }
+        return;
+    }
+    t.takeover_skipped = 0;
     const int64_t gap = kTakeOverMs[std::min(t.takeovers, kTakeOverSteps - 1)];
     t.takeovers++;
     t.takeover_sent_ms = now_ms;
