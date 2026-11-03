@@ -233,6 +233,7 @@ int serve(const Config &cfg)
     std::string last_detail;
     AltScreen::State alt_state = AltScreen::Unknown;
     int64_t alt_read_ms = 0;
+    int exit_code = 0;
     for (;;) {
         struct pollfd p[5] = {{sig_fd, POLLIN, 0}, {control.listen_fd(), POLLIN, 0}, {control.owner_fd(), POLLIN, 0},
                               {feed.fd(), (short)(POLLIN | (feed.wants_write() ? POLLOUT : 0)), 0},
@@ -242,10 +243,19 @@ int serve(const Config &cfg)
          * retries its connection, a source that is down is retried and the
          * status files stay current. */
         int n = poll(p, 5, 250);
-        if (n < 0 && errno != EINTR)
+        if (n < 0 && errno != EINTR) {
+            /* Not a stop: a failure, so systemd restarts the service
+             * (Restart=on-failure). */
+            log_error("poll: %s; exiting", strerror(errno));
+            exit_code = 1;
             break;
+        }
         if (p[0].revents & POLLIN)
             break;
+        if (producer.device_fatal()) {
+            exit_code = 1;   /* logged by the producer; systemd restarts the service */
+            break;
+        }
         if (control.owner_fd() >= 0 && (p[2].revents & (POLLIN | POLLHUP | POLLERR)))
             control.on_owner_readable();
         if (p[1].revents & POLLIN)
@@ -310,8 +320,8 @@ int serve(const Config &cfg)
             last_status_write = now;
         }
     }
-    log_info("stopped");
-    return 0;
+    log_info("%s", exit_code ? "stopped on a failure" : "stopped");
+    return exit_code;
 }
 
 int run(const Config &cfg, const char *target)

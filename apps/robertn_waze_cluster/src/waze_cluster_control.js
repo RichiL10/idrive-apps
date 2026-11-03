@@ -18,7 +18,9 @@
  *
  *   Patch daemon socket (PATCH_PATH; root helper, group tm_oap_app)
  *     app    -> daemon  {"cmd":"status"}
- *                       {"cmd":"apply","panel":"high","mode":"avb"}
+ *                       {"cmd":"apply","panel":"high","mode":"avb"[,"unproven":true]}
+ *                        unproven only after the user confirmed patching a
+ *                        build the daemon reports as unproven
  *                       {"cmd":"revert"}
  *                       {"cmd":"reboot"}  activate a deferred patch with a
  *                        normal reboot (only when carplay is "deferred")
@@ -31,6 +33,9 @@
  *                       only at the next head-unit start (a restart is needed)
  *                       pending "apply" | "revert": which change waits for it
  *                       conflict: why the install left carplay as it was
+ *                       unproven true: a carplay build outside the patcher's
+ *                       proven list, not patched yet; Enable map asks the
+ *                       user to confirm before it sends unproven:true
  *                       {"ev":"reboot-reply","ok":true|false,"reason"}
  *                       {"ev":"log","line"}  the backlog on connect, then each new line
  *
@@ -66,6 +71,14 @@ const SIZE = '1088x480';
 /* The safe area Enable map writes: where the phone keeps its guidance UI,
  * inside the part of the map the gauges leave visible. */
 const SAFE = '504x368+286+72';
+
+/* The Enable button's label, and while it asks to confirm patching a
+ * CarPlay build outside the patcher's proven list, for CONFIRM_MS. */
+const ENABLE_TEXT = 'Enable map';
+const CONFIRM_TEXT = 'Confirm: patch untested CarPlay';
+const CONFIRM_MS = 15000;
+const CONFIRM_STATUS = 'Untested CarPlay build: this patch has never run on this firmware. ' +
+    'Press Confirm to patch it anyway, or wait to cancel';
 
 /* One newline-delimited-JSON stream socket, reconnecting while open.
  * link: 'down' | 'up' | 'absent' (ENOENT) | 'refused' (ECONNREFUSED) | 'failed'.
@@ -194,6 +207,9 @@ class WazeClusterControl extends EventEmitter {
         this._log = o.log || { info() {}, warn() {} };
         this._pendingPath = o.pendingPath || PENDING_PATH;
         this._lastPatchCmd = 'apply';
+        this._confirmMs = o.confirmMs || CONFIRM_MS;
+        this._confirmUntil = 0;           /* Enable map asks to confirm an untested build until then */
+        this._confirmTimer = null;
         this._restartRequested = false;   /* a reboot was asked for; waiting for the unit to restart */
         this.captureState = { state: 'unavailable' };
         this.renderStatus = null;   /* the render tool's last status while connected */
@@ -229,6 +245,7 @@ class WazeClusterControl extends EventEmitter {
 
     /* Close both; the tools keep running. */
     close() {
+        this._cancelConfirm();
         this.render.close();
         this.patch.close();
         this.renderStatus = null;
@@ -245,10 +262,52 @@ class WazeClusterControl extends EventEmitter {
     }
 
     /* ---- controls ---- */
+    /* On a CarPlay build outside the patcher's proven list (status
+     * "unproven"), the first press only asks for confirmation: the button
+     * reads CONFIRM_TEXT and the status line says the build is untested,
+     * for CONFIRM_MS. Only a press while it asks sends unproven:true. */
     enableMap() {
+        if (this.needsConfirm() && !this.confirming()) {
+            this._confirmUntil = Date.now() + this._confirmMs;
+            clearTimeout(this._confirmTimer);
+            this._confirmTimer = setTimeout(() => {
+                this._confirmTimer = null;
+                this._confirmUntil = 0;
+                this.emit('change');
+            }, this._confirmMs);
+            this.emit('change');
+            return;
+        }
+        const confirmed = this.confirming();
+        this._cancelConfirm();
         this._lastPatchCmd = 'apply';
         /* The stock media-bus sink: the capture path the render joins. */
-        this.patch.send({ cmd: 'apply', panel: 'high', mode: 'avb' });
+        const cmd = { cmd: 'apply', panel: 'high', mode: 'avb' };
+        if (confirmed) {
+            cmd.unproven = true;
+        }
+        this.patch.send(cmd);
+    }
+
+    /* The daemon reports a build outside the proven list, not patched yet. */
+    needsConfirm() {
+        const ps = this.patchStatus;
+        return !!(ps && ps.unproven === true);
+    }
+
+    /* The Enable button is asking to confirm an untested build. */
+    confirming() {
+        return this._confirmUntil > Date.now() && this.needsConfirm();
+    }
+
+    enableButtonText() {
+        return this.confirming() ? CONFIRM_TEXT : ENABLE_TEXT;
+    }
+
+    _cancelConfirm() {
+        clearTimeout(this._confirmTimer);
+        this._confirmTimer = null;
+        this._confirmUntil = 0;
     }
 
     disableMap() {
@@ -362,6 +421,9 @@ class WazeClusterControl extends EventEmitter {
         if (this._restartRequested) {
             return 'Restarting head unit…';
         }
+        if (this.confirming() && this.canEnable()) {
+            return CONFIRM_STATUS;
+        }
         const ps = this.patchStatus;
         const state = ps && ps.state;
         if (state === 'busy') {
@@ -463,5 +525,5 @@ class WazeClusterControl extends EventEmitter {
 module.exports = {
     WazeClusterControl, LineSocket,
     RENDER_PATH, PATCH_PATH, PENDING_PATH, MAX_LINES,
-    SIZE, SAFE
+    SIZE, SAFE, ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS
 };

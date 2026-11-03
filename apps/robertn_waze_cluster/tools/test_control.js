@@ -22,7 +22,7 @@
  */
 const assert = require('assert');
 const fs = require('fs');
-const { WazeClusterControl, SIZE, SAFE } = require('../src/waze_cluster_control.js');
+const { WazeClusterControl, SIZE, SAFE, ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS } = require('../src/waze_cluster_control.js');
 const { FakeRender, FakePatch, RENDER_PAGE, RENDER_FPS } = require('./fakes.js');
 
 /* short: macOS limits a socket path to 104 bytes */
@@ -412,6 +412,61 @@ test('reconnect does not duplicate the backlog', async (render, patch) => {
     const after = c.rows().filter((r) => r === 'patch: boot line').length;
     assert.strictEqual(after, 1, 'the resent backlog is not duplicated');
     c.close();
+});
+
+test('an untested CarPlay build: Enable map asks to confirm, only the confirmed press sends unproven', async (render, patch) => {
+    patch.unproven = true;
+    patch.conflict = 'untested carplay build';
+    const c = control();
+    c.open();
+    await until('original', () => c.connectedPatch() && c.patchStatus && c.patchStatus.unproven === true);
+    assert.strictEqual(c.enableButtonText(), ENABLE_TEXT);
+    assert.strictEqual(c.canEnable(), true);
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT);
+    assert.strictEqual(c.statusText(), CONFIRM_STATUS);
+    await sleep(50);
+    assert.strictEqual(patch.count('apply'), 0, 'the first press sends nothing');
+    c.enableMap();
+    await until('apply sent', () => patch.count('apply') === 1);
+    assert.deepStrictEqual(patch.received.filter((m) => m.cmd === 'apply'), [{ cmd: 'apply', panel: 'high', mode: 'avb', unproven: true }]);
+    assert.strictEqual(c.enableButtonText(), ENABLE_TEXT);
+    await until('patched', () => c.patchStatus && c.patchStatus.state === 'patched');
+    assert.strictEqual(c.needsConfirm(), false);
+    c.close();
+});
+
+test('an untested CarPlay build: the confirm step lapses, and a proven build never asks', async (render, patch) => {
+    patch.unproven = true;
+    const c = new WazeClusterControl({ renderPath: RSOCK, patchPath: PSOCK, pendingPath: PENDING, retryMs: 100, confirmMs: 100 });
+    c.open();
+    await until('unproven', () => c.connectedPatch() && c.needsConfirm());
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT);
+    await until('lapsed', () => c.enableButtonText() === ENABLE_TEXT);
+    assert.notStrictEqual(c.statusText(), CONFIRM_STATUS);
+    assert.strictEqual(patch.count('apply'), 0, 'a lapsed confirm sends nothing');
+    /* the next press asks again */
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT);
+    c.close();
+    assert.strictEqual(c.enableButtonText(), ENABLE_TEXT, 'closing the page drops the confirm step');
+
+    patch.unproven = false;
+    const d = control();
+    d.open();
+    await until('original', () => d.connectedPatch() && d.patchStatus);
+    d.enableMap();
+    await until('apply sent', () => patch.count('apply') === 1);
+    assert.deepStrictEqual(patch.received.filter((m) => m.cmd === 'apply'), [{ cmd: 'apply', panel: 'high', mode: 'avb' }]);
+    d.close();
+});
+
+test('the confirm texts carry no em dash and no emoji', async () => {
+    [ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS].forEach((t) => {
+        assert(!/[\u2014\u2013]/.test(t), `dash in ${t}`);
+        assert(!/[\u2600-\u27BF\u2B00-\u2BFF\uFE0F]|[\uD83C-\uD83E][\uDC00-\uDFFF]/.test(t), `emoji in ${t}`);
+    });
 });
 
 async function main() {

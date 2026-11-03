@@ -9,10 +9,11 @@
  *
  * The lock is a file created with O_EXCL in the socket directory (tmpfs,
  * cleared each boot). A lock older than STALE_MS is taken as abandoned by a
- * killed holder and broken. patchd (user-driven) waits briefly then proceeds
- * regardless so a stuck lock never blocks the user; recovery (automatic)
- * yields: its restore reports a failure and keeps the counter, so the next boot
- * retries.
+ * killed holder and broken. Nobody writes without it: patchd (user-driven)
+ * waits up to 15 s and then refuses the operation, nothing changed, so the
+ * user retries once the holder is done (a stuck lock is broken after
+ * STALE_MS); recovery (automatic) yields: its restore reports a failure and
+ * keeps the counter, so the next boot retries.
  *
  * inUse(file) is whether a process runs file (a /proc/<pid>/exe is its
  * inode): such a file, once replaced, has to stay linked for / to go
