@@ -278,11 +278,12 @@ void Client::onMessage(const std::shared_ptr<vsomeip::message> &m) {
 }
 
 // Sends heartbeat(clientID, counter, CLOCK_MONOTONIC ns) while Dcsm2 is
-// available, the counter counting up from 0, as HmiMain3D does.
+// available and heartbeatGate (when set) allows, the counter counting up
+// from 0, as HmiMain3D does.
 void Client::heartbeatLoop() {
     uint32_t counter = 0;
     while (running_) {
-        if (available_) {
+        if (available_ && (!heartbeatGate || heartbeatGate())) {
             bool request = false;
             if (heartbeatMode_ == HeartbeatMode::kRequest) {
                 std::lock_guard<std::mutex> l(hbMutex_);

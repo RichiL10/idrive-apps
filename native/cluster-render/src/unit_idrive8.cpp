@@ -251,6 +251,10 @@ int start(const cld::Config &cfg, char **)
                  (unsigned long long)t.slot, (unsigned long long)t.content, (unsigned long long)t.scene_id, t.width,
                  t.height, t.linger_ms);
 
+    /* A poll() that fails is not a stop: the offers are stopped as for one,
+     * then the service leaves with 1 so systemd (Restart=on-failure) starts
+     * it again. */
+    int rc = 0;
     std::vector<pollfd> fds;
     for (;;) {
         fds.clear();
@@ -258,8 +262,11 @@ int start(const cld::Config &cfg, char **)
         const size_t first = service.poll_fds(&fds);
         const int timeout = service.timeout_ms(cld::now_ms());
         const int n = poll(fds.data(), fds.size(), timeout < 0 ? kDispatchMs : std::min(timeout, kDispatchMs));
-        if (n < 0 && errno != EINTR)
+        if (n < 0 && errno != EINTR) {
+            log_error("poll: %s; leaving for systemd to start the service again", strerror(errno));
+            rc = 1;
             break;
+        }
         if (fds[0].revents & POLLIN)
             break;
         const int64_t now = cld::now_ms();
@@ -277,8 +284,8 @@ int start(const cld::Config &cfg, char **)
         port.dispatch(events.now);
     }
     framework.disconnect();
-    log_info("stopped");
-    _exit(0);
+    log_info(rc ? "stopped after an error" : "stopped");
+    _exit(rc);
 }
 
 }  // namespace crs

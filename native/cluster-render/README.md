@@ -134,6 +134,20 @@ cluster is offered, and what differs is in "iDrive 8".
     apart. The count starts over once the target has been shown for 10 s,
     and when it is released because nothing wants it; a target shown and
     parked again sooner keeps backing off.
+  - Only the stock contents listed in `<target>_take_over_contents`
+    (the map's default: `0x01000300`, the HMI's map in Map view). Any
+    other stock content shown in the slot, such as the speech dialog
+    (`0x01000400`), a route preview or the assisted-driving view, is left
+    alone: the target stays parked behind it, logged once per content, and
+    is shown when that content goes. An empty list is no take-over.
+  - `<target>_take_over_remap` (off by default, CAR-ONLY): each take-over
+    sends, back to back on the one connection, an unmap of our parked map,
+    the unmap of the stock content as the HMI, and our map again. The fetch
+    stays, so the scene is not sent again. The UNMAPPED of our own unmap is
+    not a loss; a refused remap (or the fetch removed meanwhile) is, and
+    retries on the ladder. The aim is our map reaching the KOMBI before the
+    HMI maps its own again; whether it wins the race more often is not
+    verified on the car.
   - Never content of anything other than the stock HMI, never without a
     contending layer, never in any other slot. Each one is logged with
     what was unmapped, and so is the KOMBI's reply. Unmap replies are
@@ -225,9 +239,11 @@ cluster is offered, and what differs is in "iDrive 8".
 ## Upload budget
 
 Every layer of every client writes within one budget (`src/governor.h`,
-`kit/upload_pacer.h`). Its ceiling, `upload_kb_per_s`, is 5500 KB/s: on the
+`kit/upload_pacer.h`). Its ceiling, `upload_kb_per_s`, is 4500 KB/s: on the
 car the cluster flashed black at 8000 KB/s, and once removed a shown map
-after a minute averaging 5774 KB/s. The cap follows what the link shows while writes go (64 KB
+after a minute averaging 5774 KB/s, under 5 % above the old 5500 ceiling.
+iDrive 8 reads the same key, so its ceiling is 4500 KB/s too (5500 in
+`local_conf` restores the old one there). The cap follows what the link shows while writes go (64 KB
 or more written within the last second, whether or not the flush went);
 evidence at other times is logged, not counted:
 
@@ -250,7 +266,7 @@ evidence at other times is logged, not counted:
   one not answered is arbitration, not evidence.
 - The cap steps back up 500 KB/s after each minute of healthy upload (at
   least 64 KB a second written, nothing in the window), to the ceiling
-  `upload_kb_per_s` (5500). Idle time neither counts nor resets that minute.
+  `upload_kb_per_s` (4500). Idle time neither counts nor resets that minute.
 - A step down within a minute of a step up doubles the minute (up to
   10 min); 10 min without a step down restores it.
 - A removal that steps the cap down, or comes at the floor, holds the cap
@@ -264,7 +280,7 @@ comes back when the budget allows, and only the newest frame waits.
 
 The cap and why it is what it is are in the status
 (`cluster-render status`, `/run/cluster-render/status.txt`: `upload: cap
-5000 KB/s (ceiling 5500, floor 2000): lowered from 5500 KB/s: in 30 s, 2 x
+4000 KB/s (ceiling 4500, floor 2000): lowered from 4500 KB/s: in 30 s, 2 x
 scene removed`). Every client also gets a `budget` event when it changes.
 Once a minute, each shown target logs what its layers wrote since its last
 such line, and whether it is rendered: `target map: in the last 60 s its
@@ -322,7 +338,13 @@ share a 2D pass, and the passes' render order follows the stack exactly
   out and the linger.
 - On SIGTERM every target is unmapped and unfetched. If the service dies,
   the KOMBI's watchdog drops its content within about 10 s and systemd
-  starts it again.
+  starts it again. A `poll()` that fails in the render loop is not a stop:
+  the targets are taken down as for SIGTERM and the service exits 1, so
+  systemd (`Restart=on-failure`) starts it again.
+- If the render loop stops making progress for 3 s (`src/liveness.h`;
+  it turns at least four times a second), the Dcsm2 heartbeats stop, so the
+  KOMBI's own watchdog takes a frozen map off the cluster within about
+  10 s. They go again with the loop's next turn. Both changes are logged.
 
 ## Identity and packaging
 

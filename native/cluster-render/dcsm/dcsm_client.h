@@ -214,6 +214,11 @@ public:
     // time and in order, on vsomeip's dispatch thread (kSilent on the
     // heartbeat thread). Heartbeat replies never reach onReply.
     std::function<void(const HeartbeatReport &)> onHeartbeat;
+    // Asked on the heartbeat thread before each heartbeat; false: that one
+    // is not sent. A caller whose own loop has stalled stops its heartbeats
+    // this way, so the KOMBI's watchdog drops its content (DCSM.md
+    // "Heartbeat"). Unset: every heartbeat goes. Set it before start().
+    std::function<bool()> heartbeatGate;
 
     // Heartbeat requests and replies since Dcsm2 became available (all zero
     // with HeartbeatMode::kFireAndForget). Any thread.

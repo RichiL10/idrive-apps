@@ -125,18 +125,30 @@ int start(const cld::Config &cfg, char **)
     for (const TargetSpec &t : sc.targets)
         log_info("target %s: slot 0x%llx class %u scene 0x%llx %ux%u, linger %d ms%s", t.name.c_str(),
                  (unsigned long long)t.slot, t.content_class, (unsigned long long)t.scene_id, t.width, t.height,
-                 t.linger_ms, t.take_over_stock ? ", takes over from the stock HMI" : "");
+                 t.linger_ms, !t.take_over_stock ? ""
+                              : t.take_over_contents.empty() ? ", takes over nothing (take_over_contents empty)"
+                              : t.take_over_remap ? ", takes over from the stock HMI, with remap"
+                                                  : ", takes over from the stock HMI");
 
+    /* A poll() that fails is not a stop: the service leaves with 1 so
+     * systemd (Restart=on-failure) starts it again. */
+    int rc = 0;
     std::vector<pollfd> fds;
     for (;;) {
+        /* Each turn is progress: the heartbeats go while it comes at
+         * least every Liveness::kStallMs (the timeout is 250 ms at most). */
+        link.beat(cld::now_ms());
         fds.clear();
         fds.push_back(pollfd{sig_fd, POLLIN, 0});
         fds.push_back(pollfd{link.fd(), POLLIN, 0});
         fds.push_back(pollfd{console->fd(), POLLIN, 0});
         const size_t first = service.poll_fds(&fds);
         const int n = poll(fds.data(), fds.size(), service.timeout_ms(cld::now_ms()));
-        if (n < 0 && errno != EINTR)
+        if (n < 0 && errno != EINTR) {
+            log_error("poll: %s; leaving for systemd to start the service again", strerror(errno));
+            rc = 1;
             break;
+        }
         if (fds[0].revents & POLLIN)
             break;
         const int64_t now = cld::now_ms();
@@ -150,8 +162,8 @@ int start(const cld::Config &cfg, char **)
     usleep(300 * 1000);   /* the unmap and unfetch on their way */
     link.stop();
     framework.disconnect();
-    log_info("stopped");
-    return 0;
+    log_info(rc ? "stopped after an error" : "stopped");
+    return rc;
 }
 
 }  // namespace crs

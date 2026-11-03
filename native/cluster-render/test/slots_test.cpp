@@ -105,12 +105,13 @@ struct Rig {
     FakeScenes scenes;
     SlotManager m{&port, &scenes};
     int64_t now = 100000;
-    Rig()
+    explicit Rig(std::vector<uint64_t> take_over_contents = {kHmiMap})
     {
         TargetSpec map;
         map.name = "map"; map.slot = kMapSlot; map.scene_id = kMapScene; map.width = 1088; map.height = 480;
         map.linger_ms = 2000;
         map.take_over_stock = true;
+        map.take_over_contents = take_over_contents;
         TargetSpec panel;
         panel.name = "panel"; panel.slot = kPanelSlot; panel.scene_id = kPanelScene; panel.width = 1920;
         panel.height = 720; panel.linger_ms = 3000;
@@ -765,6 +766,51 @@ static void take_over()
                                                            p.state(1) == TargetState::Parked);
 }
 
+/* Take-overs unmap only the stock contents the target lists
+ * (take_over_contents, the map's default the HMI's map 0x01000300): the
+ * speech dialog (0x01000400) or any other stock content is left alone, the
+ * target parked behind it; an empty list takes over nothing. */
+static void take_over_allowlist()
+{
+    Rig r;
+    park(r, true, kPanelScene);   /* the HMI's speech dialog shown in the map slot */
+    joined();
+    r.run(60000);
+    ok("parked behind the speech dialog 0x01000400: never unmapped, still parked",
+       joined().find("take over") == std::string::npos && r.state(0) == TargetState::Parked &&
+           r.m.status(0).holder == Holder::Stock);
+    r.rows(kMapSlot, 2, {{kHmiMap, 1}, {kMapScene, 3}});
+    r.m.on_parked(kMapScene, r.now);
+    joined();
+    r.m.tick(r.now);
+    ok("the HMI's map 0x01000300 on top instead: unmapped at once",
+       joined().find("take over map 0x1000300") != std::string::npos);
+
+    Rig s;
+    park(s, true);
+    joined();
+    s.m.tick(s.now);
+    ok("parked behind 0x01000300: unmapped", calls_are("take over map 0x1000300; slots?"));
+
+    Rig o;
+    park(o, true, 0x01000101);   /* other stock content: a route preview, the assisted-driving view */
+    o.run(60000);
+    ok("parked behind other stock content: never unmapped", joined().find("take over") == std::string::npos &&
+                                                             o.state(0) == TargetState::Parked);
+
+    Rig e(std::vector<uint64_t>{});
+    park(e, true);
+    e.run(60000);
+    ok("an empty take_over_contents: take-over off, parked behind the HMI's map",
+       joined().find("take over") == std::string::npos && e.state(0) == TargetState::Parked);
+
+    Rig l({kHmiMap, 0x01000101});
+    park(l, true, 0x01000101);
+    joined();
+    l.m.tick(l.now);
+    ok("a content added to the list is unmapped", calls_are("take over map 0x1000101; slots?"));
+}
+
 /* The map shown, then a lock (a door-open or check-control warning):
  * every mapping in the slot unmapped, the slot disabled. */
 static void lock_map(Rig &r)
@@ -1352,6 +1398,7 @@ int main()
     multi_row_holder();
     parked_then_shown();
     take_over();
+    take_over_allowlist();
     lock_then_take_overs();
     brief_shows_back_off();
     take_overs_restart_when_shown();

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "dcsm2_port.h"
+#include "liveness.h"
 
 namespace dcsm { class Client; }
 namespace vsomeip_v3 { class application; }
@@ -36,6 +37,12 @@ public:
 
     bool start(const Options &o, std::string *err);
     void stop();
+
+    /* The render loop made progress: called once per iteration. With no call
+     * for Liveness::kStallMs the heartbeats stop (liveness.h), so the
+     * KOMBI's watchdog takes a frozen map off the cluster; they go again
+     * with the next call. */
+    void beat(int64_t now_ms) { liveness_.beat(now_ms); }
 
     /* Readable when something is queued; then drain() on the render thread. */
     int fd() const { return wake_[0]; }
@@ -65,6 +72,8 @@ private:
     std::unique_ptr<dcsm::Client> client_;
     std::thread loop_;
     bool heartbeat_replies_ = true;
+    Liveness liveness_;
+    bool stalled_ = false;   /* heartbeats held for a stalled loop (heartbeat thread) */
     int wake_[2] = {-1, -1};
     std::mutex mutex_;
     std::deque<Event> events_;
