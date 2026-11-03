@@ -307,36 +307,83 @@ static void late_and_duplicate_dropped()
     want = {annexb({0x65, 0xa1, 0xa2, 0xa3})};
     CHECK(of.ev == want);
     CHECK(f.stats().late == 1 && f.stats().dropped == 0 && f.stats().gaps == 0);
+
+    /* A duplicated pair during an IDR FU-A (10, 11, 12, then 11 and 12
+     * again, then 13): both duplicates are late, however many in a row; the
+     * IDR is delivered whole, no gap, nothing dropped. */
+    RtpH264 d;
+    Out od;
+    std::vector<RtpH264::Gap> dgaps;
+    d.on_gap = [&](const RtpH264::Gap &g) { dgaps.push_back(g); };
+    push(d, od, rtp(10, 1000, false, {0x7c, 0x85, 0xa1}));
+    push(d, od, rtp(11, 1000, false, {0x7c, 0x05, 0xa2}));
+    push(d, od, rtp(12, 1000, false, {0x7c, 0x05, 0xa3}));
+    push(d, od, rtp(11, 1000, false, {0x7c, 0x05, 0xa2}));   /* duplicate */
+    push(d, od, rtp(12, 1000, false, {0x7c, 0x05, 0xa3}));   /* duplicate, in sequence after it */
+    push(d, od, rtp(13, 1000, false, {0x7c, 0x45, 0xa4}));
+    want = {annexb({0x65, 0xa1, 0xa2, 0xa3, 0xa4})};
+    CHECK(od.ev == want);
+    CHECK(dgaps.empty() && d.stats().gaps == 0 && d.stats().lost == 0 && d.stats().dropped == 0 &&
+          d.stats().late == 2 && d.stats().stray == 0);
+
+    /* A run of late packets in sequence stays late. */
+    RtpH264 l;
+    Out ol;
+    for (uint16_t s = 1; s <= 20; s++) push(l, ol, rtp(s, 1000u * s, false, kP));
+    for (uint16_t s = 5; s <= 15; s++) push(l, ol, rtp(s, 1000u * s, false, kP));
+    push(l, ol, rtp(21, 21000, false, kP));
+    CHECK(l.stats().late == 11 && l.stats().gaps == 0 && l.stats().stray == 0 && ol.ev.size() == 2 * 21 - 1);
 }
 
 static void backward_jump_rules()
 {
-    /* Far behind, or a newer timestamp: not a late packet but a gap, as
-     * before (the gap settler then decides loss or new stream). */
+    /* Far behind, or a little behind with a newer timestamp: held, and
+     * dropped as stray when the next packet does not follow it. No gap,
+     * nothing lost. */
     RtpH264 r;
     Out o;
     push(r, o, rtp(500, 1000, false, kP));
     push(r, o, rtp(300, 2500, false, kP));          /* 200 behind */
-    CHECK(r.stats().gaps == 1 && r.stats().late == 0 && o.ev.size() == 3);
-    push(r, o, rtp(290, 9000, false, kP));          /* 10 behind, newer timestamp */
-    CHECK(r.stats().gaps == 2 && r.stats().late == 0);
+    CHECK(r.stats().gaps == 0 && r.stats().late == 0 && o.ev.size() == 1);
+    push(r, o, rtp(501, 2500, false, kP));
+    CHECK(r.stats().gaps == 0 && r.stats().stray == 1 && o.ev.size() == 3);
+    push(r, o, rtp(491, 9000, false, kP));          /* 10 behind, newer timestamp */
+    push(r, o, rtp(502, 4000, false, kP));
+    CHECK(r.stats().gaps == 0 && r.stats().late == 0 && r.stats().stray == 2 && r.stats().lost == 0);
+    /* Far ahead, alone: held and dropped too. */
+    push(r, o, rtp(9000, 5500, false, kP));
+    push(r, o, rtp(503, 5500, false, kP));
+    CHECK(r.stats().gaps == 0 && r.stats().stray == 3 && r.stats().lost == 0);
+    /* Ahead by less than kMaxDropout: a gap of the packets between. */
+    push(r, o, rtp(603, 7000, false, kP));
+    CHECK(r.stats().gaps == 1 && r.stats().lost == 99);
 
-    /* Two packets in sequence a little behind, timestamps no newer: the
-     * sequence restarted. The first is dropped as late, the second goes on
-     * as after a one-packet gap, and the next follows it. */
+    /* A little behind with a newer timestamp, then the next in sequence:
+     * the sender restarted its sequence. The held packet is delivered first,
+     * the restart is a gap with nothing lost. */
     RtpH264 s;
     Out os;
     std::vector<RtpH264::Gap> gaps;
     s.on_gap = [&](const RtpH264::Gap &g) { gaps.push_back(g); };
     push(s, os, rtp(50, 5000, false, kP));
-    push(s, os, rtp(40, 4000, false, kSps));
-    push(s, os, rtp(41, 4000, false, kPps));
-    push(s, os, rtp(42, 4000, false, kIdr));
-    push(s, os, rtp(43, 5500, false, kP));
-    std::vector<Bytes> want = {annexb(kP), kAuEnd, annexb(kPps), annexb(kIdr), kAuEnd, annexb(kP)};
+    push(s, os, rtp(40, 6000, false, kSps));
+    push(s, os, rtp(41, 6000, false, kPps));
+    push(s, os, rtp(42, 6000, false, kIdr));
+    push(s, os, rtp(43, 7500, false, kP));
+    std::vector<Bytes> want = {annexb(kP), kAuEnd, annexb(kSps), annexb(kPps), annexb(kIdr), kAuEnd, annexb(kP)};
     CHECK(os.ev == want);
-    CHECK(s.stats().late == 1 && s.stats().gaps == 1 && s.stats().lost == 1);
-    CHECK(gaps.size() == 1 && gaps[0].expected == 40 && gaps[0].got == 41 && gaps[0].lost == 1 && !gaps[0].new_ssrc);
+    CHECK(s.stats().late == 0 && s.stats().gaps == 1 && s.stats().lost == 0 && s.stats().stray == 0);
+    CHECK(gaps.size() == 1 && gaps[0].expected == 51 && gaps[0].got == 40 && gaps[0].lost == 0 && !gaps[0].new_ssrc);
+
+    /* Far behind with an older timestamp, then in sequence: a restart too. */
+    RtpH264 t;
+    Out ot;
+    push(t, ot, rtp(50, 5000, false, kP));
+    push(t, ot, rtp(60000, 100, false, kSps));
+    push(t, ot, rtp(60001, 100, false, kPps));
+    want = {annexb(kP), kAuEnd, annexb(kSps), annexb(kPps)};
+    CHECK(ot.ev == want);
+    CHECK(t.stats().gaps == 1 && t.stats().lost == 0 && t.stats().late == 0 && t.stats().stray == 0);
 
     /* Across the sequence wrap: 65535 then 0 is no gap; 65534 after 0 is late. */
     RtpH264 w;
@@ -381,10 +428,45 @@ static void new_ssrc_new_stream()
         const GapSettler::Outcome oc = gs.nal(d[4] & 0x1f);
         if (oc != GapSettler::None) outcomes.push_back(oc);
     };
-    const Bytes p1 = rtp(100, 1000, false, kP, a), p2 = rtp(5, 2000, false, kP, b);
+    const Bytes p1 = rtp(100, 1000, false, kP, a), p2 = rtp(5, 2000, false, kP, b), p3 = rtp(6, 3000, false, kP, b);
     r2.push(p1.data(), p1.size(), sink);
     r2.push(p2.data(), p2.size(), sink);
+    CHECK(outcomes.empty());   /* one packet of it: on probation */
+    r2.push(p3.data(), p3.size(), sink);
     CHECK(outcomes == std::vector<int>{GapSettler::NewStream});
+}
+
+static void stray_ssrc_ignored()
+{
+    Opt a, b;
+    a.ssrc = 0xaaaaaaaa;
+    b.ssrc = 0xbbbbbbbb;
+    /* One packet of a second sender in the middle of an FU-A: dropped as
+     * stray, no new stream, the FU-A is delivered whole. */
+    RtpH264 r;
+    Out o;
+    std::vector<RtpH264::Gap> gaps;
+    r.on_gap = [&](const RtpH264::Gap &g) { gaps.push_back(g); };
+    push(r, o, rtp(10, 1000, false, {0x7c, 0x85, 0xa1}, a));
+    push(r, o, rtp(500, 77, false, kP, b));
+    push(r, o, rtp(11, 1000, false, {0x7c, 0x45, 0xa2}, a));
+    std::vector<Bytes> want = {annexb({0x65, 0xa1, 0xa2})};
+    CHECK(o.ev == want);
+    CHECK(gaps.empty() && r.stats().streams == 0 && r.stats().stray == 1 && r.stats().dropped == 0 &&
+          r.stats().gaps == 0);
+
+    /* After a switch to b, one late packet of a: dropped as stray, and b's
+     * FU-A in progress is delivered whole. */
+    RtpH264 s;
+    Out os;
+    push(s, os, rtp(10, 1000, false, kP, a));
+    push(s, os, rtp(7, 90, true, kSps, b));
+    push(s, os, rtp(8, 90, false, {0x7c, 0x85, 0xb1}, b));
+    push(s, os, rtp(11, 1000, false, kP, a));     /* the old stream's last, late */
+    push(s, os, rtp(9, 90, false, {0x7c, 0x45, 0xb2}, b));
+    want = {annexb(kP), kAuEnd, annexb(kSps), annexb({0x65, 0xb1, 0xb2})};
+    CHECK(os.ev == want);
+    CHECK(s.stats().streams == 1 && s.stats().stray == 1 && s.stats().dropped == 0 && s.stats().gaps == 0);
 }
 
 static void fu_a_size_cap()
@@ -602,6 +684,7 @@ int main(int argc, char **argv)
     late_and_duplicate_dropped();
     backward_jump_rules();
     new_ssrc_new_stream();
+    stray_ssrc_ignored();
     fu_a_size_cap();
     golden_stream15(argc > 1 ? argv[1] : "test/data/stream15_start.rtp");
     golden_with_gaps(argc > 1 ? argv[1] : "test/data/stream15_start.rtp");

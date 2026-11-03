@@ -35,51 +35,82 @@ bool RtpH264::push(const uint8_t *pkt, size_t len, const Sink &sink)
     const uint16_t seq = (uint16_t)(pkt[2] << 8 | pkt[3]);
     const uint32_t ts = (uint32_t)pkt[4] << 24 | (uint32_t)pkt[5] << 16 | (uint32_t)pkt[6] << 8 | pkt[7];
     const uint32_t ssrc = (uint32_t)pkt[8] << 24 | (uint32_t)pkt[9] << 16 | (uint32_t)pkt[10] << 8 | pkt[11];
-    stats_.packets++;
+    if (!replaying_)
+        stats_.packets++;
+
+    /* A held packet (RFC 3550 A.1 probation) is confirmed only by the very
+     * next packet: its SSRC and the next sequence number. Anything else
+     * leaves it isolated: dropped, counted stray. */
+    bool confirmed = false;
+    if (held_) {
+        confirmed = ssrc == held_ssrc_ && seq == (uint16_t)(held_seq_ + 1);
+        if (!confirmed) {
+            held_ = false;
+            stats_.stray++;
+        }
+    }
 
     if (have_ssrc_ && ssrc != ssrc_) {
+        if (!confirmed) {
+            /* Another SSRC: a new stream only once a second packet of it
+             * follows in sequence. A stray packet of an old stream or of a
+             * second sender changes nothing. */
+            hold(pkt, len, ssrc, seq);
+            return true;
+        }
         /* A new stream: its sequence and timestamps are its own. */
         Gap g;
         g.expected = (uint16_t)(seq_ + 1);
-        g.got = seq;
+        g.got = held_seq_;
         g.new_ssrc = true;
         stats_.streams++;
         drop_fu();
         have_seq_ = false;
-        late_ = false;
+        ssrc_ = ssrc;
         if (on_gap)
             on_gap(g);
+        replay(sink);
+    } else if (confirmed) {
+        /* Same SSRC, a jump confirmed by the packet after it: the sequence
+         * restarted. Nothing is known lost. */
+        Gap g;
+        g.expected = (uint16_t)(seq_ + 1);
+        g.got = held_seq_;
+        stats_.gaps++;
+        drop_fu();
+        have_seq_ = false;
+        if (on_gap)
+            on_gap(g);
+        replay(sink);
     }
     ssrc_ = ssrc;
     have_ssrc_ = true;
 
     if (have_seq_ && seq != (uint16_t)(seq_ + 1)) {
-        Gap g;
-        g.expected = (uint16_t)(seq_ + 1);
-        g.got = seq;
-        g.lost = (uint16_t)(seq - g.expected);
-        const bool behind = (uint16_t)(seq_ - seq) < kMisorder && (int32_t)(ts - ts_) <= 0;
-        if (behind && !(late_ && seq == (uint16_t)(late_seq_ + 1))) {
-            /* Late or a duplicate: what it carried is already given up. */
-            late_ = true;
-            late_seq_ = seq;
+        const uint16_t behind = (uint16_t)(seq_ - seq), ahead = (uint16_t)(seq - seq_);
+        if (behind < kMisorder && (int32_t)(ts - ts_) <= 0) {
+            /* Late or a duplicate, however many in a row: what it carried
+             * is already delivered or given up. */
             stats_.late++;
             return true;
         }
-        if (behind) {
-            /* The second packet in sequence behind the last one: the
-             * sequence restarted, and only the packet before this one was
-             * dropped. */
-            g.expected = late_seq_;
-            g.lost = 1;
+        if (ahead >= kMaxDropout) {
+            /* Far ahead, far behind, or a little behind with a newer
+             * timestamp: held until the next packet shows whether the
+             * sequence restarted. */
+            hold(pkt, len, ssrc, seq);
+            return true;
         }
+        Gap g;
+        g.expected = (uint16_t)(seq_ + 1);
+        g.got = seq;
+        g.lost = (uint16_t)(ahead - 1);
         stats_.gaps++;
         stats_.lost += g.lost;
         drop_fu();
         if (on_gap)
             on_gap(g);
     }
-    late_ = false;
     seq_ = seq;
     have_seq_ = true;
     if (have_ts_ && ts != ts_) {
@@ -146,6 +177,23 @@ bool RtpH264::push(const uint8_t *pkt, size_t len, const Sink &sink)
         end_au(sink);
     if (!ok) { stats_.bad++; return false; }
     return true;
+}
+
+void RtpH264::hold(const uint8_t *pkt, size_t len, uint32_t ssrc, uint16_t seq)
+{
+    held_pkt_.assign(pkt, pkt + len);
+    held_ = true;
+    held_ssrc_ = ssrc;
+    held_seq_ = seq;
+}
+
+void RtpH264::replay(const Sink &sink)
+{
+    held_ = false;
+    replay_.swap(held_pkt_);
+    replaying_ = true;
+    push(replay_.data(), replay_.size(), sink);
+    replaying_ = false;
 }
 
 void RtpH264::single(const uint8_t *nal, size_t len, const Sink &sink)

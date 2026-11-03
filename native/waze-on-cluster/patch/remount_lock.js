@@ -8,12 +8,13 @@
  * read-only, which would fail the write and could leave / writable.
  *
  * The lock is a file created with O_EXCL in the socket directory (tmpfs,
- * cleared each boot). A lock older than STALE_MS is taken as abandoned by a
- * killed holder and broken. Nobody writes without it: patchd (user-driven)
- * waits up to 15 s and then refuses the operation, nothing changed, so the
- * user retries once the holder is done (a stuck lock is broken after
- * STALE_MS); recovery (automatic) yields: its restore reports a failure and
- * keeps the counter, so the next boot retries.
+ * cleared each boot), holding the holder's pid. A lock is broken only when
+ * that pid is gone (a killed holder), however old it is, so a holder that
+ * works longer than expected keeps it; a lock with no readable pid is broken
+ * once older than STALE_MS. Nobody writes without it: patchd (user-driven)
+ * waits and then refuses the operation, nothing changed, so the user retries
+ * once the holder is done; recovery (automatic) yields: its restore reports
+ * a failure and keeps the counter, so the next boot retries.
  *
  * inUse(file) is whether a process runs file (a /proc/<pid>/exe is its
  * inode): such a file, once replaced, has to stay linked for / to go
@@ -44,11 +45,21 @@ function tryAcquire() {
         if (e.code === 'ENOENT') { try { ensureDir(path.dirname(LOCK)); } catch (e2) { return false; } return tryAcquire(); }
         if (e.code !== 'EEXIST') return false;
         try {
-            var st = fs.statSync(LOCK);
-            if (Date.now() - st.mtime.getTime() > STALE_MS) { fs.unlinkSync(LOCK); return tryAcquire(); }
+            var gone = holderGone(fs.readFileSync(LOCK, 'utf8'));
+            var old = Date.now() - fs.statSync(LOCK).mtime.getTime() > STALE_MS;
+            if (gone === true || (gone === null && old)) { fs.unlinkSync(LOCK); return tryAcquire(); }
         } catch (e3) {}
         return false;
     }
+}
+
+/* Whether the pid a lock file names is gone: true (no such process), false
+ * (it runs, or exists and is not ours to signal), null (no pid in it, e.g.
+ * a holder that has created the file and not written it yet). */
+function holderGone(text) {
+    var pid = parseInt((text || '').split(' ')[0], 10);
+    if (!(pid > 0)) return null;
+    try { process.kill(pid, 0); return false; } catch (e) { return e.code === 'ESRCH'; }
 }
 
 /* acquire within timeoutMs, polling; cb(true) on success, cb(false) on timeout. */

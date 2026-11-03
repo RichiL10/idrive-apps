@@ -151,13 +151,13 @@ std::string VideoProducer::probe_report() const
         char line[576];
         std::snprintf(line, sizeof line,
                       "rtp: packets=%llu nals=%llu aus=%llu seq_gaps=%llu lost=%llu dropped=%llu bad=%llu late=%llu "
-                      "streams=%llu fu_overflows=%llu framing_overflows=%llu\n"
+                      "streams=%llu stray=%llu fu_overflows=%llu framing_overflows=%llu\n"
                       "queue: %llu dropped, at most %zu of %zu packets waiting, %zu KB held\n"
                       "decoder: %s (%llu frames decoded)%s\n",
                       (unsigned long long)st.packets, (unsigned long long)st.nals, (unsigned long long)st.aus,
                       (unsigned long long)st.gaps, (unsigned long long)st.lost, (unsigned long long)st.dropped,
                       (unsigned long long)st.bad, (unsigned long long)st.late, (unsigned long long)st.streams,
-                      (unsigned long long)st.overflows, (unsigned long long)decoder_.buffer_overflows(),
+                      (unsigned long long)st.stray, (unsigned long long)st.overflows, (unsigned long long)decoder_.buffer_overflows(),
                       (unsigned long long)queue_.overflows(), queue_.high_water(),
                       kQueuePackets, queue_.held_bytes() / 1024,
                       !decoder_up_ ? "waiting for the stream's first SPS" : decoding_ ? "up" : "waiting for a keyframe",

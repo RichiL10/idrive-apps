@@ -335,9 +335,13 @@ function readState(cb) {
                         pending: pending ? pending.action || 'apply' : null, pendingBy: pending ? pending.by : null,
                         conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable,
                         /* the first edit of this build needs the user's confirmation */
-                        unproven: known && !hasBackup && !proven,
-                        /* boot recovery marked the patch failed: crashing, no backup restores it */
-                        failed: failedReason() };
+                        /* the first edit of this build needs the user's confirmation; a
+                         * modified build is refused by the patcher anyway (conflict) */
+                        unproven: known && !hasBackup && pristine && !proven,
+                        /* boot recovery marked the patch failed: crashing, no backup restores
+                         * it. Not while carplay reads stock (restored by hand): the mark is
+                         * stale then and clears at the next boot step or crash. */
+                        failed: binary !== 'original' ? failedReason() : '' };
         cb(cachedState);
     });
 }

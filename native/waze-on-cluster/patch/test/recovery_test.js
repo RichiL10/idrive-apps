@@ -60,6 +60,7 @@ function makeWorld(opts) {
         killed: '',
         lockHeld: false,
         events: [],
+        logs: [],
         now: opts.now || clock(),
     };
     let nextPid = 100;
@@ -100,7 +101,7 @@ function makeWorld(opts) {
         killed: () => w.killed,
         recmgrLoaded: (name) => name === 'carplay' && w.recmgr,
         lock: { tryAcquire: () => !w.lockHeld, release: () => {} },
-        log: () => {},
+        log: (m) => { w.logs.push(m); },
     }, extra || {}));
     return w;
 }
@@ -283,7 +284,7 @@ test('patched with no verified backup: the tool is marked failed, says so loudly
     assert.strictEqual(failedReason(tmpState()), '', 'no state: not failed');
 });
 
-test('marked failed: the watcher starts carplay no more after a crash or a kill, recmgr or not', async () => {
+test('marked failed: the watcher starts carplay no more after a crash, but still after a SIGKILL patchd did not send', async () => {
     const w = makeWorld({ recmgr: true, restorable: false });
     fs.writeFileSync(w.statePath, JSON.stringify({ fails: 2, arm: { boot: 'A', crashes: 1 } }));
     const { step, watcher } = await bootUp(w, 'B');
@@ -301,8 +302,10 @@ test('marked failed: the watcher starts carplay no more after a crash or a kill,
     w.carplayEnds('2', '9');   /* a SIGKILL patchd did not send */
     w.now.advance(5000);
     assert.strictEqual((await tick(watcher)).action, 'killed');
-    for (let i = 0; i < 4; i++) { w.now.advance(61000); await tick(watcher); }
-    assert.strictEqual(starts(w), 2, 'nor after a kill');
+    w.now.advance(5000);
+    assert.strictEqual((await tick(watcher)).action, 'started', 'a kill the patch did not cause still restarts carplay');
+    assert.strictEqual(starts(w), 3);
+    assert(w.logs.some((l) => /killed while the map patch is marked failed/.test(l)), w.logs.join('\n'));
     assert(readState(w.statePath).failed, 'still marked');
 });
 
@@ -516,8 +519,9 @@ test('an unwritable state file restores a patch at its first crash, and does not
     try {
         const w = makeWorld({ recmgr: true, statePath: path.join(dir, 'state.json') });
         const { watcher } = await bootUp(w, 'A');
-        fs.chmodSync(dir, 0o500);
-        fs.chmodSync(path.join(dir, 'state.json'), 0o400);
+        /* A directory where the save writes its temp file: no write can
+         * succeed, for root too (permissions alone do not stop root). */
+        fs.mkdirSync(path.join(dir, 'state.json.tmp'));
         w.carplayCrashes();
         w.now.advance(5000);
         const r = await tick(watcher);
@@ -530,7 +534,7 @@ test('an unwritable state file restores a patch at its first crash, and does not
             await tick(watcher);
         }
         assert.strictEqual(starts(w), 1 + 3);
-    } finally { fs.chmodSync(dir, 0o700); cp.execFileSync('rm', ['-rf', dir]); }
+    } finally { cp.execFileSync('rm', ['-rf', dir]); }
 });
 
 test('recmgr loaded carplay: no start while patchd holds the lock, the system stops, or carplay is up again', async () => {
@@ -773,7 +777,7 @@ test('the boot unit orders itself before carplay, never blocks it, and is whitel
     assert(c.files.some((f) => f.path === 'shutdown_mark.sh') && c.files.some((f) => f.path === 'recmgr_list.js'));
 });
 
-test('remount lock: mutual exclusion and stale break', () => {
+test('remount lock: mutual exclusion; broken only when its holder is gone (or holds no pid and is old)', () => {
     const lockPath = path.join(os.tmpdir(), `woc-lock-${process.pid}.lock`);
     try { fs.unlinkSync(lockPath); } catch (e) {}
     process.env.WOC_REMOUNT_LOCK = lockPath;
@@ -786,10 +790,25 @@ test('remount lock: mutual exclusion and stale break', () => {
     lock.release();
     assert.strictEqual(lock.tryAcquire(), true, 'reacquire after release');
 
-    /* Age the lock past STALE_MS and confirm it is broken and retaken. */
+    /* An old lock whose holder still runs (this process) is kept, however
+     * old: a holder that works longer than expected is never cut short. */
     const old = Date.now() / 1000 - 10;
     fs.utimesSync(lockPath, old, old);
-    assert.strictEqual(lock.tryAcquire(), true, 'stale lock broken');
+    assert.strictEqual(lock.tryAcquire(), false, 'an old lock held by a live pid is not broken');
+    assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid), 'the holder keeps it');
+
+    /* A lock whose holder is gone is broken at once, whatever its age. */
+    const dead = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+    fs.writeFileSync(lockPath, dead.stdout + ' 2026-01-01T00:00:00.000Z\n');
+    assert.strictEqual(lock.tryAcquire(), true, 'a lock of a pid that is gone is broken and retaken');
+    assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid));
+    lock.release();
+
+    /* No pid in it: broken only once older than STALE_MS. */
+    fs.writeFileSync(lockPath, '');
+    assert.strictEqual(lock.tryAcquire(), false, 'a fresh lock with no pid yet is kept');
+    fs.utimesSync(lockPath, old, old);
+    assert.strictEqual(lock.tryAcquire(), true, 'an old lock with no pid is broken');
     lock.release();
     try { fs.unlinkSync(lockPath); } catch (e) {}
     delete process.env.WOC_REMOUNT_LOCK;

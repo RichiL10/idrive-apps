@@ -550,7 +550,7 @@ Recovery.prototype._onCrash = function (info, cb) {
  * (without it, recmgr restarts the head unit for the exit). */
 Recovery.prototype._onKill = function (info, cb) {
     this._log('carplay (run ' + info.run + ') was killed');
-    if (this._recmgrLoaded('carplay')) this._scheduleStart();
+    if (this._recmgrLoaded('carplay')) this._scheduleStart(true);
     this._busy = false;
     cb({ action: 'killed' });
 };
@@ -560,8 +560,14 @@ Recovery.prototype._startsThisBoot = function () {
     return Math.max(this._thisBoot(s) ? s.n : 0, this._starts);
 };
 
-Recovery.prototype._scheduleStart = function () {
-    if (this._failed || this._load().failed) {
+/* afterKill: the start follows a SIGKILL the patch did not cause, so it is
+ * scheduled (bounded by START_DELAYS_MS) even while the patch is marked
+ * failed; only restarts after a crash stop then. */
+Recovery.prototype._scheduleStart = function (afterKill) {
+    if (afterKill && (this._failed || this._load().failed)) {
+        this._log('carplay was killed while the map patch is marked failed: starting it again (bounded per boot), ' +
+            'since the kill was not a crash of the patch');
+    } else if (this._failed || this._load().failed) {
         this._log('carplay stays down: the map patch is marked failed (crashing, no backup restores it); restore it by hand');
         return;
     }

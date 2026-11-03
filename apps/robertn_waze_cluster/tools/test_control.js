@@ -417,22 +417,42 @@ test('reconnect does not duplicate the backlog', async (render, patch) => {
 test('an untested CarPlay build: Enable map asks to confirm, only the confirmed press sends unproven', async (render, patch) => {
     patch.unproven = true;
     patch.conflict = 'untested carplay build';
-    const c = control();
+    const c = new WazeClusterControl({ renderPath: RSOCK, patchPath: PSOCK, pendingPath: PENDING, retryMs: 100, confirmMinMs: 200 });
     c.open();
     await until('original', () => c.connectedPatch() && c.patchStatus && c.patchStatus.unproven === true);
     assert.strictEqual(c.enableButtonText(), ENABLE_TEXT);
     assert.strictEqual(c.canEnable(), true);
     c.enableMap();
+    const first = Date.now();
     assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT);
     assert.strictEqual(c.statusText(), CONFIRM_STATUS);
     await sleep(50);
     assert.strictEqual(patch.count('apply'), 0, 'the first press sends nothing');
+    c.enableMap();   /* too soon after the first: ignored, still asking */
+    await sleep(50);
+    assert.strictEqual(patch.count('apply'), 0, 'a press before the minimum gap sends nothing');
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT);
+    await sleep(Math.max(0, 250 - (Date.now() - first)));
     c.enableMap();
     await until('apply sent', () => patch.count('apply') === 1);
     assert.deepStrictEqual(patch.received.filter((m) => m.cmd === 'apply'), [{ cmd: 'apply', panel: 'high', mode: 'avb', unproven: true }]);
     assert.strictEqual(c.enableButtonText(), ENABLE_TEXT);
     await until('patched', () => c.patchStatus && c.patchStatus.state === 'patched');
     assert.strictEqual(c.needsConfirm(), false);
+    c.close();
+});
+
+test('an untested CarPlay build: two presses 10 ms apart (a doubled event) send no apply', async (render, patch) => {
+    patch.unproven = true;
+    const c = control();
+    c.open();
+    await until('unproven', () => c.connectedPatch() && c.needsConfirm());
+    c.enableMap();
+    await sleep(10);
+    c.enableMap();
+    await sleep(100);
+    assert.strictEqual(patch.count('apply'), 0, 'no apply');
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT, 'the confirm step stays open');
     c.close();
 });
 

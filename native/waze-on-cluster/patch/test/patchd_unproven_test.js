@@ -130,6 +130,13 @@ async function main() {
     r = await status();
     ok('status: the stock synthetic build is original and unproven', r.state === 'original' && r.unproven === true, JSON.stringify(r));
 
+    /* A failed mark left while carplay reads stock (restored by hand): stale,
+     * not reported. */
+    fs.writeFileSync(RSTATE, JSON.stringify({ fails: 3, arm: null, failed: { since: 'x', boot: 'b', fails: 3, why: 'backup sha256 mismatch' } }) + '\n');
+    r = await status();
+    ok('status: a failed mark is not reported while carplay reads stock', r.state === 'original' && r.failed === undefined, JSON.stringify(r));
+    fs.writeFileSync(RSTATE, JSON.stringify({ fails: 0, arm: null, failed: null }) + '\n');
+
     r = await op({ cmd: 'apply', panel: 'high', mode: 'avb' });
     ok('apply without the confirmation: refused with the reason the app shows', r.state === 'error' && /untested carplay build/.test(r.reason || ''), JSON.stringify(r));
     ok('apply without the confirmation: nothing written, no backup', same() && !fs.existsSync(TGT + '.woc-orig'));
@@ -166,6 +173,18 @@ async function main() {
     fs.writeFileSync(RSTATE, JSON.stringify({ fails: 0, arm: null, failed: null }) + '\n');
     r = await status();
     ok('status: a cleared mark is not reported', r.failed === undefined, JSON.stringify(r));
+
+    /* A modified build with no backup of ours (our backup moved away): the
+     * patcher refuses it ("first edit requires the pristine build"), so no
+     * confirmation is offered, only the conflict. */
+    var aside = path.join(dir, 'aside');
+    fs.mkdirSync(aside);
+    fs.readdirSync(path.dirname(TGT)).filter(function (n) { return /^carplay\.woc-/.test(n); }).forEach(function (n) {
+        fs.renameSync(path.join(path.dirname(TGT), n), path.join(aside, n));
+    });
+    r = await status();
+    ok('status: a modified build without our backup is not offered the confirmation',
+        !r.unproven && /modified by something else/.test(r.conflict || ''), JSON.stringify(r));
 }
 
 main().catch(function (e) { ok('no exception', false, e.stack); }).then(function () {

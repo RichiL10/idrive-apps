@@ -80,6 +80,9 @@ const SAFE = '504x368+286+72';
 const ENABLE_TEXT = 'Enable map';
 const CONFIRM_TEXT = 'Confirm: patch untested CarPlay';
 const CONFIRM_MS = 15000;
+/* A confirming press sooner than this after the first (a doubled HMI event,
+ * a controller bounce) is ignored: the user cannot have read the label yet. */
+const CONFIRM_MIN_MS = 1000;
 const CONFIRM_STATUS = 'Untested CarPlay build: this patch has never run on this firmware. ' +
     'Press Confirm to patch it anyway, or wait to cancel';
 /* The status line while boot recovery has marked the patch failed. */
@@ -214,7 +217,9 @@ class WazeClusterControl extends EventEmitter {
         this._pendingPath = o.pendingPath || PENDING_PATH;
         this._lastPatchCmd = 'apply';
         this._confirmMs = o.confirmMs || CONFIRM_MS;
+        this._confirmMinMs = o.confirmMinMs !== undefined ? o.confirmMinMs : CONFIRM_MIN_MS;
         this._confirmUntil = 0;           /* Enable map asks to confirm an untested build until then */
+        this._confirmFrom = 0;            /* and accepts the confirming press from then */
         this._confirmTimer = null;
         this._restartRequested = false;   /* a reboot was asked for; waiting for the unit to restart */
         this.captureState = { state: 'unavailable' };
@@ -271,9 +276,15 @@ class WazeClusterControl extends EventEmitter {
     /* On a CarPlay build outside the patcher's proven list (status
      * "unproven"), the first press only asks for confirmation: the button
      * reads CONFIRM_TEXT and the status line says the build is untested,
-     * for CONFIRM_MS. Only a press while it asks sends unproven:true. */
+     * for CONFIRM_MS. Only a press while it asks, and at least CONFIRM_MIN_MS
+     * after the first, sends unproven:true; an earlier one is ignored and
+     * the confirmation stays open. */
     enableMap() {
+        if (this.confirming() && Date.now() < this._confirmFrom) {
+            return;
+        }
         if (this.needsConfirm() && !this.confirming()) {
+            this._confirmFrom = Date.now() + this._confirmMinMs;
             this._confirmUntil = Date.now() + this._confirmMs;
             clearTimeout(this._confirmTimer);
             this._confirmTimer = setTimeout(() => {
