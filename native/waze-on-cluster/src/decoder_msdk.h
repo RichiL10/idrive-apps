@@ -112,6 +112,10 @@ public:
      * the decoder then waits for the next SPS, in a new session. */
     uint64_t device_failures() const;
 
+    /* NAL units and access units the framing (nal_reader.h) dropped at its
+     * size cap since init(). */
+    uint64_t buffer_overflows() const;
+
 private:
     struct State;
     std::unique_ptr<State> s_;

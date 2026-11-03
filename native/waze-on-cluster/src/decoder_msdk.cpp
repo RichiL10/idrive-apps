@@ -550,4 +550,6 @@ bool Decoder::decoding() const { return s_ && s_->running; }
 
 uint64_t Decoder::device_failures() const { return s_ ? s_->device_failures : 0; }
 
+uint64_t Decoder::buffer_overflows() const { return s_ ? s_->nal.overflows() : 0; }
+
 }  // namespace woc

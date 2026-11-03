@@ -54,6 +54,18 @@ public:
 
     void reset();
 
+    /* The most bytes held for one access unit, or for one NAL unit in
+     * progress. Past it the NAL unit in progress (bytes with no next start
+     * code, such as a FIFO that is not Annex-B) is dropped and the reader
+     * resynchronises at the next start code; an access unit that would grow
+     * past it (parameter sets or SEI with no slice) is dropped and assembly
+     * starts over at the NAL unit that overflowed it. Either loses at most one
+     * picture. */
+    static const size_t kMaxAuBytes = 8u << 20;
+    /* NAL units in progress and access units dropped at kMaxAuBytes, since
+     * construction (reset() keeps the count). */
+    uint64_t overflows() const { return overflows_; }
+
 private:
     void end_nal(const uint8_t *nal, size_t len, const Sink &sink);
     void emit(const Sink &sink);
@@ -64,6 +76,7 @@ private:
 
     std::vector<uint8_t> au_;     /* access unit being assembled */
     bool au_vcl_ = false, au_sps_ = false, au_idr_ = false, au_b_ = false;
+    uint64_t overflows_ = 0;
 };
 
 }  // namespace woc

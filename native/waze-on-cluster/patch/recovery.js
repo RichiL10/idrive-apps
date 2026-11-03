@@ -139,11 +139,20 @@ function monoMs() { var t = process.hrtime(); return t[0] * 1000 + t[1] / 1e6; }
  * wrote is counted and restored. */
 function realClassify(cb) {
     cp.execFile(process.execPath, [PATCHER, 'status', '--target', TARGET], { timeout: CLASSIFY_MS }, function (err, out) {
-        var text = (out || '') + '';
-        if (err || !/^size:/m.test(text)) { cb({ ok: false }); return; }
-        var restorable = /^restorable:\s+yes$/m.test(text);
-        cb({ ok: true, patchActive: restorable, restorable: restorable });
+        cb(err ? { ok: false } : classifyStatus((out || '') + ''));
     });
+}
+
+/* The patcher's status text as the classify result. Edit 3 (self-start) is
+ * the edit whose throw path can crash carplay (PATCH.md "Exception risk"): a
+ * binary that has it is our patch even when no backup can restore it, so its
+ * crashes are counted and it is marked failed rather than taken for stock. */
+function classifyStatus(text) {
+    if (!/^size:/m.test(text)) return { ok: false };
+    var restorable = /^restorable:\s+yes$/m.test(text);
+    var selfStart = /^selfstart:\s+SELF-START/m.test(text);
+    var why = /^restorable:\s+no \((.*)\)$/m.exec(text);
+    return { ok: true, patchActive: restorable || selfStart, restorable: restorable, why: why ? why[1] : '' };
 }
 
 /* Restore the original with the vetted revert, under the shared remount lock,
@@ -227,6 +236,24 @@ function normArm(a) {
     return { boot: a.boot, crashes: a.crashes || 0, confirmed: !!(a.confirmed || a.state === 'confirmed'), clean: !!(a.clean || a.state === 'clean') };
 }
 
+/* The failed mark: a patched carplay crashed at the threshold and no backup
+ * can restore it. {since, boot, fails, why}; null when not failed. */
+function normFailed(f) {
+    if (!f || typeof f !== 'object') return null;
+    return { since: f.since || null, boot: f.boot || null, fails: f.fails || 0, why: typeof f.why === 'string' ? f.why : '' };
+}
+
+/* What patchd reports for the failed mark: the reason text, or '' when the
+ * tool is not marked failed (or the state cannot be read). */
+function failedReason(statePath) {
+    try {
+        var f = normFailed(JSON.parse(fs.readFileSync(statePath || STATE, 'utf8')).failed);
+        if (!f) return '';
+        return 'carplay crashed ' + f.fails + ' times with the map patch and cannot be restored automatically' +
+            (f.why ? ' (' + f.why + ')' : '') + '; keep the phone unplugged and restore carplay by hand (PATCH.md, Boot recovery)';
+    } catch (e) { return ''; }
+}
+
 /* fails after the previous boot, from its arm and its shutdown mark. */
 function tally(fails, arm, mark) {
     var crashes = arm.crashes || (mark === 'failed' ? 1 : 0);
@@ -270,14 +297,18 @@ function Recovery(opts) {
     this._ended = '';
     this._crashes = 0;
     this._starts = 0;
+    this._failed = false;       /* marked failed this run, also when the state cannot be written */
 }
 
 Recovery.prototype._load = function () {
     try {
         var st = JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
-        if (st && typeof st === 'object') return { fails: st.fails || 0, arm: normArm(st.arm), starts: st.starts || null, ended: st.ended || null };
+        if (st && typeof st === 'object') {
+            return { fails: st.fails || 0, arm: normArm(st.arm), starts: st.starts || null, ended: st.ended || null,
+                     failed: normFailed(st.failed) };
+        }
     } catch (e) {}
-    return { fails: 0, arm: null, starts: null, ended: null };
+    return { fails: 0, arm: null, starts: null, ended: null, failed: null };
 };
 
 /* Persist durably: the state must survive the reboot a crash can cause the
@@ -289,7 +320,8 @@ Recovery.prototype._save = function (st) {
         try { fs.mkdirSync(dir, 0o755); } catch (e) { if (e.code !== 'EEXIST') throw e; }
         fd = fs.openSync(tmp, 'w', 0o644);
         try {
-            fs.writeFileSync(fd, JSON.stringify({ fails: st.fails || 0, arm: st.arm || null, starts: st.starts || null, ended: st.ended || null }) + '\n');
+            fs.writeFileSync(fd, JSON.stringify({ fails: st.fails || 0, arm: st.arm || null, starts: st.starts || null, ended: st.ended || null,
+                                                  failed: st.failed || null }) + '\n');
             fs.fsyncSync(fd);
         } finally { fs.closeSync(fd); }
         fs.renameSync(tmp, this.statePath);
@@ -327,9 +359,11 @@ Recovery.prototype.startBoot = function (cb) {
         st.arm = null;
         if (st.fails !== was) this._log('failed patched boots and crashes now ' + st.fails + ' (was ' + was + ')');
     }
+    /* Below the threshold again (carplay ran healthy): no longer failed. */
+    if (st.failed && st.fails < this.threshold) { st.failed = null; this._failed = false; }
     if (!this._hasBackup()) {
         /* No backup of ours: nothing of ours to protect or restore. */
-        if (st.fails || st.arm) { st.fails = 0; st.arm = null; this._save(st); }
+        if (st.fails || st.arm || st.failed) { st.fails = 0; st.arm = null; st.failed = null; this._failed = false; this._save(st); }
         cb({ action: 'idle' });
         return;
     }
@@ -357,9 +391,31 @@ Recovery.prototype._restoreWith = function (cls, fails, saved, cb) {
         return;
     }
     if (!cls.restorable) {
-        this._log('WARNING: ' + fails + ' carplay crashes but no restorable backup; leaving carplay as is');
+        /* Patched, crashing, and no backup can undo it. Writing anything
+         * else over carplay, or stopping or masking it, could leave the head
+         * unit worse off than a crashing CarPlay, so carplay stays as it is.
+         * What the tool does: it marks itself failed (patchd reports it to
+         * the app), stops starting carplay again itself, and says so loudly
+         * at every boot and crash. A crash still restarts the head unit where
+         * the firmware does that (carplay.service OnFailure=); only a hand
+         * restore ends it. */
+        var fst = this._load();
+        if (!fst.failed) fst.failed = { since: new Date().toISOString(), boot: this.bootId, fails: fails, why: cls.why || '' };
+        else fst.failed.fails = Math.max(fst.failed.fails, fails);
+        this._failed = true;
+        this._save(fst);
+        this._log('ERROR: the map patch is marked FAILED: carplay crashed ' + fails + ' times while patched and no backup ' +
+            'can restore it' + (cls.why ? ' (' + cls.why + ')' : '') + '. carplay is left as it is and not started again by ' +
+            'this tool. Keep the phone unplugged and restore carplay by hand (PATCH.md, Boot recovery, By hand)');
         cb({ action: 'restore-unavailable', fails: fails });
         return;
+    }
+    if (this._failed || this._load().failed) {
+        /* A backup restores it again (fixed by hand): the mark is stale. */
+        var cst = this._load();
+        cst.failed = null;
+        this._failed = false;
+        this._save(cst);
     }
     this._log(saved ? 'restoring the original carplay after ' + fails + ' carplay crashes or failed boots'
         : 'restoring the original carplay: the boot-recovery state cannot be saved');
@@ -378,6 +434,8 @@ Recovery.prototype._clear = function () {
     var st = this._load();
     st.fails = 0;
     st.arm = null;
+    st.failed = null;
+    this._failed = false;
     this._crashes = 0;
     this._save(st);
 };
@@ -503,6 +561,10 @@ Recovery.prototype._startsThisBoot = function () {
 };
 
 Recovery.prototype._scheduleStart = function () {
+    if (this._failed || this._load().failed) {
+        this._log('carplay stays down: the map patch is marked failed (crashing, no backup restores it); restore it by hand');
+        return;
+    }
     var n = this._startsThisBoot();
     if (n >= START_DELAYS_MS.length) {
         this._log('carplay stays down: started ' + n + ' times this boot already');
@@ -553,7 +615,8 @@ Recovery.prototype.onShutdown = function (cb) {
 };
 
 module.exports = {
-    Recovery: Recovery, tally: tally, parseShow: parseShow, RESTORE_BOUND_MS: RESTORE_BOUND_MS,
+    Recovery: Recovery, tally: tally, parseShow: parseShow, RESTORE_BOUND_MS: RESTORE_BOUND_MS, failedReason: failedReason,
+    classifyStatus: classifyStatus,
     realClassify: realClassify, realRestore: realRestore, realProbeCarplay: realProbeCarplay,
 };
 

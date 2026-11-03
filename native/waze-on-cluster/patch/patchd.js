@@ -335,7 +335,9 @@ function readState(cb) {
                         pending: pending ? pending.action || 'apply' : null, pendingBy: pending ? pending.by : null,
                         conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable,
                         /* the first edit of this build needs the user's confirmation */
-                        unproven: known && !hasBackup && !proven };
+                        unproven: known && !hasBackup && !proven,
+                        /* boot recovery marked the patch failed: crashing, no backup restores it */
+                        failed: failedReason() };
         cb(cachedState);
     });
 }
@@ -348,6 +350,7 @@ function status(extra) {
         if (!busy && st.pending) msg.pending = st.pending;
         if (!busy && st.conflict) msg.conflict = st.conflict;
         if (st.unproven) msg.unproven = true;
+        if (st.failed) msg.failed = st.failed;
         if (extra) Object.keys(extra).forEach(function (k) { msg[k] = extra[k]; });
         send(msg);
     });
@@ -391,6 +394,7 @@ function remountRo(tries, cb) {
  * next head-unit start. */
 var recmgrLoaded = require('./recmgr_list.js').recmgrLoaded;
 var parseShow = require('./recovery.js').parseShow;
+var failedReason = require('./recovery.js').failedReason;
 var DROPIN = process.env.WOC_CARPLAY_DROPIN || '/etc/systemd/system/carplay.service.d/50-waze-on-cluster.conf';
 
 /* cb(null) when carplay may be restarted, else cb(why not). */

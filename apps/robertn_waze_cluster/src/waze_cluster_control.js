@@ -36,6 +36,9 @@
  *                       unproven true: a carplay build outside the patcher's
  *                       proven list, not patched yet; Enable map asks the
  *                       user to confirm before it sends unproven:true
+ *                       failed: boot recovery marked the patch failed (carplay
+ *                       crashes while patched and no backup restores it); the
+ *                       status line says so whatever the patch state
  *                       {"ev":"reboot-reply","ok":true|false,"reason"}
  *                       {"ev":"log","line"}  the backlog on connect, then each new line
  *
@@ -79,6 +82,9 @@ const CONFIRM_TEXT = 'Confirm: patch untested CarPlay';
 const CONFIRM_MS = 15000;
 const CONFIRM_STATUS = 'Untested CarPlay build: this patch has never run on this firmware. ' +
     'Press Confirm to patch it anyway, or wait to cancel';
+/* The status line while boot recovery has marked the patch failed. */
+const FAILED_STATUS = 'Map patch failed: CarPlay keeps crashing and cannot be restored automatically. ' +
+    'Unplug the phone and restore CarPlay by hand';
 
 /* One newline-delimited-JSON stream socket, reconnecting while open.
  * link: 'down' | 'up' | 'absent' (ENOENT) | 'refused' (ECONNREFUSED) | 'failed'.
@@ -432,6 +438,11 @@ class WazeClusterControl extends EventEmitter {
         if (state === 'error') {
             return 'Patch error' + (ps.reason ? `: ${ps.reason}` : '');
         }
+        /* Boot recovery gave up: carplay crashes while patched and no backup
+         * restores it. Nothing else this line could say matters more. */
+        if (ps && ps.failed) {
+            return FAILED_STATUS;
+        }
         /* A change written by a daemon that does not say which. */
         if (pending) {
             return `Restart needed — ${ps.reason || 'restart to activate the map patch'}`;
@@ -525,5 +536,5 @@ class WazeClusterControl extends EventEmitter {
 module.exports = {
     WazeClusterControl, LineSocket,
     RENDER_PATH, PATCH_PATH, PENDING_PATH, MAX_LINES,
-    SIZE, SAFE, ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS
+    SIZE, SAFE, ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS, FAILED_STATUS
 };

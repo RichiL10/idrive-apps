@@ -22,7 +22,7 @@
  */
 const assert = require('assert');
 const fs = require('fs');
-const { WazeClusterControl, SIZE, SAFE, ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS } = require('../src/waze_cluster_control.js');
+const { WazeClusterControl, SIZE, SAFE, ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS, FAILED_STATUS } = require('../src/waze_cluster_control.js');
 const { FakeRender, FakePatch, RENDER_PAGE, RENDER_FPS } = require('./fakes.js');
 
 /* short: macOS limits a socket path to 104 bytes */
@@ -462,8 +462,24 @@ test('an untested CarPlay build: the confirm step lapses, and a proven build nev
     d.close();
 });
 
+test('boot recovery marked the patch failed: the status line says so, whatever the patch state', async (render, patch) => {
+    const c = control();
+    c.open();
+    await until('connected', () => c.connectedPatch() && c.patchStatus);
+    patch.failed = 'carplay crashed 3 times with the map patch and cannot be restored automatically';
+    patch.announce('patched', 'high', null);
+    await until('failed', () => c.statusText() === FAILED_STATUS);
+    patch.announce('unknown', null, null);
+    await until('failed, unknown', () => c.patchStatus.state === 'unknown');
+    assert.strictEqual(c.statusText(), FAILED_STATUS);
+    patch.failed = null;
+    patch.announce('original', null, null);
+    await until('cleared', () => c.statusText() === 'Original — enable the map');
+    c.close();
+});
+
 test('the confirm texts carry no em dash and no emoji', async () => {
-    [ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS].forEach((t) => {
+    [ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS, FAILED_STATUS].forEach((t) => {
         assert(!/[\u2014\u2013]/.test(t), `dash in ${t}`);
         assert(!/[\u2600-\u27BF\u2B00-\u2BFF\uFE0F]|[\uD83C-\uD83E][\uDC00-\uDFFF]/.test(t), `emoji in ${t}`);
     });

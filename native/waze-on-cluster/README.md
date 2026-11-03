@@ -234,7 +234,8 @@ Once a second the render writes, in `/run/waze-on-cluster/` (mode 0644):
 `status.json`, the status the app shows (`state` idle, starting, showing,
 frozen or error; `page`; `reason`; the shared upload cap as `upload_cap_kb_per_s` and
 why as `upload_reason`, also in the app's status event); `probe.txt`, the
-sources, the depacketiser (`rtp: packets nals aus seq_gaps lost dropped bad`),
+sources, the depacketiser (`rtp: packets nals aus seq_gaps lost dropped bad
+late streams fu_overflows framing_overflows`),
 the receive queue (`queue: N dropped, at most M of 4096 packets waiting, K KB
 held`), its backlog (`backlog: the oldest packet waiting N ms, the longest
 wait M ms; K frames decoded without a picture to catch up`, with `; the
@@ -257,8 +258,8 @@ they cost, the packets the receive queue dropped, and how long the decoded
 packets waited in it:
 `waze: 1840 frames decoded in the last minute, 12 without a picture to
 catch up, 1 changed, 0 corrupted; the last picture is not blank; 0 losses
-(0 packets), 0 dropped by the receive queue; packets waited 2.4 ms on
-average, 61 ms at most`.
+(0 packets), 0 dropped by the receive queue, 0 buffers dropped at their
+size cap; packets waited 2.4 ms on average, 61 ms at most`.
 
 For a report, run as root on the unit
 `sh /var/opt/waze-on-cluster/current/collect-logs.sh`: it writes
@@ -382,7 +383,21 @@ unless given `--force`.
   a SIGKILL `patchd` did not send, bounded, where recmgr loaded `carplay`'s
   entry this boot; it never stops,
   kills or restarts anything. Its shutdown record is a drop-in for
-  `var-opt-ro.service`, removed with the tool.
+  `var-opt-ro.service`, removed with the tool. When a patched CarPlay keeps
+  crashing and no backup can restore it, it marks the tool failed (the
+  app's status line says so), starts CarPlay no more itself and logs an
+  ERROR at every boot and crash; CarPlay is left as it is, and only a
+  restore by hand (PATCH.md, Boot recovery) ends a crash loop the firmware
+  turns into head-unit restarts.
+- The render restarts after a failure exit at most 30 times in 10 minutes
+  (`StartLimitIntervalSec=600`, `StartLimitBurst=30`), then stays failed
+  until the next head-unit start.
+- The depacketiser and the decoder's framing hold bounded buffers: an FU-A
+  NAL unit past 4 MB, a NAL unit or access unit past 8 MB is dropped, the
+  stream resynchronises at the next start, and the drop is logged and
+  counted in the minute line. A late or duplicate RTP packet (the same
+  SSRC, up to 100 sequence numbers behind, timestamp no newer) is dropped
+  instead of read as a 65 k gap; a new SSRC is a new stream.
 - No debug arming: the services are normal units whitelisted in recmgr.
 - Nothing is mapped on the cluster before the stream's first non-blank
   picture, once its picture has stayed blank for `blank_ms`, or after the
@@ -426,6 +441,15 @@ frames that reference them); that the phone's SPS is exactly the advertised 1088
 motion reads during a long fast pan while driving; whether the alternate
 display survives iOS and Waze updates (flag 1006 is server-side). Waze sends
 no guidance metadata, so this shows map pixels, not data-driven directions.
+
+**0.7.10 is a Kiro test build** (not published; host tests and the target
+build only, never run on a car): the CarPlay binary written by a verified
+temporary file and rename only, keeping its owner, mode and extended
+attributes; `patchd` waits at most 15 s for the remount lock and then
+refuses; an untested CarPlay build is patched only after the user confirms
+it in the app; the render exits non-zero after 3 GPU decoder failures in a
+row or a `poll()` error, under the start limit above; the bounded buffers
+and the late-packet and SSRC rules above; boot recovery's failed mark.
 
 ## Building and testing
 

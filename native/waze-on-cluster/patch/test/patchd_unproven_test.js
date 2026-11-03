@@ -68,6 +68,7 @@ fs.chmodSync(MOUNT, 0o755);
 
 var SOCK = path.join(dir, 'sock', 'patch.sock');
 var LOCK = path.join(dir, 'sock', 'remount.lock');
+var RSTATE = path.join(dir, 'boot-recovery.json');
 var patchd = cp.spawn(process.execPath, [PATCHD], {
     env: Object.assign({}, process.env, {
         PATH: BIN + path.delimiter + process.env.PATH,
@@ -88,6 +89,7 @@ var patchd = cp.spawn(process.execPath, [PATCHD], {
         WOC_REMOUNT_LOCK: LOCK,
         WOC_LOCK_WAIT_MS: '1500',
         WOC_PROC: PROC,
+        WOC_RECOVERY_STATE: RSTATE,
     }),
     stdio: ['ignore', 'ignore', 'inherit'],
 });
@@ -154,6 +156,16 @@ async function main() {
     ok('the lock is released', !fs.existsSync(LOCK));
     r = await status();
     ok('status: once patched (our backup present) no confirmation is asked', !r.unproven, JSON.stringify(r));
+    ok('status: not marked failed without a boot-recovery mark', r.failed === undefined, JSON.stringify(r));
+
+    /* Boot recovery marked the patch failed (crashing, no backup restores it). */
+    fs.writeFileSync(RSTATE, JSON.stringify({ fails: 3, arm: null, failed: { since: 'x', boot: 'b', fails: 3, why: 'backup sha256 mismatch' } }) + '\n');
+    r = await status();
+    ok('status: a failed mark is reported for the app, with the count and the reason',
+        /crashed 3 times/.test(r.failed || '') && /backup sha256 mismatch/.test(r.failed || ''), JSON.stringify(r));
+    fs.writeFileSync(RSTATE, JSON.stringify({ fails: 0, arm: null, failed: null }) + '\n');
+    r = await status();
+    ok('status: a cleared mark is not reported', r.failed === undefined, JSON.stringify(r));
 }
 
 main().catch(function (e) { ok('no exception', false, e.stack); }).then(function () {

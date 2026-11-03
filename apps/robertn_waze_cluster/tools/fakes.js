@@ -167,6 +167,7 @@ class FakePatch extends LineServer {
         this.pending = null;  /* 'apply' | 'revert': the change waiting for a head-unit start */
         this.conflict = null; /* why the install left carplay as it was */
         this.unproven = false; /* a carplay build outside the proven list, not patched yet */
+        this.failed = null;   /* boot recovery marked the patch failed: its reason */
         this.busy = false;
         this.reason = null;
         this.reboots = 0;     /* reboot commands honoured */
@@ -188,6 +189,9 @@ class FakePatch extends LineServer {
             pending: this.pending, conflict: this.conflict };
         if (this.unproven) {
             s.unproven = true;
+        }
+        if (this.failed) {
+            s.failed = this.failed;
         }
         return s;
     }

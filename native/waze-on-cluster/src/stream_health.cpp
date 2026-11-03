@@ -95,6 +95,19 @@ std::string StreamHealth::waiting(int64_t now_ms, int64_t wall_ms, bool on)
            " s waiting";
 }
 
+std::string StreamHealth::overflow(int64_t now_ms, const char *what, uint32_t count)
+{
+    if (count == 0)
+        return std::string();
+    minute_.overflows += count;
+    if (!line_due(now_ms))
+        return std::string();
+    char line[192];
+    std::snprintf(line, sizeof line, "waze: the %s overran its size cap (%u dropped); resynchronising at the next start",
+                  what, count);
+    return line;
+}
+
 void StreamHealth::keyframe_wait(int64_t wall_ms, int64_t keyframe_wait_ms)
 {
     if (keyframe_wait_ms < kLostMs)

@@ -40,6 +40,7 @@ struct Opt {
     int ext_words = -1;      /* header extension length in 32-bit words; -1 for none */
     int pad = 0;             /* padding bytes, the last one the count */
     int version = 2;
+    uint32_t ssrc = 0x11111111;
 };
 
 static Bytes rtp(uint16_t seq, uint32_t ts, bool marker, const Bytes &payload, const Opt &o = Opt())
@@ -49,7 +50,7 @@ static Bytes rtp(uint16_t seq, uint32_t ts, bool marker, const Bytes &payload, c
     p.push_back((uint8_t)((marker ? 0x80 : 0) | 96));
     p.push_back((uint8_t)(seq >> 8)); p.push_back((uint8_t)seq);
     for (int s = 24; s >= 0; s -= 8) p.push_back((uint8_t)(ts >> s));
-    for (int i = 0; i < 4; i++) p.push_back(0x11);                          /* SSRC */
+    for (int s = 24; s >= 0; s -= 8) p.push_back((uint8_t)(o.ssrc >> s));  /* SSRC */
     for (int i = 0; i < o.cc * 4; i++) p.push_back(0x22);                   /* CSRCs */
     if (o.ext_words >= 0) {
         p.push_back(0xbe); p.push_back(0xde);
@@ -265,6 +266,166 @@ static void unsupported_types_dropped()
     CHECK(o.ev.empty() && r.stats().dropped == 2 && r.stats().bad == 0);
 }
 
+static void late_and_duplicate_dropped()
+{
+    /* A duplicate of the last packet and a late one from a little behind, in
+     * the same SSRC with timestamps no newer: dropped, no gap, no loss. */
+    const Bytes s1 = {0x41, 0x9a, 0x01}, s2 = {0x41, 0x9a, 0x02}, s3 = {0x41, 0x9a, 0x03};
+    RtpH264 r;
+    Out o;
+    std::vector<RtpH264::Gap> gaps;
+    r.on_gap = [&](const RtpH264::Gap &g) { gaps.push_back(g); };
+    CHECK(push(r, o, rtp(1, 1000, false, s1)));
+    CHECK(push(r, o, rtp(2, 1000, false, s2)));
+    CHECK(push(r, o, rtp(3, 2500, false, s3)));
+    CHECK(push(r, o, rtp(3, 2500, false, s3)));    /* duplicate */
+    CHECK(push(r, o, rtp(2, 1000, false, s2)));    /* late */
+    CHECK(push(r, o, rtp(4, 4000, false, kP)));
+    std::vector<Bytes> want = {annexb(s1), annexb(s2), kAuEnd, annexb(s3), kAuEnd, annexb(kP)};
+    CHECK(o.ev == want);
+    CHECK(gaps.empty() && r.stats().gaps == 0 && r.stats().lost == 0 && r.stats().late == 2);
+
+    /* Reordered: 1, 3, 2, 4. The gap at 3 is one packet; 2, late, is dropped;
+     * 4 follows 3 with no further gap. */
+    RtpH264 q;
+    Out oq;
+    push(q, oq, rtp(1, 1000, false, s1));
+    push(q, oq, rtp(3, 1000, false, s3));
+    push(q, oq, rtp(2, 1000, false, s2));
+    push(q, oq, rtp(4, 2500, false, kP));
+    want = {annexb(s1), annexb(s3), kAuEnd, annexb(kP)};
+    CHECK(oq.ev == want);
+    CHECK(q.stats().gaps == 1 && q.stats().lost == 1 && q.stats().late == 1);
+
+    /* A late packet drops nothing of the FU-A in progress. */
+    RtpH264 f;
+    Out of;
+    push(f, of, rtp(10, 1000, false, {0x7c, 0x85, 0xa1}));
+    push(f, of, rtp(11, 1000, false, {0x7c, 0x05, 0xa2}));
+    push(f, of, rtp(10, 1000, false, {0x7c, 0x85, 0xa1}));   /* duplicate start fragment */
+    push(f, of, rtp(12, 1000, false, {0x7c, 0x45, 0xa3}));
+    want = {annexb({0x65, 0xa1, 0xa2, 0xa3})};
+    CHECK(of.ev == want);
+    CHECK(f.stats().late == 1 && f.stats().dropped == 0 && f.stats().gaps == 0);
+}
+
+static void backward_jump_rules()
+{
+    /* Far behind, or a newer timestamp: not a late packet but a gap, as
+     * before (the gap settler then decides loss or new stream). */
+    RtpH264 r;
+    Out o;
+    push(r, o, rtp(500, 1000, false, kP));
+    push(r, o, rtp(300, 2500, false, kP));          /* 200 behind */
+    CHECK(r.stats().gaps == 1 && r.stats().late == 0 && o.ev.size() == 3);
+    push(r, o, rtp(290, 9000, false, kP));          /* 10 behind, newer timestamp */
+    CHECK(r.stats().gaps == 2 && r.stats().late == 0);
+
+    /* Two packets in sequence a little behind, timestamps no newer: the
+     * sequence restarted. The first is dropped as late, the second goes on
+     * as after a one-packet gap, and the next follows it. */
+    RtpH264 s;
+    Out os;
+    std::vector<RtpH264::Gap> gaps;
+    s.on_gap = [&](const RtpH264::Gap &g) { gaps.push_back(g); };
+    push(s, os, rtp(50, 5000, false, kP));
+    push(s, os, rtp(40, 4000, false, kSps));
+    push(s, os, rtp(41, 4000, false, kPps));
+    push(s, os, rtp(42, 4000, false, kIdr));
+    push(s, os, rtp(43, 5500, false, kP));
+    std::vector<Bytes> want = {annexb(kP), kAuEnd, annexb(kPps), annexb(kIdr), kAuEnd, annexb(kP)};
+    CHECK(os.ev == want);
+    CHECK(s.stats().late == 1 && s.stats().gaps == 1 && s.stats().lost == 1);
+    CHECK(gaps.size() == 1 && gaps[0].expected == 40 && gaps[0].got == 41 && gaps[0].lost == 1 && !gaps[0].new_ssrc);
+
+    /* Across the sequence wrap: 65535 then 0 is no gap; 65534 after 0 is late. */
+    RtpH264 w;
+    Out ow;
+    push(w, ow, rtp(65534, 1000, false, kP));
+    push(w, ow, rtp(65535, 1000, false, kP));
+    push(w, ow, rtp(0, 2500, false, kP));
+    push(w, ow, rtp(65534, 1000, false, kP));
+    push(w, ow, rtp(1, 4000, false, kP));
+    CHECK(w.stats().gaps == 0 && w.stats().late == 1 && w.stats().lost == 0);
+}
+
+static void new_ssrc_new_stream()
+{
+    Opt a, b;
+    a.ssrc = 0xaaaaaaaa;
+    b.ssrc = 0xbbbbbbbb;
+    RtpH264 r;
+    Out o;
+    std::vector<RtpH264::Gap> gaps;
+    r.on_gap = [&](const RtpH264::Gap &g) { gaps.push_back(g); };
+    push(r, o, rtp(30000, 1000, false, {0x7c, 0x85, 0xa1}, a));   /* an FU-A the old stream never ends */
+    push(r, o, rtp(7, 90, true, kSps, b));                         /* behind and older: still a new stream */
+    push(r, o, rtp(8, 90, true, kPps, b));
+    push(r, o, rtp(9, 90, false, kIdr, b));
+    push(r, o, rtp(10, 1590, false, kP, b));
+    std::vector<Bytes> want = {annexb(kSps), annexb(kPps), annexb(kIdr), kAuEnd, annexb(kP)};
+    CHECK(o.ev == want);
+    CHECK(r.stats().streams == 1 && r.stats().gaps == 0 && r.stats().lost == 0 && r.stats().late == 0 &&
+          r.stats().dropped == 1);
+    CHECK(gaps.size() == 1 && gaps[0].new_ssrc && gaps[0].lost == 0 && gaps[0].got == 7);
+
+    /* The settler takes a new SSRC for a new stream even when its first NAL
+     * unit is not an SPS. */
+    GapSettler gs;
+    RtpH264 r2;
+    Out o2;
+    std::vector<int> outcomes;
+    r2.on_gap = [&](const RtpH264::Gap &g) { gs.gap(g, 1, 0); };
+    const RtpH264::Sink sink = [&](const uint8_t *d, size_t, bool eoa) {
+        if (eoa) { gs.au_end(); return; }
+        const GapSettler::Outcome oc = gs.nal(d[4] & 0x1f);
+        if (oc != GapSettler::None) outcomes.push_back(oc);
+    };
+    const Bytes p1 = rtp(100, 1000, false, kP, a), p2 = rtp(5, 2000, false, kP, b);
+    r2.push(p1.data(), p1.size(), sink);
+    r2.push(p2.data(), p2.size(), sink);
+    CHECK(outcomes == std::vector<int>{GapSettler::NewStream});
+}
+
+static void fu_a_size_cap()
+{
+    const size_t cap = RtpH264::kMaxFuBytes;
+    const size_t frag = 1400;
+    Bytes mid(frag + 2, 0x5a);
+    mid[0] = 0x7c;
+    mid[1] = 0x05;
+
+    /* A 1 MB IDR slice, far above the phone's, is delivered whole. */
+    RtpH264 r;
+    Out o;
+    uint16_t seq = 1;
+    push(r, o, rtp(seq++, 1000, false, {0x7c, 0x85, 0xa1}));
+    size_t body = 1;
+    while (body + frag < (1u << 20)) { push(r, o, rtp(seq++, 1000, false, mid)); body += frag; }
+    push(r, o, rtp(seq++, 1000, false, {0x7c, 0x45, 0xa2}));
+    body += 1;
+    CHECK(o.ev.size() == 1 && o.ev[0].size() == 4 + 1 + body);
+    CHECK(r.stats().overflows == 0 && r.stats().dropped == 0);
+
+    /* One with no end fragment within the cap is dropped and freed; the
+     * rest of its fragments are dropped, and the next picture decodes. */
+    RtpH264 c;
+    Out oc;
+    seq = 1;
+    push(c, oc, rtp(seq++, 1000, false, {0x7c, 0x85, 0xa1}));
+    for (size_t held = 5; held <= cap + 2 * frag; held += frag) push(c, oc, rtp(seq++, 1000, false, mid));
+    push(c, oc, rtp(seq++, 1000, false, {0x7c, 0x45, 0xa2}));
+    CHECK(oc.ev.empty());
+    CHECK(c.stats().overflows == 1 && c.stats().gaps == 0);
+    push(c, oc, rtp(seq++, 2500, false, kP));
+    CHECK(oc.ev.size() == 1 && oc.ev[0] == annexb(kP));
+    /* The next FU-A after it is reassembled again. */
+    push(c, oc, rtp(seq++, 4000, false, {0x5c, 0x81, 0xd1}));
+    push(c, oc, rtp(seq++, 4000, false, {0x5c, 0x41, 0xd2}));
+    CHECK(oc.ev.size() == 3 && oc.ev[2] == annexb({0x41, 0xd1, 0xd2}));
+    CHECK(c.stats().overflows == 1);
+}
+
 static bool read_fixture(const char *path, std::vector<Bytes> *pkts)
 {
     FILE *f = std::fopen(path, "rb");
@@ -298,7 +459,10 @@ static void golden_stream15(const char *path)
     for (const Bytes &e : o.ev) types.push_back(e.empty() ? -1 : e[4] & 0x1f);
     std::vector<int> want_types = {7, 8, 5, -1, 1, -1, 1, -1, 1, -1, 1};
     CHECK(types == want_types);
-    CHECK(r.stats().packets == 10 && r.stats().gaps == 1 && r.stats().dropped == 3 && r.stats().bad == 0);
+    /* The new stream has an SSRC of its own: a new stream, not a gap of
+     * thousands of packets. */
+    CHECK(r.stats().packets == 10 && r.stats().gaps == 0 && r.stats().lost == 0 && r.stats().streams == 1 &&
+          r.stats().dropped == 3 && r.stats().bad == 0 && r.stats().late == 0);
     /* Each NAL unit is its packet's payload behind a start code. */
     size_t k = 3;
     for (const Bytes &e : o.ev) {
@@ -346,7 +510,7 @@ static void golden_with_gaps(const char *path)
     for (const Bytes &e : o.ev) types.push_back(e.empty() ? -1 : e[4] & 0x1f);
     std::vector<int> want_types = {7, 8, 5, -1, 1, -1, 1, -1, 1};
     CHECK(types == want_types);
-    CHECK(r.stats().gaps == 2);
+    CHECK(r.stats().gaps == 1 && r.stats().lost == 1 && r.stats().streams == 1);
     NalReader nr;
     int aus = 0, idr = 0;
     auto sink = [&](const AccessUnit &au) { aus++; idr += au.idr; };
@@ -435,6 +599,10 @@ int main(int argc, char **argv)
     join_mid_fu();
     header_fields();
     unsupported_types_dropped();
+    late_and_duplicate_dropped();
+    backward_jump_rules();
+    new_ssrc_new_stream();
+    fu_a_size_cap();
     golden_stream15(argc > 1 ? argv[1] : "test/data/stream15_start.rtp");
     golden_with_gaps(argc > 1 ? argv[1] : "test/data/stream15_start.rtp");
     gaps_settled(argc > 1 ? argv[1] : "test/data/stream15_start.rtp");

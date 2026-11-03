@@ -34,19 +34,52 @@ bool RtpH264::push(const uint8_t *pkt, size_t len, const Sink &sink)
     const bool marker = pkt[1] & 0x80;
     const uint16_t seq = (uint16_t)(pkt[2] << 8 | pkt[3]);
     const uint32_t ts = (uint32_t)pkt[4] << 24 | (uint32_t)pkt[5] << 16 | (uint32_t)pkt[6] << 8 | pkt[7];
+    const uint32_t ssrc = (uint32_t)pkt[8] << 24 | (uint32_t)pkt[9] << 16 | (uint32_t)pkt[10] << 8 | pkt[11];
     stats_.packets++;
+
+    if (have_ssrc_ && ssrc != ssrc_) {
+        /* A new stream: its sequence and timestamps are its own. */
+        Gap g;
+        g.expected = (uint16_t)(seq_ + 1);
+        g.got = seq;
+        g.new_ssrc = true;
+        stats_.streams++;
+        drop_fu();
+        have_seq_ = false;
+        late_ = false;
+        if (on_gap)
+            on_gap(g);
+    }
+    ssrc_ = ssrc;
+    have_ssrc_ = true;
 
     if (have_seq_ && seq != (uint16_t)(seq_ + 1)) {
         Gap g;
         g.expected = (uint16_t)(seq_ + 1);
         g.got = seq;
         g.lost = (uint16_t)(seq - g.expected);
+        const bool behind = (uint16_t)(seq_ - seq) < kMisorder && (int32_t)(ts - ts_) <= 0;
+        if (behind && !(late_ && seq == (uint16_t)(late_seq_ + 1))) {
+            /* Late or a duplicate: what it carried is already given up. */
+            late_ = true;
+            late_seq_ = seq;
+            stats_.late++;
+            return true;
+        }
+        if (behind) {
+            /* The second packet in sequence behind the last one: the
+             * sequence restarted, and only the packet before this one was
+             * dropped. */
+            g.expected = late_seq_;
+            g.lost = 1;
+        }
         stats_.gaps++;
         stats_.lost += g.lost;
         drop_fu();
         if (on_gap)
             on_gap(g);
     }
+    late_ = false;
     seq_ = seq;
     have_seq_ = true;
     if (have_ts_ && ts != ts_) {
@@ -89,6 +122,13 @@ bool RtpH264::push(const uint8_t *pkt, size_t len, const Sink &sink)
             } else if (!in_fu_ || fu_[4] != hdr) {
                 drop_fu();
                 stats_.dropped++;   /* no start fragment for it */
+            }
+            if (in_fu_ && fu_.size() + (n - 2) > kMaxFuBytes) {
+                /* No end fragment within any plausible slice size: drop it,
+                 * free the memory, and wait for the next start fragment. */
+                drop_fu();
+                std::vector<uint8_t>().swap(fu_);
+                stats_.overflows++;
             }
             if (in_fu_) {
                 fu_.insert(fu_.end(), p + 2, p + n);

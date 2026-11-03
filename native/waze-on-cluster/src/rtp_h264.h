@@ -25,6 +25,19 @@
  * with its FU-A. Each gap is reported (on_gap) before anything after it is
  * delivered.
  *
+ * Streams and late packets (RFC 3550 5.1, A.1). A new SSRC is a new stream:
+ * the FU-A in progress is dropped, the sequence starts over at its first
+ * packet, and the change is reported as a gap with new_ssrc set and nothing
+ * lost. A packet of the same SSRC up to kMisorder sequence numbers behind the
+ * last one, with a timestamp no newer, is late or a duplicate: it is dropped
+ * (counted late) and changes nothing, rather than read as a 65 k gap. Two such
+ * packets in sequence are a restarted sequence, not a late packet: the second
+ * is taken as the stream going on after a gap of the first.
+ *
+ * Bounds. An FU-A is reassembled up to kMaxFuBytes; one with no end fragment
+ * by then is dropped (and its memory freed), counted in overflows, and the
+ * depacketiser resynchronises at the next start fragment.
+ *
  * Not thread-safe; one caller at a time. No allocation once the buffers have
  * grown to the largest NAL unit. */
 #ifndef WOC_RTP_H264_H
@@ -44,11 +57,21 @@ public:
      * access unit. `data` is valid only during the call. */
     using Sink = std::function<void(const uint8_t *data, size_t len, bool end_of_au)>;
 
+    /* The largest FU-A NAL unit reassembled: far above an IDR slice of the
+     * phone's stream (well under 1 MB), small enough to bound memory. */
+    static const size_t kMaxFuBytes = 4u << 20;
+    /* How far behind the last sequence number a packet of the same SSRC is
+     * still late or a duplicate (RFC 3550 A.1 MAX_MISORDER). */
+    static const uint16_t kMisorder = 100;
+
     /* A sequence-number discontinuity: the packet expected and the one that
-     * came; lost is how many sequence numbers lie between them (mod 2^16). */
+     * came; lost is how many sequence numbers lie between them (mod 2^16).
+     * new_ssrc: the packet that came starts a new SSRC, a new stream; lost
+     * is then 0. */
     struct Gap {
         uint16_t expected = 0, got = 0;
         uint32_t lost = 0;
+        bool new_ssrc = false;
     };
 
     struct Stats {
@@ -59,6 +82,9 @@ public:
         uint64_t lost = 0;      /* packets missing by sequence number, over all gaps */
         uint64_t dropped = 0;   /* NAL units or fragments discarded (loss, unsupported) */
         uint64_t bad = 0;       /* datagrams that are not a parseable RTP H.264 packet */
+        uint64_t late = 0;      /* late or duplicate packets dropped (same SSRC, a little behind) */
+        uint64_t streams = 0;   /* SSRC changes: new streams */
+        uint64_t overflows = 0; /* FU-A NAL units dropped past kMaxFuBytes */
     };
 
     /* One datagram. Returns false, and drops it, if it is not an RTP v2
@@ -78,9 +104,12 @@ private:
     std::vector<uint8_t> nal_;   /* start code + a single NAL unit or STAP-A entry, being delivered */
     std::vector<uint8_t> fu_;    /* start code + the FU-A NAL unit being reassembled */
     bool in_fu_ = false;
-    bool have_seq_ = false, have_ts_ = false;
+    bool have_seq_ = false, have_ts_ = false, have_ssrc_ = false;
     uint16_t seq_ = 0;
     uint32_t ts_ = 0;
+    uint32_t ssrc_ = 0;
+    bool late_ = false;          /* the last packet was dropped as late */
+    uint16_t late_seq_ = 0;      /* its sequence number */
     bool au_open_ = false;       /* NAL units delivered since the last access unit end */
     bool vcl_done_ = false;      /* this packet completed a slice */
     Stats stats_;
