@@ -7,7 +7,8 @@
  * the KOMBI's own watchdog drops our content about 10 s later (DCSM.md
  * "Heartbeat") instead of a frozen map staying on the cluster; they go
  * again with the next beat. Times are cld::now_ms() (CLOCK_MONOTONIC).
- * Lock-free: one writer, any number of readers. */
+ * Lock-free: one writer, any number of readers. iDrive 7 only: iDrive 8
+ * sends no heartbeat of ours (unit_idrive8.cpp). */
 #ifndef CRS_LIVENESS_H
 #define CRS_LIVENESS_H
 

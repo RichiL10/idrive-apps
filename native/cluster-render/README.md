@@ -345,6 +345,9 @@ share a 2D pass, and the passes' render order follows the stack exactly
   it turns at least four times a second), the Dcsm2 heartbeats stop, so the
   KOMBI's own watchdog takes a frozen map off the cluster within about
   10 s. They go again with the loop's next turn. Both changes are logged.
+  iDrive 7 only: on iDrive 8 the offers go through RAMSES 27's own DCSM
+  provider, which sends no heartbeat of ours to hold back, and its calls
+  are made on the render thread alone (`src/unit_idrive8.cpp`).
 
 ## Identity and packaging
 

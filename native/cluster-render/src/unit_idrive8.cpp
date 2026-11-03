@@ -12,7 +12,14 @@
  * with _exit(), running no destructor. RAMSES not up yet (at boot) is
  * waited for here, not left to systemd's restart: what iDrive 8 does when
  * a service exits is CAR-ONLY (a stopped service restarted the head unit
- * on the car). */
+ * on the car).
+ *
+ * No liveness gate (liveness.h) here: the gate holds back Dcsm2
+ * heartbeats on iDrive 7, and iDrive 8 has none of ours to hold back (the
+ * provider keeps no heartbeat, dcsm27_port.h). Stopping the offers from a
+ * watchdog thread instead would call the provider off the render thread,
+ * which this file never does, and a crash here restarts the head unit; so
+ * a stalled loop is left as it is. */
 #include <cerrno>
 #include <csignal>
 #include <cstring>
