@@ -385,8 +385,9 @@ unless given `--force`.
   kills or restarts anything. Its shutdown record is a drop-in for
   `var-opt-ro.service`, removed with the tool. When a patched CarPlay keeps
   crashing and no backup can restore it, it marks the tool failed (the
-  app's status line says so), starts CarPlay no more itself and logs an
-  ERROR at every boot and crash; CarPlay is left as it is, and only a
+  app's status line says so), starts CarPlay no more itself after a crash
+  (still after a SIGKILL `patchd` did not send) and logs an ERROR at every
+  boot and crash; CarPlay is left as it is, and only a
   restore by hand (PATCH.md, Boot recovery) ends a crash loop the firmware
   turns into head-unit restarts.
 - The render restarts after a failure exit at most 30 times in 10 minutes
@@ -397,7 +398,11 @@ unless given `--force`.
   stream resynchronises at the next start, and the drop is logged and
   counted in the minute line. A late or duplicate RTP packet (the same
   SSRC, up to 100 sequence numbers behind, timestamp no newer) is dropped
-  instead of read as a 65 k gap; a new SSRC is a new stream.
+  instead of read as a 65 k gap, however many arrive in a row. A new SSRC,
+  or a jump of 3000 or more ahead or more than 100 behind, is a new stream
+  or a restarted sequence only once the next packet follows it in
+  sequence; an isolated packet (a stray one of an old stream or of a
+  second sender) is dropped and counted `stray`.
 - No debug arming: the services are normal units whitelisted in recmgr.
 - Nothing is mapped on the cluster before the stream's first non-blank
   picture, once its picture has stayed blank for `blank_ms`, or after the
@@ -450,6 +455,9 @@ refuses; an untested CarPlay build is patched only after the user confirms
 it in the app; the render exits non-zero after 3 GPU decoder failures in a
 row or a `poll()` error, under the start limit above; the bounded buffers
 and the late-packet and SSRC rules above; boot recovery's failed mark.
+Enable map on a CarPlay build outside the proven list needs the control app
+0.4.2 (robertn_waze_cluster), which sends the confirmation; the older app
+gets a refusal that says why. Install both together in the test build.
 
 ## Building and testing
 

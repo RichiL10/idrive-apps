@@ -118,9 +118,13 @@ var MAX_LINE = 64 * 1024;    /* drop a client that floods without a newline */
 
 /* How long a write waits for the shared remount lock before it is refused
  * (never written without it): a boot-recovery restore holds it for at most
- * recovery.js RESTORE_BOUND_MS. */
+ * recovery.js RESTORE_BOUND_MS (about 90 s), so the user is told to retry
+ * in two minutes. The install path does not wait that long either: the
+ * deploy tool kills an activate hook after 120 s (mgu-deploy hookTimeoutMs),
+ * which a 95 s wait plus the patch itself could pass mid-write; it refuses
+ * after the same wait and the install is rolled back, nothing changed. */
 var LOCK_WAIT_MS = parseInt(process.env.WOC_LOCK_WAIT_MS, 10) || 15000;
-var LOCK_BUSY_REASON = 'another write to carplay is in progress (boot recovery); nothing changed, try again in a minute';
+var LOCK_BUSY_REASON = 'another write to carplay is in progress (boot recovery); nothing changed, try again in two minutes';
 /* Enable map on a build outside the proven list without the user's
  * confirmation: the patcher refused it, nothing changed. */
 var UNPROVEN_REASON = 'untested carplay build: Enable map needs your confirmation; nothing changed';

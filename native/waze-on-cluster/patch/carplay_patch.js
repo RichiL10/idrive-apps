@@ -593,31 +593,44 @@ function copyXattrs(target, tmp, fail) {
 
 /* Atomic only: write a per-process temp file beside the target with the
  * target's owner, group, mode and extended attributes, fsync it, check its
- * bytes read back by hash, rename it over the target, fsync the folder. */
+ * bytes read back by hash, rename it over the target, fsync the folder.
+ * One descriptor, opened before the mode is set, does the write, owner,
+ * mode, fsync and read-back, so a target mode without owner write (0555)
+ * does not stop a caller that is not root. */
 function writeInPlace(target, buf) {
     dropStaleTemps(target);
     var tmp = target + '.woc-tmp.' + process.pid;
+    var fd = null;
     function fail(why) {
+        if (fd !== null) { try { fs.closeSync(fd); } catch (e) {} fd = null; }
         try { fs.unlinkSync(tmp); } catch (e) {}
         die(why + '; ' + target + ' unchanged');
     }
     var st = null;
     try { st = fs.statSync(target); } catch (e) {}
     try { fs.unlinkSync(tmp); } catch (e) {}
-    try { fs.writeFileSync(tmp, buf, { mode: 0o600, flag: 'wx' }); }
-    catch (e) { fail('writing ' + tmp + ': ' + e.message); }
+    try {
+        fd = fs.openSync(tmp, 'wx+', 0o600);
+        for (var off = 0; off < buf.length;) off += fs.writeSync(fd, buf, off, buf.length - off, off);
+    } catch (e) { fail('writing ' + tmp + ': ' + e.message); }
     try {
         /* chown first: it clears set-id bits, which the chmod then restores. */
         if (st) {
-            try { fs.chownSync(tmp, st.uid, st.gid); }
+            try { fs.fchownSync(fd, st.uid, st.gid); }
             catch (e) { if (process.getuid && process.getuid() === 0) throw e; }
         }
-        fs.chmodSync(tmp, st ? st.mode & 0o7777 : 0o755);
+        fs.fchmodSync(fd, st ? st.mode & 0o7777 : 0o755);
     } catch (e) { fail('setting owner/mode of ' + tmp + ': ' + e.message); }
     if (st) copyXattrs(target, tmp, fail);
-    try { fsyncFile(tmp); }   /* the bytes must be on disk before the rename */
+    try { fs.fsyncSync(fd); }   /* the bytes must be on disk before the rename */
     catch (e) { fail('fsync ' + tmp + ': ' + e.message); }
-    if (sha256(fs.readFileSync(tmp)) !== sha256(buf)) fail('temp file verification failed');
+    var back = Buffer.alloc(buf.length + 1), got = 0, n;
+    try {
+        while (got < back.length && (n = fs.readSync(fd, back, got, back.length - got, got)) > 0) got += n;
+    } catch (e) { fail('reading back ' + tmp + ': ' + e.message); }
+    if (got !== buf.length || sha256(back.slice(0, got)) !== sha256(buf)) fail('temp file verification failed');
+    try { fs.closeSync(fd); } catch (e) { fd = null; fail('closing ' + tmp + ': ' + e.message); }
+    fd = null;
     try { fs.renameSync(tmp, target); }
     catch (e) { fail('rename ' + tmp + ' -> ' + target + ' failed (' + e.message + '); not rewritten in place'); }
     fsyncDir(path.dirname(target));

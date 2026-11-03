@@ -14,9 +14,10 @@ After=local-fs.target waze-on-cluster.socket cluster-render.socket
 # reached, so a fault that never clears would restart it forever. 30 starts
 # in 10 minutes still covers a slow boot (about 150 s of failed starts) and
 # then leaves the unit failed instead of looping; the next head-unit start
-# or `systemctl reset-failed` clears it. Kiro test change, UNVERIFIED on the
-# car: needs systemd 230 or later (an older one ignores these two keys with a
-# warning).
+# or `systemctl reset-failed` clears it. Kiro test change, not yet run on the
+# car. The keys need systemd 230 or later; the unit runs systemd 237 (the
+# mgu-deploy tool this installs through checks for 237 and works around its
+# start-limit behaviour), so they apply there.
 StartLimitIntervalSec=600
 StartLimitBurst=30
 
