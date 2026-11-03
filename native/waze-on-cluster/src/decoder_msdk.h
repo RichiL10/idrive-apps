@@ -106,6 +106,16 @@ public:
      * after a sequence was given up, until the next SPS. */
     bool decoding() const;
 
+    /* Sessions closed since init() because MSDK reported a GPU hang or a
+     * lost or failed device (MFX_ERR_GPU_HANG, MFX_ERR_DEVICE_LOST,
+     * MFX_ERR_DEVICE_FAILED). Such a session is closed at the first failure;
+     * the decoder then waits for the next SPS, in a new session. */
+    uint64_t device_failures() const;
+
+    /* NAL units and access units the framing (nal_reader.h) dropped at its
+     * size cap since init(). */
+    uint64_t buffer_overflows() const;
+
 private:
     struct State;
     std::unique_ptr<State> s_;

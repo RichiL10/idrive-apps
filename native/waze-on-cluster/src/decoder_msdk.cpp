@@ -133,6 +133,16 @@ struct Decoder::State {
         if (error.empty()) error = msg;
         return false;
     }
+    /* An MSDK call failed with sts; a GPU hang or a lost or failed device
+     * marks the session unusable (device_failed). */
+    bool fail_sts(const char *call, mfxStatus sts)
+    {
+        if (sts == MFX_ERR_GPU_HANG || sts == MFX_ERR_DEVICE_LOST || sts == MFX_ERR_DEVICE_FAILED)
+            device_failed = true;
+        return fail(mfx_error(call, sts));
+    }
+    bool device_failed = false;      /* this call hit a GPU hang or a lost or failed device */
+    uint64_t device_failures = 0;    /* sessions closed for that, since init */
 };
 
 Decoder::State::~State()
@@ -151,7 +161,7 @@ bool Decoder::State::open_session()
     mfxStatus sts = MFXInit(MFX_IMPL_HARDWARE | MFX_IMPL_VIA_VAAPI, &ver, &session);
     if (sts < MFX_ERR_NONE) {
         session = nullptr;
-        return fail(mfx_error("MFXInit", sts));
+        return fail_sts("MFXInit", sts);
     }
     /* On Linux the hardware library takes its device from the application
      * as a VA display (the unit's libNmeVideoMSDK imports vaGetDisplayDRM,
@@ -160,7 +170,7 @@ bool Decoder::State::open_session()
     if (sts < MFX_ERR_NONE) {
         MFXClose(session);
         session = nullptr;
-        return fail(mfx_error("MFXVideoCORE_SetHandle", sts));
+        return fail_sts("MFXVideoCORE_SetHandle", sts);
     }
     return true;
 }
@@ -182,6 +192,8 @@ void Decoder::State::access_unit(const AccessUnit &au, const FrameSink &cb)
                 return;   /* nothing decodes before a sequence header */
             if (!start(au)) {
                 stop();
+                if (device_failed)
+                    device_failures++;
                 return;
             }
             if (!running)
@@ -195,6 +207,15 @@ void Decoder::State::access_unit(const AccessUnit &au, const FrameSink &cb)
             return;
         }
         if (r == Failed) {
+            if (device_failed) {
+                /* The session cannot decode anything more: close it now
+                 * instead of failing kFailLimit access units on it. */
+                failed = 0;
+                stop();
+                device_failures++;
+                error += "; the GPU device failed: session closed, waiting for an SPS";
+                return;
+            }
             if (++failed >= kFailLimit) {
                 failed = 0;
                 stop();
@@ -231,7 +252,7 @@ bool Decoder::State::start(const AccessUnit &au)
     if (sts == MFX_ERR_MORE_DATA)
         return true;   /* SPS without its PPS: wait for the next SPS */
     if (sts < MFX_ERR_NONE)
-        return fail(mfx_error("MFXVideoDECODE_DecodeHeader", sts));
+        return fail_sts("MFXVideoDECODE_DecodeHeader", sts);
 
     /* One frame in flight: lowest latency. */
     dec.AsyncDepth = 1;
@@ -274,10 +295,10 @@ bool Decoder::State::start(const AccessUnit &au)
     memset(vpp_req, 0, sizeof vpp_req);
     sts = MFXVideoDECODE_QueryIOSurf(session, &dec, &dec_req);
     if (sts < MFX_ERR_NONE)
-        return fail(mfx_error("MFXVideoDECODE_QueryIOSurf", sts));
+        return fail_sts("MFXVideoDECODE_QueryIOSurf", sts);
     sts = MFXVideoVPP_QueryIOSurf(session, &vpp, vpp_req);
     if (sts < MFX_ERR_NONE)
-        return fail(mfx_error("MFXVideoVPP_QueryIOSurf", sts));
+        return fail_sts("MFXVideoVPP_QueryIOSurf", sts);
     mfxU16 n = (mfxU16)(dec_req.NumFrameSuggested + vpp_req[0].NumFrameSuggested);
 
     /* Opaque surfaces: the application passes surface headers only, and MSDK
@@ -307,11 +328,11 @@ bool Decoder::State::start(const AccessUnit &au)
 
     sts = MFXVideoDECODE_Init(session, &dec);
     if (sts < MFX_ERR_NONE)
-        return fail(mfx_error("MFXVideoDECODE_Init", sts));
+        return fail_sts("MFXVideoDECODE_Init", sts);
     sts = MFXVideoVPP_Init(session, &vpp);
     if (sts < MFX_ERR_NONE) {
         MFXVideoDECODE_Close(session);
-        return fail(mfx_error("MFXVideoVPP_Init", sts));
+        return fail_sts("MFXVideoVPP_Init", sts);
     }
 
     /* One output surface suffices: each VPP run is synchronised before the
@@ -365,7 +386,7 @@ Decoder::State::Result Decoder::State::decode(mfxBitstream *bs, const FrameSink 
         mfxStatus sts = MFXVideoDECODE_DecodeFrameAsync(session, bs, work, &out, &sync);
         if (sts == MFX_WRN_DEVICE_BUSY) {
             if (++busy > kBusyRetries) {
-                fail(mfx_error("MFXVideoDECODE_DecodeFrameAsync", sts));
+                fail_sts("MFXVideoDECODE_DecodeFrameAsync", sts);
                 return Failed;
             }
             usleep(1000);
@@ -377,7 +398,7 @@ Decoder::State::Result Decoder::State::decode(mfxBitstream *bs, const FrameSink 
         if (sts == MFX_ERR_INCOMPATIBLE_VIDEO_PARAM && bs)
             return Restart;
         if (sts < MFX_ERR_NONE && sts != MFX_ERR_MORE_SURFACE) {
-            fail(mfx_error("MFXVideoDECODE_DecodeFrameAsync", sts));
+            fail_sts("MFXVideoDECODE_DecodeFrameAsync", sts);
             return Failed;
         }
         /* MFX_ERR_MORE_SURFACE: the decoder kept `work` as a reference and
@@ -389,7 +410,7 @@ Decoder::State::Result Decoder::State::decode(mfxBitstream *bs, const FrameSink 
             if (!(picture ? convert(out, cb) : skip(out, sync, cb)))
                 return Failed;
         } else if (++stalls > kStallLimit) {
-            fail(mfx_error("MFXVideoDECODE_DecodeFrameAsync makes no progress", sts));
+            fail_sts("MFXVideoDECODE_DecodeFrameAsync makes no progress", sts);
             return Failed;
         }
     }
@@ -405,18 +426,18 @@ bool Decoder::State::convert(mfxFrameSurface1 *in, const FrameSink &cb)
     int busy = 0;
     while ((sts = MFXVideoVPP_RunFrameVPPAsync(session, in, &vout, nullptr, &sync)) == MFX_WRN_DEVICE_BUSY) {
         if (++busy > kBusyRetries)
-            return fail(mfx_error("MFXVideoVPP_RunFrameVPPAsync", sts));
+            return fail_sts("MFXVideoVPP_RunFrameVPPAsync", sts);
         usleep(1000);
     }
     if (sts == MFX_ERR_MORE_DATA)
         return true;   /* VPP holds the input for a later output (deinterlacing) */
     if (sts < MFX_ERR_NONE)
-        return fail(mfx_error("MFXVideoVPP_RunFrameVPPAsync", sts));
+        return fail_sts("MFXVideoVPP_RunFrameVPPAsync", sts);
     if (!sync)
         return true;
     sts = MFXVideoCORE_SyncOperation(session, sync, kSyncTimeoutMs);
     if (sts != MFX_ERR_NONE)
-        return fail(mfx_error("MFXVideoCORE_SyncOperation", sts));
+        return fail_sts("MFXVideoCORE_SyncOperation", sts);
 
     const size_t pitch = vout.Data.Pitch;
     const size_t n = (size_t)w * atlas_height(h);
@@ -439,7 +460,7 @@ bool Decoder::State::skip(mfxFrameSurface1 *out, mfxSyncPoint sync, const FrameS
 {
     const mfxStatus sts = MFXVideoCORE_SyncOperation(session, sync, kSyncTimeoutMs);
     if (sts != MFX_ERR_NONE)
-        return fail(mfx_error("MFXVideoCORE_SyncOperation", sts));
+        return fail_sts("MFXVideoCORE_SyncOperation", sts);
     VideoFrame f = {w, h, out->Data.Corrupted, nullptr};
     cb(f);
     return true;
@@ -500,6 +521,7 @@ bool Decoder::feed(const uint8_t *data, size_t len, const FrameSink &cb, std::st
     }
     State &s = *s_;
     s.error.clear();
+    s.device_failed = false;
     s.picture = picture;
     s.nal.push(data, len, end_of_au, [&](const AccessUnit &au) { s.access_unit(au, cb); });
     if (!s.error.empty()) {
@@ -525,5 +547,9 @@ void Decoder::flush(const FrameSink &cb)
 void Decoder::shutdown() { s_.reset(); }
 
 bool Decoder::decoding() const { return s_ && s_->running; }
+
+uint64_t Decoder::device_failures() const { return s_ ? s_->device_failures : 0; }
+
+uint64_t Decoder::buffer_overflows() const { return s_ ? s_->nal.overflows() : 0; }
 
 }  // namespace woc

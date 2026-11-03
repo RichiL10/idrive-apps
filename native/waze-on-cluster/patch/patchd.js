@@ -18,7 +18,13 @@
  *
  * Protocol (newline-delimited JSON, one object per line):
  *   app -> patchd  {"cmd":"status"}
- *                  {"cmd":"apply","panel":"high"|"mid","mode":"fifo"|"udp"|"avb"}
+ *                  {"cmd":"apply","panel":"high"|"mid","mode":"fifo"|"udp"|"avb","unproven":true?}
+ *                    unproven:true only after the user confirmed patching a
+ *                    build outside the proven list (status "unproven"); without
+ *                    it the first edit of such a build is refused, nothing
+ *                    changed. An apply or revert that cannot take the shared
+ *                    remount lock within 15 s is refused (state error), never
+ *                    written without it.
  *                    all modes apply the variant gate + self-start; they differ
  *                    only in the sink. avb = stock avb:// sink (the mode the app
  *                    applies; the render joins the media bus); udp = udp://
@@ -45,6 +51,9 @@
  *                    carplay (after an apply/revert that changed the binary):
  *                    restarted | deferred (takes effect at the next head-unit
  *                    start; state is unknown with that reason until then)
+ *                    unproven: true when the carplay build is outside the proven
+ *                    list and not patched yet (Enable map needs the user's
+ *                    confirmation, sent as apply's unproven:true)
  *                    pending: apply | revert, while a written change waits for
  *                    the next head-unit start (carplay is then deferred)
  *                    conflict: why the patch is not applied when the tool is
@@ -106,6 +115,19 @@ var quitting = false;        /* SIGTERM: finish the active patch operation */
 var REBOOT_CMD = (process.env.WOC_REBOOT_CMD || 'systemctl reboot').split(' ');
 var statusInFlight = false;  /* coalesce the carplay_patch status spawns */
 var MAX_LINE = 64 * 1024;    /* drop a client that floods without a newline */
+
+/* How long a write waits for the shared remount lock before it is refused
+ * (never written without it): a boot-recovery restore holds it for at most
+ * recovery.js RESTORE_BOUND_MS (about 90 s), so the user is told to retry
+ * in two minutes. The install path does not wait that long either: the
+ * deploy tool kills an activate hook after 120 s (mgu-deploy hookTimeoutMs),
+ * which a 95 s wait plus the patch itself could pass mid-write; it refuses
+ * after the same wait and the install is rolled back, nothing changed. */
+var LOCK_WAIT_MS = parseInt(process.env.WOC_LOCK_WAIT_MS, 10) || 15000;
+var LOCK_BUSY_REASON = 'another write to carplay is in progress (boot recovery); nothing changed, try again in two minutes';
+/* Enable map on a build outside the proven list without the user's
+ * confirmation: the patcher refused it, nothing changed. */
+var UNPROVEN_REASON = 'untested carplay build: Enable map needs your confirmation; nothing changed';
 
 /* A ring of recent carplay log lines (carplay.service's journal and, by marker,
  * DLT), so the remote diagnostic endpoint can say why "no map" happened without
@@ -315,7 +337,15 @@ function readState(cb) {
         if (pending) { state = 'unknown'; mode = null; reason = pending.reason; carplay = 'deferred'; }
         cachedState = { state: state, panel: variant ? variant[1].toLowerCase() : null, mode: mode, res: res, safe: safe, reason: reason, carplay: carplay,
                         pending: pending ? pending.action || 'apply' : null, pendingBy: pending ? pending.by : null,
-                        conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable };
+                        conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable,
+                        /* the first edit of this build needs the user's confirmation */
+                        /* the first edit of this build needs the user's confirmation; a
+                         * modified build is refused by the patcher anyway (conflict) */
+                        unproven: known && !hasBackup && pristine && !proven,
+                        /* boot recovery marked the patch failed: crashing, no backup restores
+                         * it. Not while carplay reads stock (restored by hand): the mark is
+                         * stale then and clears at the next boot step or crash. */
+                        failed: binary !== 'original' ? failedReason() : '' };
         cb(cachedState);
     });
 }
@@ -327,6 +357,8 @@ function status(extra) {
         if (!busy && st.carplay) msg.carplay = st.carplay;
         if (!busy && st.pending) msg.pending = st.pending;
         if (!busy && st.conflict) msg.conflict = st.conflict;
+        if (st.unproven) msg.unproven = true;
+        if (st.failed) msg.failed = st.failed;
         if (extra) Object.keys(extra).forEach(function (k) { msg[k] = extra[k]; });
         send(msg);
     });
@@ -370,6 +402,7 @@ function remountRo(tries, cb) {
  * next head-unit start. */
 var recmgrLoaded = require('./recmgr_list.js').recmgrLoaded;
 var parseShow = require('./recovery.js').parseShow;
+var failedReason = require('./recovery.js').failedReason;
 var DROPIN = process.env.WOC_CARPLAY_DROPIN || '/etc/systemd/system/carplay.service.d/50-waze-on-cluster.conf';
 
 /* cb(null) when carplay may be restarted, else cb(why not). */
@@ -780,8 +813,8 @@ function patchWith(args, action, blocked, done) {
  * "avb": the stock avb:// sink, the media bus the render joins (the mode the
  * app applies). "udp": Edit 2 sink -> udp://127.0.0.1:UDP_PORT, the stream
  * sink the projection bridge accepts, which this tool receives. "fifo": sink
- * -> the file:// FIFO (the bridge rejects it on the car). `unproven`: the
- * user's Enable map, which also patches a build outside the proven list;
+ * -> the file:// FIFO (the bridge rejects it on the car). `unproven`: an
+ * Enable map the user confirmed for a build outside the proven list;
  * install-time activation never does. */
 function apply(panel, mode, noRestart, unproven, done) {
     if (panel !== 'high' && panel !== 'mid') { done(new Error('panel must be high or mid')); return; }
@@ -868,18 +901,32 @@ function handle(line, sock) {
         var mode = (msg.mode === 'avb' || msg.mode === 'udp') ? msg.mode : 'fifo';   /* capture mode; default fifo */
         busy = true;
         status({ reason: op === 'apply' ? 'applying' : 'reverting' });
-        var fn = op === 'apply' ? function (cb) { apply(panel, mode, false, true, cb); } : function (cb) { revert(false, false, cb); };
+        /* A build outside the proven list is patched only when the app says
+         * the user confirmed it ({"unproven":true}); a plain Enable map on an
+         * untested carplay build is refused by the patcher, changing nothing. */
+        var unproven = op === 'apply' && msg.unproven === true;
+        if (unproven) log('apply: the user confirmed patching a carplay build outside the proven list');
+        var fn = op === 'apply' ? function (cb) { apply(panel, mode, false, unproven, cb); } : function (cb) { revert(false, false, cb); };
         /* Hold the shared remount lock so the boot-recovery service does not
-         * remount / at the same time. User-driven, so it proceeds after a short
-         * wait even if the lock looks stuck; recovery yields to it. */
-        lock.acquire(5000, function (got) {
-            if (!got) log('remount lock busy; proceeding (user operation)');
-            fn(function (pErr, roErr, activation) {
+         * remount / or write carplay at the same time. Never proceed without
+         * it: the holder (a restore) ends within recovery.js RESTORE_BOUND_MS
+         * and a lock abandoned by a killed holder is broken after
+         * remount_lock.js STALE_MS, so the user retries shortly. */
+        lock.acquire(LOCK_WAIT_MS, function (got) {
+            if (!got) {
+                busy = false;
+                log('remount lock busy; ' + op + ' not started, nothing changed');
+                status({ state: 'error', reason: LOCK_BUSY_REASON });
+                quitWhenIdle();
+                return;
+            }
+            fn(function (pErr, roErr, activation, refused) {
                 lock.release();
                 busy = false;
                 if (roErr) log('WARNING: ' + roErr.message + ' — run: mount -o remount,ro /');
                 if (pErr || roErr) {
-                    var reason = [pErr && pErr.message, roErr && roErr.message].filter(Boolean).join('; ');
+                    var reason = [pErr && (refused && /not a proven build/.test(refused) ? UNPROVEN_REASON : pErr.message),
+                        roErr && roErr.message].filter(Boolean).join('; ');
                     log(op + ' failed: ' + reason);
                     send({ ev: 'status', state: 'error', reason: reason });
                 } else {
@@ -985,8 +1032,15 @@ function oneShot(which) {
     }
     if (which === 'deactivate') markBy = 'removal';
     try { ensureDir(path.dirname(SOCK)); } catch (e) { result.status = e.message; finish(1); return; }
-    lock.acquire(10000, function (got) {
-        if (!got) log('remount lock busy; proceeding');
+    lock.acquire(LOCK_WAIT_MS, function (got) {
+        if (!got) {
+            /* Never write carplay beside a running restore: nothing changed,
+             * so the install is rolled back and can be retried. */
+            result.status = 'remount lock busy (a boot-recovery restore may be running); nothing changed';
+            log(which + ': ' + result.status);
+            finish(1);
+            return;
+        }
         readState(function (st) {
             var p = plan(which, st);
             if (!p.op) {

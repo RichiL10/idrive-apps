@@ -15,7 +15,10 @@
  *
  * Enable map shows for an unpatched or unknown state and Disable map for a
  * patch, both only with no change pending (waze_cluster_control.js
- * canEnable/canDisable); capture is enabled while the patch daemon is
+ * canEnable/canDisable); on a CarPlay build outside the patcher's proven
+ * list the first Enable press turns the button into a confirm step and the
+ * status line says the build is untested (enableButtonText);
+ * capture is enabled while the patch daemon is
  * reachable. The app connects both sockets while its page is visible and
  * closes them when it is hidden or the app shuts down; the tools keep
  * running. waze_cluster_control.js holds the protocol.
@@ -308,6 +311,8 @@ class WazeClusterApp extends OnlineApp {
         this._write(SETUP_NAME, SETUP_TEXT);
         this._write(CAPTURE_NAME, this._control.captureButtonText());
         this._write(CAPTURE_STATUS, this._control.captureText());
+        /* "Enable map", or the confirm step for an untested CarPlay build. */
+        this._write(ENABLE_NAME, this._control.enableButtonText());
         const patch = this._control.connectedPatch();
         /* While a reboot is underway no patch operation should start. */
         const restarting = this._control.restartRequested();

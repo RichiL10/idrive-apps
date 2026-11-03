@@ -8,7 +8,9 @@
  * (the under-the-gauges layer) is shown, MAPPED_INVISIBLE is parked behind
  * the content the slot shows. A release is an unmap, when a map was asked
  * for and not refused, then an unfetch. A take-over is an unmap of the
- * stock HMI's content sent with the HMI's client handle. The KOMBI names
+ * stock HMI's content sent with the HMI's client handle; with the target's
+ * take_over_remap, framed by an unmap of our parked map before it and a map
+ * of ours again after it, our fetch kept. The KOMBI names
  * only the scene id in its events, and its replies name nothing: each reply
  * is the answer to the oldest request of its kind still unanswered (SOME/IP
  * over TCP answers in order), so the scenes asked for are queued per kind
@@ -120,6 +122,8 @@ private:
         Phase phase = Phase::Fetching;
         bool map_asked = false;   /* a map went out and was not refused */
         bool fetched = false;     /* FETCHED, and not removed since */
+        bool remap = false;       /* a take-over's remap is out, not answered by a map status yet */
+        int remap_unmaps = 0;     /* UNMAPPED statuses of our own remap unmap still to come (0 or 1) */
     };
 
     /* What the KOMBI sent since the service started. */

@@ -22,7 +22,7 @@
  */
 const assert = require('assert');
 const fs = require('fs');
-const { WazeClusterControl, SIZE, SAFE } = require('../src/waze_cluster_control.js');
+const { WazeClusterControl, SIZE, SAFE, ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS, FAILED_STATUS } = require('../src/waze_cluster_control.js');
 const { FakeRender, FakePatch, RENDER_PAGE, RENDER_FPS } = require('./fakes.js');
 
 /* short: macOS limits a socket path to 104 bytes */
@@ -412,6 +412,97 @@ test('reconnect does not duplicate the backlog', async (render, patch) => {
     const after = c.rows().filter((r) => r === 'patch: boot line').length;
     assert.strictEqual(after, 1, 'the resent backlog is not duplicated');
     c.close();
+});
+
+test('an untested CarPlay build: Enable map asks to confirm, only the confirmed press sends unproven', async (render, patch) => {
+    patch.unproven = true;
+    patch.conflict = 'untested carplay build';
+    const c = new WazeClusterControl({ renderPath: RSOCK, patchPath: PSOCK, pendingPath: PENDING, retryMs: 100, confirmMinMs: 200 });
+    c.open();
+    await until('original', () => c.connectedPatch() && c.patchStatus && c.patchStatus.unproven === true);
+    assert.strictEqual(c.enableButtonText(), ENABLE_TEXT);
+    assert.strictEqual(c.canEnable(), true);
+    c.enableMap();
+    const first = Date.now();
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT);
+    assert.strictEqual(c.statusText(), CONFIRM_STATUS);
+    await sleep(50);
+    assert.strictEqual(patch.count('apply'), 0, 'the first press sends nothing');
+    c.enableMap();   /* too soon after the first: ignored, still asking */
+    await sleep(50);
+    assert.strictEqual(patch.count('apply'), 0, 'a press before the minimum gap sends nothing');
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT);
+    await sleep(Math.max(0, 250 - (Date.now() - first)));
+    c.enableMap();
+    await until('apply sent', () => patch.count('apply') === 1);
+    assert.deepStrictEqual(patch.received.filter((m) => m.cmd === 'apply'), [{ cmd: 'apply', panel: 'high', mode: 'avb', unproven: true }]);
+    assert.strictEqual(c.enableButtonText(), ENABLE_TEXT);
+    await until('patched', () => c.patchStatus && c.patchStatus.state === 'patched');
+    assert.strictEqual(c.needsConfirm(), false);
+    c.close();
+});
+
+test('an untested CarPlay build: two presses 10 ms apart (a doubled event) send no apply', async (render, patch) => {
+    patch.unproven = true;
+    const c = control();
+    c.open();
+    await until('unproven', () => c.connectedPatch() && c.needsConfirm());
+    c.enableMap();
+    await sleep(10);
+    c.enableMap();
+    await sleep(100);
+    assert.strictEqual(patch.count('apply'), 0, 'no apply');
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT, 'the confirm step stays open');
+    c.close();
+});
+
+test('an untested CarPlay build: the confirm step lapses, and a proven build never asks', async (render, patch) => {
+    patch.unproven = true;
+    const c = new WazeClusterControl({ renderPath: RSOCK, patchPath: PSOCK, pendingPath: PENDING, retryMs: 100, confirmMs: 100 });
+    c.open();
+    await until('unproven', () => c.connectedPatch() && c.needsConfirm());
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT);
+    await until('lapsed', () => c.enableButtonText() === ENABLE_TEXT);
+    assert.notStrictEqual(c.statusText(), CONFIRM_STATUS);
+    assert.strictEqual(patch.count('apply'), 0, 'a lapsed confirm sends nothing');
+    /* the next press asks again */
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), CONFIRM_TEXT);
+    c.close();
+    assert.strictEqual(c.enableButtonText(), ENABLE_TEXT, 'closing the page drops the confirm step');
+
+    patch.unproven = false;
+    const d = control();
+    d.open();
+    await until('original', () => d.connectedPatch() && d.patchStatus);
+    d.enableMap();
+    await until('apply sent', () => patch.count('apply') === 1);
+    assert.deepStrictEqual(patch.received.filter((m) => m.cmd === 'apply'), [{ cmd: 'apply', panel: 'high', mode: 'avb' }]);
+    d.close();
+});
+
+test('boot recovery marked the patch failed: the status line says so, whatever the patch state', async (render, patch) => {
+    const c = control();
+    c.open();
+    await until('connected', () => c.connectedPatch() && c.patchStatus);
+    patch.failed = 'carplay crashed 3 times with the map patch and cannot be restored automatically';
+    patch.announce('patched', 'high', null);
+    await until('failed', () => c.statusText() === FAILED_STATUS);
+    patch.announce('unknown', null, null);
+    await until('failed, unknown', () => c.patchStatus.state === 'unknown');
+    assert.strictEqual(c.statusText(), FAILED_STATUS);
+    patch.failed = null;
+    patch.announce('original', null, null);
+    await until('cleared', () => c.statusText() === 'Original — enable the map');
+    c.close();
+});
+
+test('the confirm texts carry no em dash and no emoji', async () => {
+    [ENABLE_TEXT, CONFIRM_TEXT, CONFIRM_STATUS, FAILED_STATUS].forEach((t) => {
+        assert(!/[\u2014\u2013]/.test(t), `dash in ${t}`);
+        assert(!/[\u2600-\u27BF\u2B00-\u2BFF\uFE0F]|[\uD83C-\uD83E][\uDC00-\uDFFF]/.test(t), `emoji in ${t}`);
+    });
 });
 
 async function main() {

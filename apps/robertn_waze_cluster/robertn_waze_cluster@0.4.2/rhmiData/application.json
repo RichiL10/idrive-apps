@@ -5,7 +5,7 @@
     "type": "OnlineApp",
     "name": "robertn_waze_cluster",
     "vendor": "Robert Nisipeanu",
-    "version": "0.4.1",
+    "version": "0.4.2",
     "defaultLanguage": "en_GB",
     "uiDescriptions": [
       {

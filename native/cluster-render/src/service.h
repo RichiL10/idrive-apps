@@ -30,7 +30,7 @@ namespace crs {
 
 struct ServiceConfig {
     std::vector<TargetSpec> targets;
-    GovernorConfig budget;   /* ceiling 5500, floor 2000, step 500 KB/s */
+    GovernorConfig budget;   /* ceiling 5500, floor 2000, step 500 KB/s; the unit's ceiling is upload_kb_per_s (4500) */
     int upload_burst_ms = 250;
     int slow_flush_ms = 150;
     int fps = 30;                /* the loop's tick while a target is up */

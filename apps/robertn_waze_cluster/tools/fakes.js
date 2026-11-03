@@ -166,6 +166,8 @@ class FakePatch extends LineServer {
         this.carplay = null;  /* 'deferred' once a patch is written but not active */
         this.pending = null;  /* 'apply' | 'revert': the change waiting for a head-unit start */
         this.conflict = null; /* why the install left carplay as it was */
+        this.unproven = false; /* a carplay build outside the proven list, not patched yet */
+        this.failed = null;   /* boot recovery marked the patch failed: its reason */
         this.busy = false;
         this.reason = null;
         this.reboots = 0;     /* reboot commands honoured */
@@ -182,9 +184,16 @@ class FakePatch extends LineServer {
     }
 
     _status() {
-        return { ev: 'status', state: this.busy ? 'busy' : this.state, panel: this.panel,
+        const s = { ev: 'status', state: this.busy ? 'busy' : this.state, panel: this.panel,
             res: this.res, safe: this.safe, carplay: this.carplay, reason: this.reason,
             pending: this.pending, conflict: this.conflict };
+        if (this.unproven) {
+            s.unproven = true;
+        }
+        if (this.failed) {
+            s.failed = this.failed;
+        }
+        return s;
     }
 
     _onConnect(socket) {
@@ -218,7 +227,14 @@ class FakePatch extends LineServer {
             return;
         }
         clearTimeout(this._timer);
+        if (msg.cmd === 'apply' && this.unproven && msg.unproven !== true) {
+            /* patchd: a build outside the proven list needs the confirmation */
+            this._broadcast(Object.assign(this._status(), { state: 'error',
+                reason: 'untested carplay build: Enable map needs your confirmation; nothing changed' }));
+            return;
+        }
         if (msg.cmd === 'apply') {
+            this.unproven = false;   /* patched: our backup exists */
             this.busy = true;
             this.reason = 'applying IC_' + String(msg.panel).toUpperCase();
             this.log(this.reason);
