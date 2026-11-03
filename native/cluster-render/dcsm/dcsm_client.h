@@ -85,6 +85,9 @@ struct HeartbeatReport {
 class HeartbeatTracker {
 public:
     void sent(int64_t nowMs);
+    // Heartbeats go again after the caller's gate held some: no silence is
+    // reported until kHeartbeatSilence after nowMs.
+    void resumed(int64_t nowMs);
     // A reply came; true if *r is to be reported.
     bool reply(int64_t nowMs, uint8_t messageType, uint8_t returnCode, size_t length,
                HeartbeatReport *r);
@@ -96,6 +99,7 @@ public:
 private:
     uint32_t sent_ = 0, replies_ = 0, badReplies_ = 0;
     int64_t firstSentMs_ = -1, lastReplyMs_ = -1;
+    int64_t quietFromMs_ = -1;  // the gate last let heartbeats go again
     bool answered_ = false;     // an empty E_OK reply came
     bool silent_ = false;       // kSilent reported, no reply since
     bool badReported_ = false;  // kBadReply reported

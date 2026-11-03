@@ -129,6 +129,7 @@ void Dcsm2Port::take_over(const TargetSpec &t, uint64_t content)
     if (ours) {
         ours->phase = Phase::Mapping;
         ours->remap = true;
+        ours->remap_unmaps = 1;   /* the UNMAPPED of the unmap below; any further one is a loss */
         if (up_)
             unmaps_.push_back(Unmap{t.scene_id, 0});
         wire_->unmap(t.scene_id);
@@ -171,6 +172,7 @@ void Dcsm2Port::refuse(uint64_t scene, Content &c, Refusal r, const std::string 
         /* A take-over's remap refused: the target was parked, so for the
          * slot manager this is a loss, retried on its ladder. */
         c.remap = false;
+        c.remap_unmaps = 0;
         c.phase = Phase::Lost;
         if (manager_)
             manager_->on_lost(scene, "remap " + why, now_ms);
@@ -318,10 +320,27 @@ void Dcsm2Port::on_map_status(uint64_t scene, uint32_t initial, uint32_t final_,
         return;
     Content &c = it->second;
     const bool showing = final_ == dcsm::E_MAP_STATUS_MAPPED_FOREGROUND || final_ == dcsm::E_MAP_STATUS_MAPPED_BACKGROUND;
-    if (c.remap && final_ == dcsm::E_MAP_STATUS_UNMAPPED)
-        return;   /* our own unmap of a take-over's remap: the map follows */
-    if (final_ != dcsm::E_MAP_STATUS_UNMAPPED)
+    if (c.remap && final_ == dcsm::E_MAP_STATUS_UNMAPPED) {
+        if (c.remap_unmaps > 0) {
+            c.remap_unmaps--;
+            return;   /* our own unmap of a take-over's remap: the map follows */
+        }
+        /* A further UNMAPPED while the remap is out: the KOMBI dropped our
+         * map again (the HMI's map won). Not answered by anything else, so
+         * a loss for the slot manager, retried on its ladder. */
         c.remap = false;
+        if (c.phase == Phase::Mapping) {
+            c.phase = Phase::Lost;
+            c.map_asked = false;
+            if (manager_)
+                manager_->on_lost(scene, "remap unmapped", now_ms);
+        }
+        return;
+    }
+    if (final_ != dcsm::E_MAP_STATUS_UNMAPPED) {
+        c.remap = false;
+        c.remap_unmaps = 0;
+    }
     if (showing && (c.phase == Phase::Mapping || c.phase == Phase::Parked)) {
         c.phase = Phase::Mapped;
         if (manager_)

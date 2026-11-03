@@ -266,6 +266,34 @@ static void take_over_remap()
        calls_are("unfetch 0x10004f0") && f.m.status(0).state == TargetState::Waiting &&
            f.m.status(0).retry_ms > f.now && f.m.status(0).reason.find("remap") != std::string::npos);
 
+    /* The remap accepted, then UNMAPPED again (the HMI's map won and ours
+     * was dropped, not parked): a loss, not swallowed, so no take-over is
+     * sent later with nothing of ours behind it. */
+    Rig d(true);
+    d.port.set_hmi_client_handle(1);
+    d.map_asked(true);
+    d.table(1, 3);
+    d.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_MAPPED_INVISIBLE, d.now);
+    d.tick();
+    d.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", d.now);
+    d.port.on_reply(dcsm::kReqUnmapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", d.now);
+    d.port.on_map_status(kMap, 3, dcsm::E_MAP_STATUS_UNMAPPED, d.now);
+    d.port.on_reply(dcsm::kReqMapContent, true, dcsm::E_DCSM_OK, "E_DCSM_OK", d.now);
+    calls.clear();
+    d.port.on_map_status(kMap, 0, dcsm::E_MAP_STATUS_UNMAPPED, d.now);
+    ok("the remap accepted, then a second UNMAPPED: lost, unfetched with no unmap, waiting",
+       calls_are("unfetch 0x10004f0") && d.m.status(0).state == TargetState::Waiting &&
+           d.m.status(0).reason.find("remap unmapped") != std::string::npos);
+    bool stock_unmapped = false;
+    for (int k = 0; k < 4000; k++) {   /* 40 s */
+        d.tick();
+        for (auto &c : calls)
+            if (c.find(" as 0x1") != std::string::npos)
+                stock_unmapped = true;
+        calls.clear();
+    }
+    ok("lost after the remap: no take-over unmap with nothing of ours mapped", !stock_unmapped);
+
     Rig n;
     n.map_asked(true);
     n.table(1, 3);

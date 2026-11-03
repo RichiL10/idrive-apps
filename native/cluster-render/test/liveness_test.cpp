@@ -2,8 +2,11 @@
  * Copyright (C) 2026 Robert Nisipeanu */
 /* Host test for the render loop's liveness (liveness.h): alive before the
  * first beat, alive while beats come less than 3 s apart, stalled from 3 s
- * without one, alive again with the next beat; and dcsm::Client's
- * heartbeat gate, as Dcsm2Link wires it, holds heartbeats while stalled. */
+ * without one, alive again with the next beat; a limit of 0 never stalls;
+ * and HeartbeatGate, the gate Dcsm2Link gives dcsm::Client, holds
+ * heartbeats while stalled and reports the stall and the end of it once
+ * each. (Client::heartbeatLoop skipping a held heartbeat needs vsomeip and
+ * is not host-tested; its tracker is, in heartbeat_tracker_test.cpp.) */
 #include <cstdio>
 
 #include "../src/liveness.h"
@@ -41,16 +44,55 @@ int main()
     s.beat(0);
     ok("a shorter limit is kept", s.alive(499) && !s.alive(500));
 
-    /* Dcsm2Link's gate: a heartbeat every 250 ms goes only while alive. */
+    Liveness off(0);
+    off.beat(0);
+    ok("dcsm_liveness_ms 0: never stalled", off.alive(3000) && off.alive(1000000));
+    Liveness set;
+    set.set_stall_ms(0);
+    set.beat(0);
+    ok("set_stall_ms(0) before start: never stalled", set.alive(60000));
+
+    /* Dcsm2Link's gate (HeartbeatGate): a heartbeat every 250 ms goes only
+     * while alive; each change reported once. */
     Liveness g;
-    int sent = 0, held = 0;
+    HeartbeatGate gate(&g);
+    int sent = 0, held = 0, stalls = 0, moves = 0;
+    int64_t stalled_at = -1, moving_at = -1;
     g.beat(0);
-    for (int64_t t = 0; t <= 10000; t += 250) {
-        if (t <= 2000)
-            g.beat(t);   /* the loop runs for 2 s, then freezes */
-        (g.alive(t) ? sent : held)++;
+    for (int64_t t = 0; t <= 20000; t += 250) {
+        if (t <= 2000 || t >= 15000)
+            g.beat(t);   /* the loop runs for 2 s, freezes, moves again at 15 s */
+        HeartbeatGate::Change c = HeartbeatGate::None;
+        (gate.allow(t, &c) ? sent : held)++;
+        if (c == HeartbeatGate::Stalled) {
+            stalls++;
+            stalled_at = t;
+        } else if (c == HeartbeatGate::Moving) {
+            moves++;
+            moving_at = t;
+        }
     }
-    ok("a loop frozen at 2 s: heartbeats until 5 s, none after", sent == 20 && held == 21);
+    ok("a loop frozen from 2 s to 15 s: heartbeats held from 5 s to 14.75 s", held == 40 && sent == 41);
+    ok("the stall reported once, at 5 s", stalls == 1 && stalled_at == 5000);
+    ok("moving again reported once, at 15 s", moves == 1 && moving_at == 15000 && !gate.stalled());
+
+    Liveness n;
+    HeartbeatGate ng(&n);
+    bool all = true, changed = false;
+    for (int64_t t = 0; t <= 20000; t += 250) {
+        n.beat(t);
+        HeartbeatGate::Change c = HeartbeatGate::None;
+        all = all && ng.allow(t + 200, &c);
+        changed = changed || c != HeartbeatGate::None;
+    }
+    ok("a healthy loop: every heartbeat goes, no change reported", all && !changed);
+
+    Liveness z(0);
+    HeartbeatGate zg(&z);
+    z.beat(0);
+    HeartbeatGate::Change zc = HeartbeatGate::None;
+    ok("the gate with dcsm_liveness_ms 0: heartbeats go though the loop froze", zg.allow(60000, &zc) &&
+                                                                               zc == HeartbeatGate::None);
 
     if (failures)
         std::printf("%d failed\n", failures);

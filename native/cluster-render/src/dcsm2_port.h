@@ -123,6 +123,7 @@ private:
         bool map_asked = false;   /* a map went out and was not refused */
         bool fetched = false;     /* FETCHED, and not removed since */
         bool remap = false;       /* a take-over's remap is out, not answered by a map status yet */
+        int remap_unmaps = 0;     /* UNMAPPED statuses of our own remap unmap still to come (0 or 1) */
     };
 
     /* What the KOMBI sent since the service started. */

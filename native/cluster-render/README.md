@@ -340,11 +340,18 @@ share a 2D pass, and the passes' render order follows the stack exactly
   the KOMBI's watchdog drops its content within about 10 s and systemd
   starts it again. A `poll()` that fails in the render loop is not a stop:
   the targets are taken down as for SIGTERM and the service exits 1, so
-  systemd (`Restart=on-failure`) starts it again.
-- If the render loop stops making progress for 3 s (`src/liveness.h`;
-  it turns at least four times a second), the Dcsm2 heartbeats stop, so the
-  KOMBI's own watchdog takes a frozen map off the cluster within about
-  10 s. They go again with the loop's next turn. Both changes are logged.
+  systemd (`Restart=on-failure`) starts it again. CAR-ONLY on iDrive 8:
+  that restart after a failed `poll()` (before 0.3.5 the service exited 0
+  and stayed stopped; see "iDrive 8" on what a stopped service did).
+- If the render loop stops making progress for 3 s (`dcsm_liveness_ms`,
+  `src/liveness.h`; it turns at least four times a second), the Dcsm2
+  heartbeats stop, so the KOMBI's own watchdog takes a frozen map off the
+  cluster within about 10 s. They go again with the loop's next turn, and
+  no heartbeat silence is reported until a reply is due again. Both
+  changes are logged. `dcsm_liveness_ms = 0` turns this off without a
+  rebuild. CAR-ONLY: what the KOMBI does when heartbeats go again after a
+  gap longer than its watchdog (whether it keeps our client handle, or
+  refuses with `E_DCSM_HANDLE_UNKNOWN` until Dcsm2 is next available).
   iDrive 7 only: on iDrive 8 the offers go through RAMSES 27's own DCSM
   provider, which sends no heartbeat of ours to hold back, and its calls
   are made on the render thread alone (`src/unit_idrive8.cpp`).
@@ -535,7 +542,8 @@ CAR-ONLY on iDrive 8:
 - what the unit does when `cluster-render.service` exits or is restarted:
   on the car, stopping a service restarted the head unit. The service
   waits for the generation and for RAMSES instead of exiting; a
-  configuration fault or a refused communication user still exits 1.
+  configuration fault, a refused communication user or (since 0.3.5) a
+  failed `poll()` still exits 1, so systemd starts it again.
 
 ## Clients
 

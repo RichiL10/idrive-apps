@@ -117,6 +117,19 @@ int start(const cld::Config &cfg, char **)
                            ? std::strtoull(cfg.str("dcsm_client_handle").c_str(), nullptr, 0)
                            : 0;
     lo.heartbeat_replies = cfg.num("dcsm_heartbeat_replies") != 0;
+    {
+        /* 0: off; otherwise above the loop's 250 ms turn and below the
+         * KOMBI's watchdog of about 10 s (DCSM.md "Heartbeat"). */
+        const std::string s = cfg.str("dcsm_liveness_ms");
+        char *end = nullptr;
+        const long v = std::strtol(s.c_str(), &end, 10);
+        if (s.empty() || !end || *end || (v != 0 && (v < 1000 || v > 9000))) {
+            log_error("dcsm_liveness_ms must be 0 (off) or from 1000 to 9000, not \"%s\"", s.c_str());
+            framework.disconnect();
+            return 1;
+        }
+        lo.liveness_ms = v;
+    }
     if (!service.start(&err) || !link.start(lo, &err)) {
         log_error("%s", err.c_str());
         framework.disconnect();

@@ -64,6 +64,7 @@ void define_keys(cld::Config *cfg)
     cfg->define("hud_take_over_contents", "");
     cfg->define("hud_take_over_remap", "0");
     cfg->define("dcsm_hmi_client_handle", "1");
+    cfg->define("dcsm_liveness_ms", "3000");
     /* iDrive 8: a target's slot is a DCSM category, its content the content
      * offered there (README.md "iDrive 8"). */
     cfg->define("id8_targets", "map,hud,widget");
@@ -147,9 +148,20 @@ bool load_targets(const cld::Config &cfg, int generation, std::vector<TargetSpec
                     continue;
                 id = id.substr(a, b - a + 1);
                 char *end = nullptr;
-                const uint64_t v = std::strtoull(id.c_str(), &end, 0);
-                if (!v || !end || *end) {
-                    *err = "target " + name + ": " + p + "take_over_contents must be scene ids separated by commas";
+                errno = 0;
+                const uint64_t v = id[0] == '-' || id[0] == '+' ? 0 : std::strtoull(id.c_str(), &end, 0);
+                if (!v || !end || *end || errno == ERANGE) {
+                    *err = "target " + name + ": " + p + "take_over_contents must be scene ids separated by commas, not \"" +
+                           id + "\"";
+                    return false;
+                }
+                /* Only the stock HMI's contents (0x0100xxxx), never ours. */
+                bool own = false;
+                for (uint64_t a : allowed)
+                    own = own || a == v;
+                if ((v >> 16) != 0x0100 || own) {
+                    *err = "target " + name + ": " + p + "take_over_contents: \"" + id +
+                           "\" is not a stock HMI content (0x0100xxxx, not one of scene_ids_allowed)";
                     return false;
                 }
                 t.take_over_contents.push_back(v);

@@ -30,6 +30,9 @@ public:
         std::string app_name = "cluster-demo";
         uint64_t client_handle = 0;      /* 0: dcsm::kDefaultClientHandle */
         bool heartbeat_replies = true;   /* heartbeats as requests, replies checked */
+        /* dcsm_liveness_ms: heartbeats stop after this long without a beat;
+         * 0: they never stop for the loop (the gate off). */
+        int64_t liveness_ms = Liveness::kStallMs;
     };
 
     Dcsm2Link();
@@ -39,7 +42,7 @@ public:
     void stop();
 
     /* The render loop made progress: called once per iteration. With no call
-     * for Liveness::kStallMs the heartbeats stop (liveness.h), so the
+     * for Options::liveness_ms the heartbeats stop (liveness.h), so the
      * KOMBI's watchdog takes a frozen map off the cluster; they go again
      * with the next call. */
     void beat(int64_t now_ms) { liveness_.beat(now_ms); }
@@ -73,7 +76,7 @@ private:
     std::thread loop_;
     bool heartbeat_replies_ = true;
     Liveness liveness_;
-    bool stalled_ = false;   /* heartbeats held for a stalled loop (heartbeat thread) */
+    HeartbeatGate gate_{&liveness_};   /* heartbeat thread only */
     int wake_[2] = {-1, -1};
     std::mutex mutex_;
     std::deque<Event> events_;
