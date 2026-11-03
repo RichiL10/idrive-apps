@@ -797,6 +797,14 @@ test('remount lock: mutual exclusion; broken only when its holder is gone (or ho
     assert.strictEqual(lock.tryAcquire(), false, 'an old lock held by a live pid is not broken');
     assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid), 'the holder keeps it');
 
+    /* ...up to HUNG_MS (10 min): a live holder past it is taken as hung and
+     * its lock broken, so recovery is not kept out until the next boot. */
+    const hung = Date.now() / 1000 - 11 * 60;
+    fs.utimesSync(lockPath, hung, hung);
+    assert.strictEqual(lock.tryAcquire(), true, 'a lock held by a live pid for over 10 min is broken and retaken');
+    lock.release();
+    assert.strictEqual(lock.tryAcquire(), true, 'reacquire after the hung lock');
+
     /* A lock whose holder is gone is broken at once, whatever its age. */
     const dead = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
     fs.writeFileSync(lockPath, dead.stdout + ' 2026-01-01T00:00:00.000Z\n');

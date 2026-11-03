@@ -9,9 +9,10 @@
  *
  * The lock is a file created with O_EXCL in the socket directory (tmpfs,
  * cleared each boot), holding the holder's pid. A lock is broken only when
- * that pid is gone (a killed holder), however old it is, so a holder that
- * works longer than expected keeps it; a lock with no readable pid is broken
- * once older than STALE_MS. Nobody writes without it: patchd (user-driven)
+ * that pid is gone (a killed holder), so a holder that works longer than
+ * expected keeps it, up to HUNG_MS (10 min), after which a live holder is
+ * taken as hung; a lock with no readable pid is broken once older than
+ * STALE_MS. Nobody writes without it: patchd (user-driven)
  * waits and then refuses the operation, nothing changed, so the user retries
  * once the holder is done; recovery (automatic) yields: its restore reports
  * a failure and keeps the counter, so the next boot retries.
@@ -29,6 +30,11 @@ var path = require('path');
 
 var LOCK = process.env.WOC_REMOUNT_LOCK || '/dev/shm/waze-on-cluster/remount.lock';
 var STALE_MS = parseInt(process.env.WOC_REMOUNT_LOCK_STALE_MS, 10) || 120000;
+/* A holder that is alive but has held the lock this long is hung (patchd's
+ * longest hold, every timeout spent, is a few minutes): its lock is broken
+ * too, so a stuck patchd cannot keep recovery from restoring CarPlay until
+ * the next boot. */
+var HUNG_MS = parseInt(process.env.WOC_REMOUNT_LOCK_HUNG_MS, 10) || 600000;
 
 function ensureDir(dir) {
     try { fs.mkdirSync(dir, 0o755); } catch (e) { if (e.code !== 'EEXIST') throw e; }
@@ -46,8 +52,13 @@ function tryAcquire() {
         if (e.code !== 'EEXIST') return false;
         try {
             var gone = holderGone(fs.readFileSync(LOCK, 'utf8'));
-            var old = Date.now() - fs.statSync(LOCK).mtime.getTime() > STALE_MS;
-            if (gone === true || (gone === null && old)) { fs.unlinkSync(LOCK); return tryAcquire(); }
+            var age = Date.now() - fs.statSync(LOCK).mtime.getTime();
+            if (gone === true || (gone === null && age > STALE_MS) || age > HUNG_MS) {
+                if (gone === false)
+                    console.error('remount lock: holder alive but holding for ' + Math.round(age / 1000) + ' s, taken as hung, lock broken');
+                fs.unlinkSync(LOCK);
+                return tryAcquire();
+            }
         } catch (e3) {}
         return false;
     }

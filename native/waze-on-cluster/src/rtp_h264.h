@@ -74,6 +74,9 @@ public:
      * rather than being held as a possible restart (RFC 3550 A.1
      * MAX_DROPOUT). */
     static const uint16_t kMaxDropout = 3000;
+    /* A stream silent this long has ended (a phone reconnect takes seconds;
+     * a live stream sends many packets a second): see arrival(). */
+    static const int64_t kIdleResetMs = 1000;
 
     /* A sequence-number discontinuity: the packet expected and the one that
      * came; lost is how many sequence numbers lie between them (mod 2^16).
@@ -97,7 +100,17 @@ public:
         uint64_t streams = 0;   /* SSRC changes: new streams */
         uint64_t stray = 0;     /* isolated packets dropped: another SSRC or a far jump the next packet did not confirm */
         uint64_t overflows = 0; /* FU-A NAL units dropped past kMaxFuBytes */
+        uint64_t idle_resets = 0; /* stream state forgotten after kIdleResetMs of silence */
     };
+
+    /* Each datagram's arrival time (monotonic ms), called before push().
+     * After kIdleResetMs or more of silence the old stream is over: its
+     * sequence number, timestamp and SSRC are forgotten (the open access unit
+     * is ended and a half FU-A dropped first), so the next packet starts a
+     * stream afresh. Without it a new session that keeps the SSRC and
+     * restarts its sequence a little below the old one would be dropped as
+     * late, SPS, PPS and IDR included, and the map would stay blank. */
+    void arrival(int64_t now_ms, const Sink &sink);
 
     /* One datagram. Returns false, and drops it, if it is not an RTP v2
      * packet with a parseable H.264 payload. */
@@ -128,6 +141,7 @@ private:
     uint32_t held_ssrc_ = 0;
     uint16_t held_seq_ = 0;
     bool replaying_ = false;
+    int64_t last_arrival_ms_ = -1;
     bool au_open_ = false;       /* NAL units delivered since the last access unit end */
     bool vcl_done_ = false;      /* this packet completed a slice */
     Stats stats_;

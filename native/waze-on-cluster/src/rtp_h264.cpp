@@ -179,6 +179,19 @@ bool RtpH264::push(const uint8_t *pkt, size_t len, const Sink &sink)
     return true;
 }
 
+void RtpH264::arrival(int64_t now_ms, const Sink &sink)
+{
+    if (last_arrival_ms_ >= 0 && now_ms - last_arrival_ms_ >= kIdleResetMs &&
+        (have_seq_ || have_ts_ || have_ssrc_ || held_)) {
+        drop_fu();
+        end_au(sink);
+        have_seq_ = have_ts_ = have_ssrc_ = false;
+        held_ = false;
+        stats_.idle_resets++;
+    }
+    last_arrival_ms_ = now_ms;
+}
+
 void RtpH264::hold(const uint8_t *pkt, size_t len, uint32_t ssrc, uint16_t seq)
 {
     held_pkt_.assign(pkt, pkt + len);

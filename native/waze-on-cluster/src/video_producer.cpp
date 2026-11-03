@@ -225,6 +225,9 @@ void VideoProducer::feed_datagram(const PacketQueue::Packet &p)
         std::lock_guard<std::mutex> lock(decode_mutex_);
         packet_ = &p;
         const uint64_t before = rtp_.stats().overflows;
+        /* When it arrived, not when it was taken off the queue: a decoder
+         * running behind is not silence on the wire. */
+        rtp_.arrival(cld::now_ms() - (int64_t)(p.waited_us / 1000), rtp_sink_);
         rtp_.push(data, len, rtp_sink_);
         packet_ = nullptr;
         if (const uint64_t n = rtp_.stats().overflows - before) {

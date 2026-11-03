@@ -668,8 +668,57 @@ static void gaps_settled(const char *path)
     CHECK((c.after == std::vector<bool>{false, true}));
 }
 
+static void idle_reset_new_session()
+{
+    /* A session ends at seq 50; after 1.5 s of silence a new session keeps
+     * the SSRC and starts at seq 0 with an older timestamp. Without the idle
+     * reset its SPS, PPS and IDR would be dropped as late. */
+    RtpH264 r;
+    Out o;
+    int64_t t = 10000;
+    for (uint16_t s = 40; s <= 50; s++) {
+        r.arrival(t += 33, o.sink());
+        push(r, o, rtp(s, 900000u + 3000u * s, false, kP));
+    }
+    const size_t before = o.ev.size();
+    t += 1500;
+    r.arrival(t, o.sink());
+    CHECK(r.stats().idle_resets == 1);
+    CHECK(o.ev.size() == before + 1 && o.ev.back().empty());   /* the old stream's last picture is ended */
+    push(r, o, rtp(0, 5000, false, kSps));
+    r.arrival(t += 1, o.sink());
+    push(r, o, rtp(1, 5000, false, kPps));
+    r.arrival(t += 1, o.sink());
+    push(r, o, rtp(2, 5000, false, kIdr));
+    r.arrival(t += 33, o.sink());
+    push(r, o, rtp(3, 8000, false, kP));
+    std::vector<Bytes> want = {annexb(kSps), annexb(kPps), annexb(kIdr), kAuEnd, annexb(kP)};
+    CHECK(std::vector<Bytes>(o.ev.begin() + (long)before + 1, o.ev.end()) == want);
+    CHECK(r.stats().late == 0 && r.stats().stray == 0);
+
+    /* Packets closer together than kIdleResetMs change nothing; a late
+     * duplicate is still dropped. */
+    RtpH264 q;
+    Out oq;
+    int64_t u = 0;
+    for (uint16_t s = 1; s <= 5; s++) {
+        q.arrival(u += 900, oq.sink());
+        push(q, oq, rtp(s, 1000u * s, false, kP));
+    }
+    q.arrival(u += 900, oq.sink());
+    push(q, oq, rtp(3, 3000, false, kP));
+    CHECK(q.stats().idle_resets == 0 && q.stats().late == 1);
+
+    /* The very first packet ever is no reset. */
+    RtpH264 f;
+    Out of;
+    f.arrival(123456, of.sink());
+    CHECK(f.stats().idle_resets == 0 && of.ev.empty());
+}
+
 int main(int argc, char **argv)
 {
+    idle_reset_new_session();
     single_nal_units();
     marker_ends_au_on_slice();
     fu_a_three_parts();
