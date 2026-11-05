@@ -65,6 +65,7 @@ void define_keys(cld::Config *cfg)
     cfg->define("hud_linger_ms", "3000");
     cfg->define("hud_take_over_stock", "0");
     cfg->define("dcsm_hmi_client_handle", "1");
+    cfg->define("dcsm_liveness_ms", "3000");
     cfg->define("guide_hold", "1");
     cfg->define("guide_slots", "auto");
     cfg->define("guide_scene_id", "0x010004f1");
@@ -98,7 +99,7 @@ void define_keys(cld::Config *cfg)
     cfg->define("id8_widget_order", "50");
     cfg->define("id8_widget_preview", "");
     cfg->define("fade_ms", "250");
-    cfg->define("upload_kb_per_s", "5500");
+    cfg->define("upload_kb_per_s", "4500");
     cfg->define("upload_floor_kb_per_s", "2000");
     cfg->define("upload_step_kb_per_s", "500");
     cfg->define("upload_burst_ms", "250");

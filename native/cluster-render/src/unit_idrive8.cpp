@@ -12,7 +12,14 @@
  * with _exit(), running no destructor. RAMSES not up yet (at boot) is
  * waited for here, not left to systemd's restart: what iDrive 8 does when
  * a service exits is CAR-ONLY (a stopped service restarted the head unit
- * on the car). */
+ * on the car).
+ *
+ * No liveness gate (liveness.h) here: the gate holds back Dcsm2
+ * heartbeats on iDrive 7, and iDrive 8 has none of ours to hold back (the
+ * provider keeps no heartbeat, dcsm27_port.h). Stopping the offers from a
+ * watchdog thread instead would call the provider off the render thread,
+ * which this file never does, and a crash here restarts the head unit; so
+ * a stalled loop is left as it is. */
 #include <cerrno>
 #include <csignal>
 #include <cstring>
@@ -251,6 +258,10 @@ int start(const cld::Config &cfg, char **)
                  (unsigned long long)t.slot, (unsigned long long)t.content, (unsigned long long)t.scene_id, t.width,
                  t.height, t.linger_ms);
 
+    /* A poll() that fails is not a stop: the offers are stopped as for one,
+     * then the service leaves with 1 so systemd (Restart=on-failure) starts
+     * it again. */
+    int rc = 0;
     std::vector<pollfd> fds;
     for (;;) {
         fds.clear();
@@ -258,8 +269,11 @@ int start(const cld::Config &cfg, char **)
         const size_t first = service.poll_fds(&fds);
         const int timeout = service.timeout_ms(cld::now_ms());
         const int n = poll(fds.data(), fds.size(), timeout < 0 ? kDispatchMs : std::min(timeout, kDispatchMs));
-        if (n < 0 && errno != EINTR)
+        if (n < 0 && errno != EINTR) {
+            log_error("poll: %s; leaving for systemd to start the service again", strerror(errno));
+            rc = 1;
             break;
+        }
         if (fds[0].revents & POLLIN)
             break;
         const int64_t now = cld::now_ms();
@@ -277,8 +291,8 @@ int start(const cld::Config &cfg, char **)
         port.dispatch(events.now);
     }
     framework.disconnect();
-    log_info("stopped");
-    _exit(0);
+    log_info(rc ? "stopped after an error" : "stopped");
+    _exit(rc);
 }
 
 }  // namespace crs
