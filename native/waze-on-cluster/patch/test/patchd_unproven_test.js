@@ -66,7 +66,9 @@ fs.chmodSync(path.join(BIN, 'systemctl'), 0o755);
 fs.writeFileSync(path.join(BIN, 'journalctl'), '#!/bin/sh\nexit 0\n');
 fs.chmodSync(path.join(BIN, 'journalctl'), 0o755);
 var MOUNT = path.join(dir, 'mount');
-fs.writeFileSync(MOUNT, '#!/bin/sh\ncase "$*" in *remount,rw*) echo "/dev/root / ext4 rw 0 0" > "' + MOUNTS + '" ;; ' +
+var MOUNT_LOG = path.join(dir, 'mount.log');   /* every call of the fake mount, to prove a refusal remounts nothing */
+var RECOVERY_STATE = path.join(dir, 'boot-recovery.json');
+fs.writeFileSync(MOUNT, '#!/bin/sh\necho "$*" >> "' + MOUNT_LOG + '"\ncase "$*" in *remount,rw*) echo "/dev/root / ext4 rw 0 0" > "' + MOUNTS + '" ;; ' +
     '*remount,ro*) echo "/dev/root / ext4 ro 0 0" > "' + MOUNTS + '" ;; esac\nexit 0\n');
 fs.chmodSync(MOUNT, 0o755);
 
@@ -92,6 +94,8 @@ var ENV = Object.assign({}, process.env, {
     WOC_REMOUNT_LOCK: LOCK,
     WOC_OP_LOCK_WAIT_MS: '1500',
     WOC_PROC: PROC,
+    WOC_RECOVERY_STATE: RECOVERY_STATE,
+    WOC_TEST: '1',
     WOC_AA_ENABLED: '0',
 });
 var patchd = cp.spawn(process.execPath, [PATCHD], { env: ENV, stdio: ['ignore', 'ignore', 'inherit'] });
@@ -136,6 +140,11 @@ async function main() {
     ok('apply without the confirmation: refused with the reason the app shows', r.state === 'error' && /untested carplay build/.test(r.reason || '') &&
         /needs your confirmation/.test(r.reason || ''), JSON.stringify(r));
     ok('apply without the confirmation: nothing written, no backup', same() && !fs.existsSync(TGT + '.woc-orig'));
+    /* Review F5: the refusal comes before anything is remounted or linked. */
+    ok('apply without the confirmation: / is not remounted for a request known to be refused',
+        !fs.existsSync(MOUNT_LOG) || fs.readFileSync(MOUNT_LOG, 'utf8') === '', fs.existsSync(MOUNT_LOG) ? fs.readFileSync(MOUNT_LOG, 'utf8') : '');
+    ok('apply without the confirmation: the running binary is not linked aside',
+        fs.readdirSync(path.dirname(TGT)).filter(function (n) { return /running/.test(n); }).length === 0, JSON.stringify(fs.readdirSync(path.dirname(TGT))));
     r = await op({ cmd: 'apply', panel: 'high', mode: 'avb', unproven: 'true' });
     ok('a confirmation that is not the boolean true counts as none', r.state === 'error' && /needs your confirmation/.test(r.reason || '') && same(), JSON.stringify(r));
     r = await op({ cmd: 'apply', panel: 'high', mode: 'avb', unproven: false });
@@ -166,6 +175,27 @@ async function main() {
     ok('the lock is released', !fs.existsSync(LOCK));
     r = await status();
     ok('status: once patched (our backup present) no confirmation is asked', !r.unproven, JSON.stringify(r));
+    ok('the confirmed apply did remount / (the check above is not vacuous)', fs.existsSync(MOUNT_LOG) && /remount,rw/.test(fs.readFileSync(MOUNT_LOG, 'utf8')));
+
+    /* Review F3: patchd reports the failed mark boot recovery wrote (S4) while the
+     * binary is not the original, and not once the original is back. */
+    ok('status: no failed mark without one on disk', !r.failed, JSON.stringify(r));
+    fs.writeFileSync(RECOVERY_STATE, JSON.stringify({ fails: 2, unknown: 0, arm: null,
+        failed: { since: '2026-11-05T10:00:00.000Z', boot: 'b1', fails: 3, why: 'no backup can restore it' } }) + '\n');
+    r = await status();
+    ok('status: a failed mark on disk is reported while the binary is patched', !same() && typeof r.failed === 'string' && r.failed.length > 0, JSON.stringify(r));
+    /* The stock binary back in place (as a hand restore leaves it): the mark is stale and not reported. */
+    var patchedBin = fs.readFileSync(TGT), patchedMode = fs.statSync(TGT).mode & 0o7777;
+    fs.writeFileSync(TGT, SRC);
+    r = await status();
+    ok('status: the failed mark is not reported once the binary is the original', !r.failed, JSON.stringify(r));
+    fs.writeFileSync(TGT, patchedBin);
+    fs.chmodSync(TGT, patchedMode);
+    r = await status();
+    ok('status: the mark is reported again with the patched binary back', typeof r.failed === 'string' && r.failed.length > 0, JSON.stringify(r));
+    fs.unlinkSync(RECOVERY_STATE);
+    r = await status();
+    ok('status: the mark gone from disk is gone from the status', !r.failed, JSON.stringify(r));
 
     /* A modified build with no backup of ours (our backup moved away): the
      * patcher refuses it ("first edit requires the pristine build"), so no

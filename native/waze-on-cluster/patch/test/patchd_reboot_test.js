@@ -17,6 +17,7 @@
 'use strict';
 
 require('./head_unit_env.js');   /* a HIGH head unit for every patcher and patchd this runs */
+process.env.WOC_TEST = '1';   /* the override below is honoured only with this */
 process.env.WOC_AA_ENABLED = '1';   /* Android Auto is opt-in (aa_enabled.js); this test is about its pending marker */
 
 var fs = require('fs');

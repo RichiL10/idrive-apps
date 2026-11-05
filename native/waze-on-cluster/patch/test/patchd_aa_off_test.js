@@ -56,7 +56,7 @@ process.on('exit', function () {
 /* ---- the switch itself (aa_enabled.js) ---- */
 (function switchTests() {
     var saved = {};
-    ['WOC_AA_ENABLED', 'WOC_CONF', 'WOC_LOCAL_CONF', 'WOC_STATE_DIR'].forEach(function (k) { saved[k] = process.env[k]; delete process.env[k]; });
+    ['WOC_AA_ENABLED', 'WOC_TEST', 'WOC_CONF', 'WOC_LOCAL_CONF', 'WOC_STATE_DIR'].forEach(function (k) { saved[k] = process.env[k]; delete process.env[k]; });
     function conf(name, text) { var f = path.join(dir, name); if (text === null) { try { fs.unlinkSync(f); } catch (e) {} } else fs.writeFileSync(f, text); return f; }
     var shipped = path.join(dir, 'sw-shipped.conf'), local = path.join(dir, 'sw-local.conf');
     process.env.WOC_CONF = shipped;
@@ -76,11 +76,20 @@ process.on('exit', function () {
     ok('switch: another key that ends in the name is not the key', on(null, 'xaa_enabled = 1\nhide_aa_enabled=1\n') === false);
     ok('switch: no spaces around = is fine, CRLF too', on(null, 'aa_enabled=1\r\n') === true);
     ok('switch: an unreadable conf (a directory) is off', (function () { conf('sw-local.conf', null); fs.mkdirSync(local); var v = aaSwitch.enabled(); fs.rmdirSync(local); return v === false; })());
+    /* Review finding F7: the override is a test device, honoured only with WOC_TEST=1. */
+    process.env.WOC_AA_ENABLED = '1';
+    delete process.env.WOC_TEST;
+    ok('switch: WOC_AA_ENABLED=1 WITHOUT WOC_TEST=1 is ignored, the files decide (off)', on(null, 'aa_enabled = 0\n') === false && on(null, null) === false);
+    ok('switch: WOC_AA_ENABLED=1 without WOC_TEST=1 does not switch off a conf that says 1 either', on(null, 'aa_enabled = 1\n') === true);
+    process.env.WOC_AA_ENABLED = '0';
+    ok('switch: WOC_AA_ENABLED=0 without WOC_TEST=1 is ignored too', on(null, 'aa_enabled = 1\n') === true);
+    process.env.WOC_TEST = '1';
     process.env.WOC_AA_ENABLED = '1';
     ok('switch: the test override WOC_AA_ENABLED=1 beats the files', on(null, 'aa_enabled = 0\n') === true);
     process.env.WOC_AA_ENABLED = '0';
     ok('switch: the test override WOC_AA_ENABLED=0 beats the files', on(null, 'aa_enabled = 1\n') === false);
     delete process.env.WOC_AA_ENABLED;
+    delete process.env.WOC_TEST;
     /* The default local conf lives in the state dir. */
     delete process.env.WOC_LOCAL_CONF;
     process.env.WOC_STATE_DIR = path.join(dir, 'sw-state');
@@ -95,7 +104,7 @@ process.on('exit', function () {
         var v = aaSwitch.parse(text);
         return v === null || v === '0';
     })());
-    ['WOC_AA_ENABLED', 'WOC_CONF', 'WOC_LOCAL_CONF', 'WOC_STATE_DIR'].forEach(function (k) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
+    ['WOC_AA_ENABLED', 'WOC_TEST', 'WOC_CONF', 'WOC_LOCAL_CONF', 'WOC_STATE_DIR'].forEach(function (k) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
 })();
 
 /* ---- the component: no AA boot unit enabled, the switch shipped ---- */

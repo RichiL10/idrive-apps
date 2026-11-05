@@ -1320,8 +1320,26 @@ function handle(line, sock) {
          * is refused by the patcher, changing nothing (S3). */
         var unproven = msg.cmd === 'apply' && msg.unproven === true;
         if (unproven) log('apply: the user confirmed patching a carplay build outside the proven list');
-        operate('carplay', msg.cmd === 'apply' ? 'applying' : 'reverting',
-            msg.cmd === 'apply' ? function (cb) { apply(panel, mode, false, unproven, cb); } : function (cb) { revert(false, false, cb); });
+        var go = function () {
+            operate('carplay', msg.cmd === 'apply' ? 'applying' : 'reverting',
+                msg.cmd === 'apply' ? function (cb) { apply(panel, mode, false, unproven, cb); } : function (cb) { revert(false, false, cb); });
+        };
+        if (msg.cmd === 'apply' && !unproven) {
+            /* Refuse a plain apply on an unproven build BEFORE anything is
+             * remounted, linked or spawned (review F5); the patcher's own check
+             * stays as the second line, for a state that changed meanwhile. */
+            busy = 'carplay';   /* held while the state is read: no second command meanwhile */
+            readState(function (st) {
+                if (st && st.unproven) {
+                    busy = null;
+                    log('apply refused: ' + UNPROVEN_REASON + ' (checked before the remount)');
+                    status({ state: 'error', reason: UNPROVEN_REASON });
+                    quitWhenIdle();
+                    return;
+                }
+                go();
+            });
+        } else go();
     } else if (msg.cmd === 'aa-apply') {
         operate('aa', 'applying', function (cb) { aaApply(false, cb); });
     } else if (msg.cmd === 'aa-revert') {

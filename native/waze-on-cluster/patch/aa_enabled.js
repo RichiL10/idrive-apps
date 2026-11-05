@@ -16,8 +16,9 @@
  * The render (waze-on-cluster) ignores this key; it must be defined there so
  * a local conf that sets it still starts the service (src/main.cpp).
  *
- * Tests only: WOC_AA_ENABLED=0|1 in the environment overrides the files.
- * The units do not set it.
+ * Tests only: WOC_AA_ENABLED=0|1 in the environment overrides the files,
+ * and only while WOC_TEST=1 is set too (the tests set it). The units set
+ * neither, and without WOC_TEST=1 the override is ignored.
  *
  * Node 8.16.2 on the unit. No dependencies.
  */
@@ -54,7 +55,11 @@ function parse(text) {
 }
 
 function enabled() {
-    var env = process.env.WOC_AA_ENABLED;
+    /* Honoured only together with WOC_TEST=1, which the tests set: an
+     * environment of patchd or recovery on the unit (a systemd drop-in,
+     * `systemctl set-environment`) cannot turn Android Auto on without a conf
+     * edit. */
+    var env = process.env.WOC_TEST === '1' ? process.env.WOC_AA_ENABLED : undefined;
     if (env !== undefined && env !== '') return env === '1';
     var on = false;
     files().forEach(function (f) {

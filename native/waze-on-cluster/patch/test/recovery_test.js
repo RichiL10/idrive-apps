@@ -39,6 +39,7 @@ Object.assign(process.env, {
     WOC_PROC_STAT: path.join(ROOT, 'no-proc-stat'),
     /* Android Auto is opt-in (S6, aa_enabled.js). These tests are about both
      * services, so it is on here; the tests of the default turn it off. */
+    WOC_TEST: '1',   /* the override below is honoured only with this */
     WOC_AA_ENABLED: '1',
 });
 
