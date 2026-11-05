@@ -16,8 +16,9 @@ Tools and apps for the iDrive 7 head unit (MGU) of a BMW, installed from the
 In the Store, add the GitHub source `robertnisipeanu/idrive-apps` and install
 **Waze on cluster**. The Store installs what it requires first: `mgu-deploy`
 0.7.11 from mgu-store, then `cluster-render` and the Waze tool from here. One
-head-unit start activates the CarPlay patch, and the Android Auto patch on a
-car that supports it. The Store removes them again:
+head-unit start activates the CarPlay patch (the Android Auto patch only with
+`aa_enabled = 1`, off by default in the Kiro test build, see
+[`KIRO-NOTES.md`](KIRO-NOTES.md)). The Store removes them again:
 the app, then the tool, then the renderer.
 
 ## Build

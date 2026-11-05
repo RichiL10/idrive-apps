@@ -9,7 +9,8 @@ Install it from the catalog of
 [idrive-apps](https://github.com/robertnisipeanu/idrive-apps)
 through the [mgu Store](https://github.com/robertnisipeanu/mgu-store). It requires
 waze-on-cluster 0.8.9, which brings the cluster renderer and writes the
-CarPlay patch, and the Android Auto patch where the car supports it, as it
+CarPlay patch (and the Android Auto patch only where the car supports it and
+`aa_enabled = 1`; it is 0 in the Kiro test build) as it
 installs; one head-unit start activates them. After that
 the map is on the cluster whenever CarPlay streams it, whether or not this
 app is open.
@@ -88,9 +89,9 @@ supported, HIGH F included.
 | Section | Row | What it does |
 |---|---|---|
 | **CarPlay** | Status | `Status: <state>`, in the words above |
-| | Patch | applies the patch; enabled while it is off, unknown or out of date, the head unit is supported and no change is pending |
+| | Patch | applies the patch; enabled while it is off, unknown or out of date, the head unit is supported and no change is pending. On a CarPlay build not proven yet (Kiro test build) the first press shows `Untested version, press Confirm to patch` and the button reads `Confirm`; a press less than 1 s later is ignored, and only the confirmed press asks for the patch of an untested build. The step clears after a timeout, when the page closes or when the status changes. The status also reads `Failed` (CarPlay keeps crashing, no usable backup: restore by hand) and `Busy` (another change holds the lock, try again in two minutes) |
 | | Remove patch | reverts the patch, which turns the map off; enabled while patched and no change is pending |
-| **Android Auto** | Status | `Status: <state>`, in the words above; `Failed` also while the last zoom or turn-card change failed |
+| **Android Auto** | Status | `Status: <state>`, in the words above (`Off` and all buttons greyed while `aa_enabled = 0`, the default of the Kiro test build); `Failed` also while the last zoom or turn-card change failed |
 | | Patch | applies its patch; enabled while it is off or partly patched, supported and nothing is pending |
 | | Remove patch | reverts it; enabled while patched and nothing is pending |
 | | Zoom | `Zoom: 180 dpi`, the density on disk, with `(after restart)` while it differs from the one aapd runs until the next head-unit start; `Zoom: —` without the patch |

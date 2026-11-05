@@ -59,7 +59,13 @@ HIGH F head unit also applies the patch again where 0.8.2's boot recovery
 removed it, but not where boot recovery removed it after failed head-unit
 starts (PATCH.md "Supported head units").
 
-The same hook then writes the Android Auto patch, on the one proven aapd
+Android Auto is OFF in this Kiro test build (`aa_enabled = 0`, the default):
+the hook, `patchd` and boot recovery never read for writing or write
+`/usr/bin/aapd`, `/etc/aapd.conf` or their backups and markers, and the app
+shows the Android Auto section as `Off`. To turn it on, put `aa_enabled = 1`
+in `/var/opt/waze-on-cluster/waze-on-cluster.local.conf` and enable the
+`waze-on-cluster-aa-boot` unit. With it on, the same hook then writes the
+Android Auto patch, on the one proven aapd
 build and only on a car coded `KI_KOMBI_VARIANT` 7, and never stops or
 restarts aapd. On any other car or build it leaves aapd as it is, and the
 app's Android Auto line says `Not supported on this car` or `Untested
@@ -463,7 +469,8 @@ decoder skips the pictures of frames it is behind on ("Losses"). Real Waze
 sent up to about 16 frames a second on the car.
 
 **Upload budget.** The budget belongs to cluster-render and is shared by all
-its clients: a 5500 KB/s ceiling, stepping down by 500 KB/s to 2000 KB/s on
+its clients: a 4500 KB/s ceiling (Kiro test build; upstream has 5500),
+stepping down by 500 KB/s to 2000 KB/s on
 sustained congestion and recovering slowly. Set it with `upload_kb_per_s` in
 `/var/opt/cluster-render/cluster-render.local.conf`. This tool's own
 `upload_kb_per_s` and `upload_burst_ms` keys are accepted and ignored with a
@@ -558,8 +565,19 @@ over a file of its own build. **Never `systemctl stop` or `restart` aapd.**
   site is not found or not recognised, is written by atomic rename, and
   takes effect at the next CarPlay start. Its first apply to a proven build
   (PATCH.md) also requires the whole file to be the shipped one; on any
-  other build it needs `--unproven` (CarPlay's Patch button passes it, the install does
-  not), and once its backup exists only the four sites are checked.
+  other build it needs `--unproven`. `patchd` passes it only for a request
+  that carries `"unproven": true`, which the app sends only on the second,
+  confirming press of Patch (an untested build is refused on a plain apply, and
+  the install never passes it). Once its backup exists only the four sites are checked.
+  The new file is written through one descriptor, checked by SHA-256 read-back
+  and renamed over the old one; if the rename fails the file is left as it was
+  (no in-place overwrite).
+- A remount lock is broken only when its holder is gone (or hung for 10
+  minutes); `patchd` waits up to 15 s and then refuses with `try again in two
+  minutes`. If a patched CarPlay keeps crashing and no usable backup exists,
+  boot recovery writes a persistent `failed` mark and stops starting CarPlay
+  after crashes (no reboot storm); the app shows it as `Failed`. The mark clears
+  when the binary is stock again.
   Removal restores the backup's bytes in our edits' regions, or the whole
   backup over a binary of its build the patcher no longer recognises.
 - The Android Auto patch is written only on the proven aapd and aapd.conf,
