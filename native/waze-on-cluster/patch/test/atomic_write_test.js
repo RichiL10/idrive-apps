@@ -46,7 +46,7 @@ var BIN = path.join(top, 'bin');
 fs.mkdirSync(BIN);
 fs.writeFileSync(path.join(BIN, 'getfattr'), '#!/bin/sh\n' +
     'for f; do :; done\n' +
-    'case "$WOC_FAKE_XATTR" in none|"") exit 0 ;; esac\n' +
+    'case "$WOC_FAKE_XATTR" in none|"") exit 0 ;; unreadable) echo "getfattr: broken" >&2; exit 3 ;; esac\n' +
     'case "$f" in *.woc-tmp.*)\n' +
     '  case "$WOC_FAKE_XATTR" in lost) exit 0 ;; grow) printf x >> "$f" ;; vanish) rm -f "$f" ;; esac ;;\n' +
     'esac\n' +
@@ -112,6 +112,12 @@ ok('mode-only repair: the same file, mode 0755, bytes untouched, no rename', r.s
 t = world(0o751); r = apply(t, 'copy');
 ok('an extended attribute: copied, written', r.status === 0 && /carries extended attributes: security\.capability; copying them/.test(r.stdout), r.stdout + r.stderr);
 ok('an extended attribute: mode set, no temp left', (fs.statSync(t).mode & 0o7777) === exp(0o751) && temps(t).length === 0);
+
+/* Review F6: attributes that cannot be read at all do not stop the write (as in the fork) but are said loudly. */
+t = world(0o751); r = apply(t, 'unreadable');
+ok('getfattr fails: the write goes ahead and says WARNING, not just a note', r.status === 0 && /note: WARNING: extended attributes of .* not checked \(getfattr exited 3\); a file capability on it would not be kept/.test(r.stdout),
+    r.stdout + r.stderr);
+ok('getfattr fails: written, no temp left', !fs.readFileSync(t).equals(SRC) && temps(t).length === 0);
 
 /* Owner, group and set-id bits (chown clears them, chmod restores them). */
 if (ROOT) {

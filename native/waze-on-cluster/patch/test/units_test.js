@@ -83,6 +83,23 @@ assert.deepStrictEqual(capture.Restart, ['on-failure']);
 assert.deepStrictEqual(capture.User, ['hmi_5000']);
 console.log('ok   waze-on-cluster.service: restarted on a failure only, as hmi_5000');
 
+/* Review F4 (S5): the restart cap is in [Unit], where systemd 237 reads it; the
+ * same keys under [Service] are ignored there. unit() flattens the sections, so
+ * look at the text. Same for cluster-render.service (review N5). */
+[['waze-on-cluster.service', path.join(root, 'systemd', 'waze-on-cluster.service')],
+ ['cluster-render.service', path.join(root, '..', 'cluster-render', 'systemd', 'cluster-render.service')]].forEach(function (p) {
+    var text = fs.readFileSync(p[1], 'utf8'), at = text.indexOf('\n[Service]'), lines = text.split('\n');
+    assert(at > 0, p[0] + ' has a [Service] section');
+    var before = text.slice(0, at).split('\n'), after = text.slice(at).split('\n');
+    assert(before.indexOf('[Unit]') >= 0, p[0] + ' starts with [Unit]');
+    assert(before.indexOf('StartLimitIntervalSec=600') >= 0, p[0] + ': StartLimitIntervalSec=600 in [Unit]');
+    assert(before.indexOf('StartLimitBurst=30') >= 0, p[0] + ': StartLimitBurst=30 in [Unit]');
+    assert(!after.some(function (l) { return /^StartLimit/.test(l); }), p[0] + ': no StartLimit key after [Service], where systemd 237 ignores it');
+    assert(after.indexOf('Restart=on-failure') >= 0, p[0] + ': Restart=on-failure kept');
+    assert.strictEqual(lines.filter(function (l) { return /^StartLimit(IntervalSec|Burst)=/.test(l); }).length, 2, p[0] + ': each key once');
+});
+console.log('ok   waze-on-cluster.service and cluster-render.service: StartLimitIntervalSec=600, StartLimitBurst=30 in [Unit], Restart=on-failure');
+
 /* The capture waits for BMW's media bus by ordering alone: a requirement on
  * a head-unit unit could start or stop it, and a Before= of ours on the bus
  * units could delay them or close an ordering cycle, which systemd breaks by

@@ -9,6 +9,17 @@ After=local-fs.target cluster-render.socket
 # vsomeip identity (README.md "Identity and packaging"); only one of them
 # can run.
 Conflicts=cluster-demo.service
+# Restart=on-failure below restarts the renderer after a failure exit (a poll()
+# error, an invalid dcsm_liveness_ms, RAMSES or DCSM not up at boot). With
+# RestartSec=5 systemd's default start limit (5 starts in 10 s) is never
+# reached, so a fault that never clears would restart it for ever. 30 starts in
+# 10 minutes still covers a slow boot, then the unit stays failed; the next
+# head-unit start or `systemctl reset-failed` clears it. Once the limit is hit
+# systemd probably also fails cluster-render.socket (not run on a car), so the
+# map stays down until then. Kiro test change; the keys need systemd 230 or
+# later, the head unit runs 237.
+StartLimitIntervalSec=600
+StartLimitBurst=30
 
 [Service]
 # uid 5000 is the only uid the unit's vsomeip security allows to request

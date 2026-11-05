@@ -145,6 +145,14 @@ int main(int argc, char **argv)
 
     const std::string unit = slurp("systemd/cluster-render.service");
     ok("cluster-render.service restarts on failure only", unit.find("\nRestart=on-failure\n") != std::string::npos);
+    {
+        // Review N5: the restart cap sits in [Unit] (systemd 237 ignores these keys under [Service]).
+        const std::size_t svc = unit.find("\n[Service]");
+        const std::size_t lim = unit.find("\nStartLimitIntervalSec=600\n");
+        const std::size_t bur = unit.find("\nStartLimitBurst=30\n");
+        ok("cluster-render.service caps restarts: StartLimitIntervalSec=600 and StartLimitBurst=30 in [Unit]",
+           svc != std::string::npos && lim != std::string::npos && bur != std::string::npos && lim < svc && bur < svc);
+    }
 
     unlink(fake.c_str());
     if (std::system(("rm -rf '" + dir + "'").c_str()) != 0)

@@ -126,7 +126,9 @@ function readXattrs(file) {
  * cannot be read at all. */
 function copyXattrs(target, tmp, note) {
     var x = readXattrs(target);
-    if (x.unknown) { note('extended attributes of ' + target + ' not checked (' + x.unknown + ')'); return; }
+    /* Loud on purpose: a file capability on target would be dropped without a word.
+     * Extended attributes are kept only where getfattr works on the unit. */
+    if (x.unknown) { note('WARNING: extended attributes of ' + target + ' not checked (' + x.unknown + '); a file capability on it would not be kept'); return; }
     if (!x.attrs.length) return;
     note(target + ' carries extended attributes: ' + x.attrs.map(function (a) { return a.name; }).join(', ') + '; copying them');
     x.attrs.forEach(function (a) {
