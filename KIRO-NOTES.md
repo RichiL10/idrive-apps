@@ -116,13 +116,39 @@ Every suite exits 0 with 0 failures. No count is below the baseline.
 | suite | baseline | this branch | skipped | difference |
 |---|---|---|---|---|
 | waze-host | 651 | 793 | 6 (same as baseline: need real firmware) | +112: S1..S4, S6 node tests, S7/S8 C++ programs and cases |
-| waze-x86 (gcc 7.5, -Werror) | 381 | 401 | 0 | +5: S7/S8 C++ test programs |
+| waze-x86 (gcc 7.5, -Werror) | 381 | 401 | 0 | +20: S7/S8 C++ test programs and cases |
 | waze-target | 1 | 1 | 0 | binary builds, import checks OK |
 | cr-host | 899 | 948 | 0 | +48: liveness gate, take-over allowlist, 4500 ceiling cases |
 | cr-x86 (gcc 7.5, -Werror) | 872 | 921 | 0 | +48, same cases as cr-host |
 | cr-target | 3 | 3 | 0 | 3 binaries, import checks OK |
 | app | 64 | 73 | 0 | +9: S10 confirm step, failed / busy texts, AA off |
 | release-check | 3 | 3 | 0 | cluster-render@0.3.12, waze-on-cluster@0.8.9, robertn_waze_cluster@0.5.8 reproducible |
+
+Final verification: all eight suites were re-run in full on the final commit (clean worktree, `docker ps` empty
+afterwards) and gave exactly the numbers above. Logs are in the scratch `tools\logs\wt-int-*` files.
+
+Review findings and how each ended (F = first review, N = second review):
+
+| finding | resolution |
+|---|---|
+| F1 `recmgr` / `crashNames` list aapd | not changed, deploy tool not read; documented under "Left as they are" |
+| F2 two waiters could both break one lock | fixed (`<lock>.break` guard, re-read under it), test |
+| F3 failed mark in `status` untested | patchd test added |
+| F4 StartLimit untested | values asserted in tests |
+| F5 unproven apply refused too late | refused before the remount, test |
+| F6 getfattr failure silent | WARNING in the log |
+| F7 `WOC_AA_ENABLED` override usable outside tests | honoured only with `WOC_TEST=1` |
+| F8 `aa_enabled` back to 0 while aapd patched | conf note: revert the Android Auto patch first |
+| F9 socket behaviour at the start limit | note in the unit comments; a guess, not run |
+| N1 VPP hung or lost device not counted with GPU copy | counted at once, test |
+| N2 RTP counters not in the log | late / stray / streams / idle_resets in log and minute line |
+| N3 arrival time for the idle reset | `arrival_ms()` helper, arithmetic tested |
+| N4 no test of the decode -> DeviceWatch -> exit chain | NOT done, pieces tested separately |
+| N5 cluster-render.service without restart cap | StartLimit added, test |
+| N6 exit could hang in MFXClose | exit watchdog 8 s after a fatal device failure |
+
+Not verified in addition: that `feed_datagram` itself passes the arrival time (checked by reading only); systemd 237
+behaviour at the start limit (guess).
 
 One upstream test row was changed on purpose (app `test_control.js`: "another change to / is running" now expects
 the Busy text); `map_feed_test` and the cluster-render take-over fixtures now list their stock contents because
