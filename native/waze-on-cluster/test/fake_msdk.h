@@ -45,6 +45,18 @@ struct GpuFault {
 };
 extern GpuFault gpu_fault;
 
+/* A failure in any session, with or without GPU copy: call ("MFXInit",
+ * "DecodeHeader", "DECODE_Init", "DecodeFrameAsync", "VPP_Run", "decode-sync",
+ * "vpp-sync") returns status after succeeding `after` times, `times` times
+ * (0: every time after). Unlike gpu_fault, a VPP run fails whatever its
+ * output's alignment. Used for the device statuses (MFX_ERR_GPU_HANG,
+ * MFX_ERR_DEVICE_LOST, MFX_ERR_DEVICE_FAILED) and for any other status. */
+struct AnyFault {
+    std::string call;
+    int status = 0, after = 0, times = 0;
+};
+extern AnyFault any_fault;
+
 /* "WxH": every picture decoded at this size, whatever its SPS says. */
 extern std::string picture_size;
 

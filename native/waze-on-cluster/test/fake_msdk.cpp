@@ -13,6 +13,7 @@ namespace fake_msdk {
 
 std::vector<std::string> calls;
 GpuFault gpu_fault;
+AnyFault any_fault;
 std::string picture_size;
 
 namespace {
@@ -87,6 +88,20 @@ mfxStatus fault(const char *call, bool gpu)
     return (mfxStatus)gpu_fault.status;
 }
 
+/* any_fault's status for call, once due. */
+mfxStatus any(const char *call)
+{
+    if (any_fault.call != call)
+        return MFX_ERR_NONE;
+    if (any_fault.after > 0) {
+        any_fault.after--;
+        return MFX_ERR_NONE;
+    }
+    if (any_fault.times > 0 && --any_fault.times == 0)
+        any_fault.call.clear();
+    return (mfxStatus)any_fault.status;
+}
+
 }  // namespace
 
 std::string access_unit(const char *sps, bool idr, uint8_t content)
@@ -119,6 +134,8 @@ const char *vaErrorStr(int) { return "fake"; }
 mfxStatus MFXInit(mfxIMPL, mfxVersion *, mfxSession *session)
 {
     calls.push_back("session");
+    if (const mfxStatus sts = any("MFXInit"))
+        return sts;
     g.gpu_copy = false;
     *session = reinterpret_cast<mfxSession>(&g);
     return MFX_ERR_NONE;
@@ -138,8 +155,9 @@ mfxStatus MFXVideoCORE_SetHandle(mfxSession, mfxHandleType, mfxHDL) { return fau
 
 mfxStatus MFXVideoCORE_SyncOperation(mfxSession, mfxSyncPoint s, mfxU32)
 {
-    calls.push_back(s == task(&g.decode_task) ? "decode-sync" : "vpp-sync");
-    return MFX_ERR_NONE;
+    const char *name = s == task(&g.decode_task) ? "decode-sync" : "vpp-sync";
+    calls.push_back(name);
+    return any(name);
 }
 
 mfxStatus MFXVideoDECODE_DecodeHeader(mfxSession, mfxBitstream *bs, mfxVideoParam *par)
@@ -148,6 +166,8 @@ mfxStatus MFXVideoDECODE_DecodeHeader(mfxSession, mfxBitstream *bs, mfxVideoPara
     if (!u.sps || !u.pps)
         return MFX_ERR_MORE_DATA;
     calls.push_back("header " + size(u.w, u.h));
+    if (const mfxStatus sts = any("DecodeHeader"))
+        return sts;
     mfxFrameInfo &f = par->mfx.FrameInfo;
     f.FourCC = MFX_FOURCC_NV12;
     f.ChromaFormat = MFX_CHROMAFORMAT_YUV420;
@@ -175,7 +195,7 @@ mfxStatus MFXVideoDECODE_Init(mfxSession, mfxVideoParam *par)
     g.pic_w = f.CropW;
     g.pic_h = f.CropH;
     calls.push_back("init " + size(f.CropW, f.CropH));
-    return MFX_ERR_NONE;
+    return any("DECODE_Init");
 }
 
 mfxStatus MFXVideoDECODE_Close(mfxSession) { return MFX_ERR_NONE; }
@@ -187,6 +207,9 @@ mfxStatus MFXVideoDECODE_DecodeFrameAsync(mfxSession, mfxBitstream *bs, mfxFrame
         return MFX_ERR_MORE_DATA;
     const Unit u = parse(bs->Data + bs->DataOffset, bs->DataLength);
     mfxStatus sts = MFX_ERR_NONE;
+    if (u.slice)
+        if (const mfxStatus f = any("DecodeFrameAsync"))
+            return f;
     if (u.sps) {
         if (u.w > g.surf_w || u.h > g.surf_h)
             return MFX_ERR_INCOMPATIBLE_VIDEO_PARAM;
@@ -236,6 +259,8 @@ mfxStatus MFXVideoVPP_RunFrameVPPAsync(mfxSession, mfxFrameSurface1 *in, mfxFram
     if (aligned)
         if (const mfxStatus sts = fault("VPP_Run", g.gpu_copy))
             return sts;
+    if (const mfxStatus sts = any("VPP_Run"))
+        return sts;
     if (!aligned)
         calls.push_back("vpp-out shifted");
     else if ((uintptr_t)out->Data.Y % 4096 || out->Data.Pitch % 64)
