@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Robert Nisipeanu
+# Kiro test build (S6): Android Auto is OFF by default (conf key aa_enabled
+# = 0), so this unit is installed but NOT enabled (component.json "enable" does
+# not list it). It guards an Android Auto patch, which exists only with
+# aa_enabled = 1: whoever turns that on must also enable this unit
+# (systemctl enable waze-on-cluster-aa-boot.service), before the first
+# Android Auto patch. With aa_enabled = 0 recovery.js leaves aapd alone even if
+# the unit is started.
 [Unit]
 Description=waze-on-cluster boot check: restore the original aapd before it starts if the Android Auto patch keeps the head unit from starting
 RequiresMountsFor=/var/opt

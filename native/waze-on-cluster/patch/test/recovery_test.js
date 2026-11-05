@@ -37,6 +37,9 @@ Object.assign(process.env, {
     WOC_REMOUNT_LOCK: path.join(ROOT, 'remount.lock'),
     /* No btime unless a test writes one: the host's own /proc/stat is no boot of the worlds'. */
     WOC_PROC_STAT: path.join(ROOT, 'no-proc-stat'),
+    /* Android Auto is opt-in (S6, aa_enabled.js). These tests are about both
+     * services, so it is on here; the tests of the default turn it off. */
+    WOC_AA_ENABLED: '1',
 });
 
 const recovery = require('../recovery.js');
@@ -1561,27 +1564,113 @@ test('the boot step restores a patched carplay on a unit whose variant it cannot
 
 /* ---- the remount lock and the watcher service ---- */
 
-test('remount lock: mutual exclusion and stale break', () => {
+/* Kiro test change (S2): upstream broke ANY lock older than STALE_MS, whatever
+ * its holder; the lock now goes only with its holder (pid gone), after HUNG_MS
+ * for a live one, or after STALE_MS when it names no pid. Cases ported from the
+ * 0.7.10 fork, plus EPERM (a holder we may not signal is alive), the timeout
+ * of acquire and release by the holder only. */
+test('remount lock: mutual exclusion; broken only when its holder is gone (or holds no pid and is old)', () => {
     const lockPath = path.join(ROOT, 'stale.lock');
-    const env = { WOC_REMOUNT_LOCK: process.env.WOC_REMOUNT_LOCK, WOC_REMOUNT_LOCK_STALE_MS: process.env.WOC_REMOUNT_LOCK_STALE_MS };
+    const env = { WOC_REMOUNT_LOCK: process.env.WOC_REMOUNT_LOCK, WOC_REMOUNT_LOCK_STALE_MS: process.env.WOC_REMOUNT_LOCK_STALE_MS,
+        WOC_REMOUNT_LOCK_HUNG_MS: process.env.WOC_REMOUNT_LOCK_HUNG_MS };
     process.env.WOC_REMOUNT_LOCK = lockPath;
     process.env.WOC_REMOUNT_LOCK_STALE_MS = '50';
+    delete process.env.WOC_REMOUNT_LOCK_HUNG_MS;   /* the default, 10 min */
     const key = require.resolve('../remount_lock.js'), cached = require.cache[key];
     delete require.cache[key];
+    const realKill = process.kill;
     try {
         const lock = require('../remount_lock.js');
         assert.strictEqual(lock.tryAcquire(), true, 'first acquire');
         assert.strictEqual(lock.tryAcquire(), false, 'held: second acquire fails');
         lock.release();
         assert.strictEqual(lock.tryAcquire(), true, 'reacquire after release');
+
+        /* An old lock whose holder still runs (this process) is kept, however
+         * old: a holder that works longer than expected is never cut short. */
+        const old = Date.now() / 1000 - 10;
+        fs.utimesSync(lockPath, old, old);
+        assert.strictEqual(lock.tryAcquire(), false, 'an old lock held by a live pid is not broken');
+        assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid), 'the holder keeps it');
+
+        /* ...up to HUNG_MS (10 min): a live holder past it is taken as hung and
+         * its lock broken, so recovery is not kept out until the next boot. */
+        const hung = Date.now() / 1000 - 11 * 60;
+        fs.utimesSync(lockPath, hung, hung);
+        assert.strictEqual(lock.tryAcquire(), true, 'a lock held by a live pid for over 10 min is broken and retaken');
+        lock.release();
+        assert.strictEqual(lock.tryAcquire(), true, 'reacquire after the hung lock');
+        lock.release();
+
+        /* A lock whose holder is gone is broken at once, whatever its age. */
+        const dead = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+        fs.writeFileSync(lockPath, dead.stdout + ' 2026-01-01T00:00:00.000Z\n');
+        assert.strictEqual(lock.tryAcquire(), true, 'a lock of a pid that is gone is broken and retaken');
+        assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid));
+        lock.release();
+
+        /* A holder we may not signal (EPERM) exists: its lock is kept; only ESRCH means gone. */
+        fs.writeFileSync(lockPath, '4242 someone\n');
+        fs.utimesSync(lockPath, old, old);
+        process.kill = (pid, sig) => { if (pid === 4242) { const e = new Error('not permitted'); e.code = 'EPERM'; throw e; } return realKill.call(process, pid, sig); };
+        assert.strictEqual(lock.tryAcquire(), false, 'a lock whose holder answers EPERM is alive and kept');
+        process.kill = (pid, sig) => { if (pid === 4242) { const e = new Error('no such process'); e.code = 'ESRCH'; throw e; } return realKill.call(process, pid, sig); };
+        assert.strictEqual(lock.tryAcquire(), true, 'the same lock once the pid is gone (ESRCH) is broken');
+        process.kill = realKill;
+        lock.release();
+
+        /* Another holder's lock is not released by us. */
         fs.writeFileSync(lockPath, '999999 someone\n');
         lock.release();
         assert(fs.existsSync(lockPath), 'another holder\'s lock is not released');
-        const old = Date.now() / 1000 - 10;
+        fs.unlinkSync(lockPath);
+
+        /* No pid in it: broken only once older than STALE_MS. */
+        fs.writeFileSync(lockPath, '');
+        assert.strictEqual(lock.tryAcquire(), false, 'a fresh lock with no pid yet is kept');
         fs.utimesSync(lockPath, old, old);
-        assert.strictEqual(lock.tryAcquire(), true, 'stale lock broken');
+        assert.strictEqual(lock.tryAcquire(), true, 'an old lock with no pid is broken');
+        lock.release();
+        fs.writeFileSync(lockPath, 'not-a-pid text\n');
+        fs.utimesSync(lockPath, old, old);
+        assert.strictEqual(lock.tryAcquire(), true, 'an old lock with garbage for a pid is broken');
         lock.release();
     } finally {
+        process.kill = realKill;
+        try { fs.unlinkSync(lockPath); } catch (e) {}
+        require.cache[key] = cached;
+        Object.keys(env).forEach((k) => { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; });
+    }
+});
+
+test('remount lock: acquire waits for a live holder up to its timeout, then gives up without breaking the lock; the HUNG_MS override applies', async () => {
+    const lockPath = path.join(ROOT, 'wait.lock');
+    const env = { WOC_REMOUNT_LOCK: process.env.WOC_REMOUNT_LOCK, WOC_REMOUNT_LOCK_STALE_MS: process.env.WOC_REMOUNT_LOCK_STALE_MS,
+        WOC_REMOUNT_LOCK_HUNG_MS: process.env.WOC_REMOUNT_LOCK_HUNG_MS };
+    process.env.WOC_REMOUNT_LOCK = lockPath;
+    process.env.WOC_REMOUNT_LOCK_STALE_MS = '50';
+    process.env.WOC_REMOUNT_LOCK_HUNG_MS = '8000';
+    const key = require.resolve('../remount_lock.js'), cached = require.cache[key];
+    delete require.cache[key];
+    try {
+        const lock = require('../remount_lock.js');
+        const holder = cp.spawn(process.execPath, ['-e', 'setTimeout(function () {}, 20000)'], { stdio: 'ignore' });
+        try {
+            fs.writeFileSync(lockPath, holder.pid + ' 2026-01-01T00:00:00.000Z\n');
+            const old = Date.now() / 1000 - 5;   /* older than STALE_MS, younger than the HUNG_MS override */
+            fs.utimesSync(lockPath, old, old);
+            const t0 = Date.now();
+            const got = await new Promise((r) => lock.acquire(350, r));
+            assert.strictEqual(got, false, 'a live holder is waited for, not overtaken');
+            assert(Date.now() - t0 >= 300, 'it waited for its timeout');
+            assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(holder.pid), 'the holder still has the lock');
+            const hung = Date.now() / 1000 - 9;   /* older than the override */
+            fs.utimesSync(lockPath, hung, hung);
+            assert.strictEqual(await new Promise((r) => lock.acquire(350, r)), true, 'past the HUNG_MS override a live holder is taken as hung');
+            lock.release();
+        } finally { holder.kill('SIGKILL'); }
+    } finally {
+        try { fs.unlinkSync(lockPath); } catch (e) {}
         require.cache[key] = cached;
         Object.keys(env).forEach((k) => { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; });
     }
@@ -1611,6 +1700,301 @@ test('the watcher service stays up without a patch to watch, and stops on SIGTER
         assert(exit && exit.code === 0, 'a SIGTERM ends it cleanly: ' + JSON.stringify(exit));
     } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
 });
+
+/* ---- the failed mark (Kiro test build, S4) ---- */
+
+const failedReason = recovery.failedReason;
+const readState = (p) => readJson(p);
+const BOOT_RESTORE = (w, n) => ({ restore: (fails, cb) => recovery.restoreTarget(w.T[n], true, fails, cb, 1000) });
+
+/* A new inode under the target's name, as a hand restore or a firmware
+ * update leaves it: the patch record no longer describes the file. */
+function replaceFile(file, buf) {
+    fs.writeFileSync(file + '.new', buf, { mode: 0o755 });
+    fs.renameSync(file + '.new', file);
+}
+
+/* A patched carplay (kind) whose backup is unusable (how: 'bytes' = the
+ * bytes no longer match the record, 'gone' = no backup at all), through boot
+ * A (armed) and a crash at its start. */
+async function crashedWithoutBackup(w, kind, how) {
+    w.install('carplay', kind);
+    if (how === 'bytes') fs.appendFileSync(w.T.carplay.target + '.woc-orig', 'x');
+    else { fs.unlinkSync(w.T.carplay.target + '.woc-orig'); fs.unlinkSync(w.T.carplay.target + '.woc-orig.json'); }
+    const a = await startBoot(w.recovery('carplay', 'A'));
+    assert.strictEqual(a.action, 'armed', how + ': ' + JSON.stringify(a));
+    w.svc.carplay.starts();
+    END.crashAtStart(w, 'A', 'carplay');
+}
+
+test('patched, crashing, and no usable backup: marked failed, logged loudly, and patchd can report it', async () => {
+    for (const how of ['bytes', 'gone']) {
+        const w = makeWorld();
+        await crashedWithoutBackup(w, 'unproven', how);
+        assert.strictEqual(failedReason(w.T.carplay.state), '', how + ': not failed before the threshold');
+        fs.writeFileSync(MOUNT_LOG, '');
+        const r = await startBoot(w.recovery('carplay', 'B', BOOT_RESTORE(w, 'carplay')));
+        assert.deepStrictEqual([r.action, r.failed], ['restore-failed', true], how + ': ' + JSON.stringify(r));
+        const st = w.state('carplay');
+        assert(st.failed && st.failed.boot === 'B' && st.failed.fails === 1 && /backup/.test(st.failed.why) && st.failed.since, how + ': ' + JSON.stringify(st));
+        assert.strictEqual(st.fails, 1, how + ': the counter is kept');
+        assert(w.logs.some((l) => /^ERROR: carplay is marked FAILED/.test(l) && /by hand/.test(l)), how + ': ' + w.logs.join('\n'));
+        const reason = failedReason(w.T.carplay.state);
+        assert(/crashed 1 times/.test(reason) && /by hand/.test(reason) && /not started again/.test(reason) && !/\u2014/.test(reason), reason);
+        assert.strictEqual(w.holds('carplay'), 'patched', how + ': the binary is left as it is');
+        assert.strictEqual(fs.readFileSync(MOUNT_LOG, 'utf8'), '', how + ': / never remounted');
+        /* Every later boot logs it again and keeps the mark. */
+        END.crashAtStart(w, 'B', 'carplay');
+        const c = await startBoot(w.recovery('carplay', 'C', BOOT_RESTORE(w, 'carplay')));
+        assert.strictEqual(c.action, 'restore-failed', how);
+        assert.strictEqual(w.state('carplay').failed.boot, 'B', how + ': since its first boot');
+    }
+    assert.strictEqual(failedReason(path.join(ROOT, 'no-such-state.json')), '', 'no state: not failed');
+    const bad = path.join(ROOT, 'bad-state.json');
+    fs.writeFileSync(bad, '{oops');
+    assert.strictEqual(failedReason(bad), '', 'an unreadable state: not failed');
+});
+
+test('a backup that is merely locked or a remount that fails is no failed mark: a later try may succeed', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'unproven');
+    await startBoot(w.recovery('carplay', 'A'));
+    END.crashAtStart(w, 'A', 'carplay');
+    const r = await startBoot(w.recovery('carplay', 'B', { restore: (fails, cb) => cb(new Error('the remount lock is held')) }));
+    assert.strictEqual(r.action, 'restore-failed');
+    assert(!r.failed && !w.state('carplay').failed, JSON.stringify(w.state('carplay')));
+    assert.strictEqual(failedReason(w.T.carplay.state), '');
+});
+
+test('aapd is never marked failed: only carplay has the mark', async () => {
+    const w = makeWorld();
+    w.install('aapd', 'unproven');
+    fs.appendFileSync(w.T.aapd.target + '.woc-orig', 'x');
+    await startBoot(w.recovery('aapd', 'A'));
+    END.crashAtStart(w, 'A', 'aapd');
+    const r = await startBoot(w.recovery('aapd', 'B', BOOT_RESTORE(w, 'aapd')));
+    assert.strictEqual(r.action, 'restore-failed');
+    assert(!r.failed && !w.state('aapd').failed, JSON.stringify(w.state('aapd')));
+});
+
+test('marked failed: no start after a crash, but a SIGKILL patchd did not send still restarts carplay, bounded', async () => {
+    const w = makeWorld({ recmgr: true });
+    await crashedWithoutBackup(w, 'unproven', 'bytes');
+    const { step, watcher } = await bootUp(w, 'B');
+    assert.deepStrictEqual([step.action, step.failed], ['restore-failed', true]);
+    w.events.length = 0;
+    w.logs.length = 0;
+    w.svc.carplay.crashes();
+    w.now.advance(5000);
+    const c = await tick(watcher);
+    assert.strictEqual(c.action, 'crash', JSON.stringify(c));
+    for (let i = 0; i < 4; i++) { w.now.advance(61000); await tick(watcher); }
+    assert.strictEqual(starts(w, 'carplay'), 0, 'a carplay that crashes while patched, with nothing to restore it, is not started by this tool');
+    assert(w.logs.some((l) => /stays down: its patch is marked failed/.test(l)), w.logs.join('\n'));
+    assert(w.state('carplay').failed, 'still marked');
+    /* Started by hand, then SIGKILLed by something that is not patchd. */
+    w.svc.carplay.starts();
+    w.events.length = 0;
+    w.now.advance(5000);
+    await tick(watcher);
+    w.svc.carplay.ends('2', '9');
+    w.now.advance(5000);
+    assert.strictEqual((await tick(watcher)).action, 'killed');
+    w.now.advance(5000);
+    assert.strictEqual((await tick(watcher)).action, 'started', 'the kill was no crash of the patch');
+    assert.strictEqual(starts(w, 'carplay'), 1);
+    assert(w.logs.some((l) => /killed while its patch is marked failed/.test(l)), w.logs.join('\n'));
+    assert(w.state('carplay').failed, 'still marked after the restart');
+    /* Bounded: the same kill again and again stops after START_DELAYS_MS. */
+    for (let i = 0; i < 6; i++) {
+        w.svc.carplay.ends('2', '9');
+        w.now.advance(5000);
+        await tick(watcher);
+        w.now.advance(61000);
+        await tick(watcher);
+    }
+    assert(starts(w, 'carplay') <= 3, 'starts this boot: ' + starts(w, 'carplay'));
+    assert(w.logs.some((l) => /stays down: started \d+ times this boot already/.test(l)), w.logs.join('\n'));
+});
+
+test('the mark is process-wide even when the state file cannot be written, and says so', async () => {
+    const w = makeWorld({ recmgr: true });
+    await crashedWithoutBackup(w, 'unproven', 'bytes');
+    fs.mkdirSync(w.T.carplay.state + '.tmp');   /* a save fails */
+    const rec = w.recovery('carplay', 'B', BOOT_RESTORE(w, 'carplay'));
+    const r = await startBoot(rec);
+    assert.strictEqual(r.action, 'restore-failed');
+    assert(w.logs.some((l) => /could not persist the failed mark/.test(l)), w.logs.join('\n'));
+    w.svc.carplay.starts();
+    w.events.length = 0;
+    await tick(rec);
+    w.svc.carplay.crashes();
+    w.now.advance(5000);
+    await tick(rec);
+    for (let i = 0; i < 3; i++) { w.now.advance(61000); await tick(rec); }
+    assert.strictEqual(starts(w, 'carplay'), 0, 'held in memory: no start after the crash');
+});
+
+test('the failed mark clears: stock again, a verified backup restores, carplay ran healthy, the backup and record are gone', async () => {
+    /* Restored by hand (a new file the record no longer describes). */
+    const w = makeWorld();
+    await crashedWithoutBackup(w, 'unproven', 'bytes');
+    assert.strictEqual((await startBoot(w.recovery('carplay', 'B', BOOT_RESTORE(w, 'carplay')))).action, 'restore-failed');
+    assert(w.state('carplay').failed);
+    assert.notStrictEqual(failedReason(w.T.carplay.state), '');
+    replaceFile(w.T.carplay.target, w.bin.carplay.original);
+    /* patchd reports it only while the binary is not the original: the state still holds the mark here. */
+    assert(w.state('carplay').failed, 'the mark is still in the file until the next boot step');
+    assert.strictEqual((await startBoot(w.recovery('carplay', 'C'))).action, 'idle');
+    assert.strictEqual(w.state('carplay').failed, null);
+    assert.strictEqual(failedReason(w.T.carplay.state), '');
+    assert.deepStrictEqual([w.state('carplay').fails, w.state('carplay').arm], [0, null]);
+
+    /* The backup repaired by hand: the next boot step restores and the mark goes. */
+    const v = makeWorld();
+    await crashedWithoutBackup(v, 'unproven', 'bytes');
+    await startBoot(v.recovery('carplay', 'B', BOOT_RESTORE(v, 'carplay')));
+    assert(v.state('carplay').failed);
+    fs.writeFileSync(v.T.carplay.target + '.woc-orig', v.bin.carplay.original, { mode: 0o600 });
+    END.crashAtStart(v, 'B', 'carplay');
+    assert.strictEqual((await startBoot(v.recovery('carplay', 'C', BOOT_RESTORE(v, 'carplay')))).action, 'restored');
+    assert.strictEqual(v.state('carplay').failed, null);
+    assert.strictEqual(v.holds('carplay'), 'original');
+
+    /* A boot in which carplay ran healthy brings the count below the threshold. */
+    const u = makeWorld();
+    u.install('carplay', 'proven');
+    fs.appendFileSync(u.T.carplay.target + '.woc-orig', 'x');
+    fs.writeFileSync(u.T.carplay.state, JSON.stringify({ fails: 1, unknown: 0, arm: { boot: 'A', crashes: 0, clean: true },
+        failed: { since: 'x', boot: 'A', fails: 2, why: 'backup' } }));
+    assert.strictEqual(failedReason(u.T.carplay.state) !== '', true);
+    const r = await startBoot(u.recovery('carplay', 'B'));
+    assert.strictEqual(r.action, 'armed', JSON.stringify(r));
+    assert.strictEqual(u.state('carplay').failed, null);
+
+    /* Our backup and record gone, binary replaced: nothing of ours, nothing failed. */
+    const n = makeWorld();
+    n.install('carplay', 'none');
+    fs.writeFileSync(n.T.carplay.state, JSON.stringify({ fails: 3, unknown: 0, arm: null, failed: { boot: 'A', fails: 3, since: 'x', why: '' } }));
+    assert.strictEqual((await startBoot(n.recovery('carplay', 'B'))).action, 'idle');
+    assert.strictEqual(n.state('carplay').failed, null);
+    assert.strictEqual(n.state('carplay').fails, 0);
+});
+
+test('the state file with the failed mark is still written atomically: the previous state stays whole when a save fails', async () => {
+    const w = makeWorld();
+    await crashedWithoutBackup(w, 'unproven', 'bytes');
+    await startBoot(w.recovery('carplay', 'B', BOOT_RESTORE(w, 'carplay')));
+    const before = fs.readFileSync(w.T.carplay.state, 'utf8');
+    assert(JSON.parse(before).failed);
+    assert.deepStrictEqual(fs.readdirSync(path.dirname(w.T.carplay.state)).filter((f) => /\.tmp$/.test(f)), [], 'no temporary file left');
+    fs.mkdirSync(w.T.carplay.state + '.tmp');
+    await startBoot(w.recovery('carplay', 'C', BOOT_RESTORE(w, 'carplay')));
+    assert.strictEqual(fs.readFileSync(w.T.carplay.state, 'utf8'), before, 'a failed save leaves the old file');
+});
+
+test('patchd reads the mark: status carries failed only while the binary is not the original', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'patchd.js'), 'utf8');
+    assert(/failed: binary !== 'original' \? failedReason\(\) : ''/.test(src), 'status reports the mark while the binary is not original');
+    assert(/if \(st\.failed\) msg\.failed = st\.failed/.test(src), 'and sends it');
+});
+
+/* ---- Android Auto off (S6): recovery leaves aapd's files alone ---- */
+
+/* Runs fn while every fs call that names a path under any of dirs or
+ * matching re is recorded; returns the paths. */
+async function spyFs(match, fn) {
+    const names = ['readFileSync', 'writeFileSync', 'appendFileSync', 'openSync', 'statSync', 'lstatSync', 'existsSync', 'readdirSync', 'readlinkSync',
+        'unlinkSync', 'renameSync', 'linkSync', 'chmodSync', 'chownSync', 'mkdirSync', 'accessSync', 'symlinkSync'];
+    const seen = [], orig = {};
+    names.forEach((n) => {
+        orig[n] = fs[n];
+        fs[n] = function (p) {
+            if (typeof p === 'string' && match(p)) seen.push(n + ' ' + p);
+            return orig[n].apply(fs, arguments);
+        };
+    });
+    try { await fn(); } finally { names.forEach((n) => { fs[n] = orig[n]; }); }
+    return seen;
+}
+
+function withAa(value, fn) {
+    return async () => {
+        const saved = process.env.WOC_AA_ENABLED;
+        process.env.WOC_AA_ENABLED = value;
+        try { await fn(); } finally { process.env.WOC_AA_ENABLED = saved; }
+    };
+}
+
+test('aa_enabled = 0: the boot step, the watcher and the shutdown hook never look at aapd, its backups, state or marks', withAa('0', async () => {
+    const w = makeWorld({ recmgr: true });
+    w.install('carplay', 'proven');
+    w.install('aapd', 'proven');
+    fs.writeFileSync(w.T.aapd.state, JSON.stringify({ fails: 5, unknown: 0, arm: { boot: 'A', crashes: 1 } }));
+    const before = {};
+    [w.T.aapd.target, w.T.aapd.files[1], w.T.aapd.target + '.woc-orig', w.T.aapd.files[1] + '.woc-orig', w.T.aapd.state].forEach((f) => {
+        before[f] = fs.readFileSync(f, 'utf8') + ':' + fs.statSync(f).mtimeMs;
+    });
+    const aapdPath = (p) => p.indexOf('aapd') >= 0 || p.indexOf('aa-') >= 0;
+    const seen = await spyFs(aapdPath, async () => {
+        const rec = w.recovery('aapd', 'B', BOOT_RESTORE(w, 'aapd'));
+        assert.deepStrictEqual(await startBoot(rec), { action: 'idle' });
+        assert.deepStrictEqual(await tick(rec), { action: 'skip' });
+        await shutdown(rec);
+        /* carplay's own recovery counts nothing from aapd. */
+        const cp1 = w.recovery('carplay', 'B', BOOT_RESTORE(w, 'carplay'));
+        await startBoot(cp1);
+        w.svc.carplay.starts();
+        w.svc.carplay.crashes();
+        w.now.advance(5000);
+        await tick(cp1);
+    });
+    const aapdSeen = seen.filter((s) => /aapd|aa-boot/.test(s) && !/carplay/.test(s));
+    assert.deepStrictEqual(aapdSeen, [], 'nothing under the aapd paths was touched:\n' + aapdSeen.join('\n'));
+    Object.keys(before).forEach((f) => assert.strictEqual(fs.readFileSync(f, 'utf8') + ':' + fs.statSync(f).mtimeMs, before[f], f + ' unchanged'));
+    assert.strictEqual(starts(w, 'aapd'), 0);
+    assert(w.logs.some((l) => /aapd is off \(Android Auto is off/.test(l)), w.logs.join('\n'));
+    /* The spy sees aapd's paths when Android Auto is on: the check above is no vacuous one. */
+    process.env.WOC_AA_ENABLED = '1';
+    const on = await spyFs(aapdPath, async () => { await startBoot(w.recovery('aapd', 'C', BOOT_RESTORE(w, 'aapd'))); });
+    assert(on.length > 0, 'the spy records aapd access when it is on');
+}));
+
+test('aa_enabled = 0: carplay\'s count ignores aapd\'s state and shutdown mark', withAa('0', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'proven');
+    w.install('aapd', 'proven');
+    await bootUp(w, 'A', ['carplay']);
+    /* a boot that ends with aapd crashed and a restart recorded: with aapd on, it would explain carplay's count */
+    fs.writeFileSync(w.T.aapd.state, JSON.stringify({ fails: 0, unknown: 0, arm: { boot: 'A', crashes: 1 } }));
+    END.otherCrash(w, 'A');
+    const seen = await spyFs((p) => p === w.T.aapd.state || p === w.T.aapd.mark, async () => {
+        await startBoot(w.recovery('carplay', 'B'));
+    });
+    assert.deepStrictEqual(seen, [], seen.join('\n'));
+}));
+
+test('aa_enabled = 0: the real boot step for aapd exits 0 at once and leaves the files and / alone; the watcher does not watch aapd', withAa('0', async () => {
+    const w = makeWorld();
+    w.install('aapd', 'unproven');
+    fs.writeFileSync(w.T.aapd.state, JSON.stringify({ fails: 9, unknown: 0, arm: { boot: 'old', crashes: 1 } }));
+    const stateBefore = fs.readFileSync(w.T.aapd.state, 'utf8');
+    const binBefore = fs.readFileSync(w.T.aapd.target);
+    fs.writeFileSync(MOUNT_LOG, '');
+    const r = runBootStep(w, 'aapd', 'B', { WOC_AA_ENABLED: '0' });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert(/aapd boot check: off \(Android Auto is off/.test(r.stdout), r.stdout);
+    assert.strictEqual(fs.readFileSync(MOUNT_LOG, 'utf8'), '', '/ never remounted');
+    assert(fs.readFileSync(w.T.aapd.target).equals(binBefore), 'aapd untouched');
+    assert.strictEqual(fs.readFileSync(w.T.aapd.state, 'utf8'), stateBefore, 'its state untouched');
+    /* carplay's boot step is unaffected by the switch. */
+    w.install('carplay', 'unproven');
+    const c = runBootStep(w, 'carplay', 'B', { WOC_AA_ENABLED: '0' });
+    assert(/carplay boot check: armed/.test(c.stdout), c.stdout);
+    /* With the switch on, the same step works on aapd. */
+    const on = runBootStep(w, 'aapd', 'C', { WOC_AA_ENABLED: '1' });
+    assert(/aapd boot check: (armed|restore|idle)/.test(on.stdout), on.stdout);
+}));
 
 /* TEST_ONLY=<part of a name> runs only the tests it names. */
 const run = tests.filter((t) => !process.env.TEST_ONLY || t.name.indexOf(process.env.TEST_ONLY) >= 0);

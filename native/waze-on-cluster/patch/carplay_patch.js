@@ -570,12 +570,19 @@ function repairMode(target, yes) {
     process.stdout.write('set ' + target + '\'s mode and owner (it had ' + fix + ')\n');
 }
 
-/* Write by atomic rename so a crash mid-write cannot leave carplay half
- * patched; fall back to in-place rewrite on a cross-device/busy rename.
- * Either way carplay gets its mode and owner explicitly (file_mode.js). The
- * caller remounts / read-write around this (deploy's remount window). */
+/* Write by atomic rename ONLY (file_mode.js replace), so a crash or power
+ * loss mid-write cannot leave carplay half patched: a rename that fails
+ * leaves the target as it was and the write is refused, never rewritten in
+ * place (Kiro test change S1; upstream fell back to overwriting the live
+ * file). The temporary file gets carplay's mode and owner explicitly (its
+ * original's, recorded with the backup, at least 0755: what carplay.service's
+ * user needs), its extended attributes, an fsync and a SHA-256 read-back
+ * before the rename; the folder is fsynced after. The caller remounts /
+ * read-write around this (deploy's remount window). */
 function writeInPlace(target, buf) {
-    try { fileMode.replace(target, buf, wantedMode(target), true); } catch (e) { die('writing ' + target + ': ' + e.message); }
+    try {
+        fileMode.replace(target, buf, wantedMode(target), { note: function (t) { process.stdout.write('note: ' + t + '\n'); } });
+    } catch (e) { die('writing ' + target + ': ' + e.message); }
 }
 
 function onlyRegionsDiffer(a, b, regions) {

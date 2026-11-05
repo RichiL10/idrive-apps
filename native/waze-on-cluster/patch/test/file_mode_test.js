@@ -3,8 +3,9 @@
 // Copyright (C) 2026 Robert Nisipeanu
 /* file_mode.js under umask 077: a replaced file gets its original's mode
  * with at least the floor's bits and its original's owner, whatever the
- * umask and whatever a temporary file left behind holds; the in-place
- * fallback and the mode-only repair do the same. Run as root it also
+ * umask and whatever a temporary file left behind holds; the mode-only
+ * repair does the same. A refused rename is not answered by an in-place
+ * rewrite (Kiro test change, S1). Run as root it also
  * checks that the owner is set to the original's.
  *
  *   node patch/test/file_mode_test.js
@@ -74,15 +75,20 @@ try {
         assert(!fs.lstatSync(bin).isSymbolicLink());
     });
 
-    check('the in-place fallback (rename refused) sets the mode too; without it the error is thrown and the target kept', function () {
-        var bin = fresh('inplace', 'old bytes, longer', 0o700), rename = fs.renameSync;
+    check('a refused rename (S1: no in-place fallback any more) throws, the target keeps its bytes, mode and inode, no temporary file is left', function () {
+        var bin = fresh('inplace', 'old bytes, longer', 0o700), rename = fs.renameSync, ino = fs.statSync(bin).ino;
         fs.renameSync = function () { var e = new Error('busy'); e.code = 'EBUSY'; throw e; };
         try {
-            assert.throws(function () { fileMode.replace(bin, Buffer.from('x'), fileMode.wanted(bin, null, fileMode.EXEC)); }, /busy/);
-            assert.strictEqual(fs.readFileSync(bin, 'utf8'), 'old bytes, longer');
-            assert.strictEqual(mode(bin), 0o700);
-            fileMode.replace(bin, Buffer.from('new'), fileMode.wanted(bin, null, fileMode.EXEC), true);
+            /* the 4th argument upstream used for the in-place fallback is ignored now */
+            [undefined, true].forEach(function (inPlace) {
+                assert.throws(function () { fileMode.replace(bin, Buffer.from('x'), fileMode.wanted(bin, null, fileMode.EXEC), inPlace); }, /busy.*not rewritten in place; .* unchanged/);
+                assert.strictEqual(fs.readFileSync(bin, 'utf8'), 'old bytes, longer');
+                assert.strictEqual(mode(bin), 0o700);
+                assert.strictEqual(fs.statSync(bin).ino, ino);
+                assert.deepStrictEqual(fs.readdirSync(dir).filter(function (n) { return /^inplace\.woc-tmp/.test(n); }), []);
+            });
         } finally { fs.renameSync = rename; }
+        fileMode.replace(bin, Buffer.from('new'), fileMode.wanted(bin, null, fileMode.EXEC));
         assert.strictEqual(fs.readFileSync(bin, 'utf8'), 'new');
         assert.strictEqual(mode(bin), 0o755);
         assert(!fs.existsSync(bin + '.woc-tmp'));

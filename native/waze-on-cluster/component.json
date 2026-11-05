@@ -59,6 +59,11 @@
       "mode": "0644"
     },
     {
+      "path": "aa_enabled.js",
+      "from": "patch/aa_enabled.js",
+      "mode": "0644"
+    },
+    {
       "path": "patchd.js",
       "from": "patch/patchd.js",
       "mode": "0644"
@@ -209,10 +214,6 @@
     },
     {
       "unit": "waze-on-cluster-boot.service",
-      "target": "multi-user.target"
-    },
-    {
-      "unit": "waze-on-cluster-aa-boot.service",
       "target": "multi-user.target"
     },
     {
