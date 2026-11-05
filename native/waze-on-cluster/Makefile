@@ -103,6 +103,7 @@ test-node:
 	umask 077 && $(NODE) patch/test/patchd_unproven_test.js
 	umask 077 && $(NODE) patch/test/patchd_aa_off_test.js
 	umask 077 && $(NODE) patch/test/patchd_ro_test.js
+	umask 077 && $(NODE) patch/test/remount_lock_test.js
 
 test-cpp: $(CPP_TESTS)
 	$(BUILD)/host/nal_reader_test
