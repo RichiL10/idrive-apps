@@ -92,6 +92,7 @@ struct Rig {
         TargetSpec a;
         a.name = "map"; a.slot = 0x100; a.scene_id = kMap; a.width = 1088; a.height = 480;
         a.take_over_stock = true;
+        a.take_over_contents = {0x01000300};   /* the HMI's map, as shipped */
         TargetSpec b;
         b.name = "panel"; b.slot = 0x203; b.scene_id = kPanel; b.width = 1920; b.height = 720; b.content_class = 3;
         m.add(a);

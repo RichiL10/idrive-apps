@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 
@@ -122,6 +123,38 @@ bool load_holds(const HoldSettings &cfg, const std::vector<uint64_t> &allowed, s
     if (holds.empty())
         return refuse(warn, "guide_hold: guide_slots names no slot");
     targets->insert(targets->end(), holds.begin(), holds.end());
+    return true;
+}
+
+bool parse_take_over_contents(const std::string &key, const std::string &list, const std::vector<uint64_t> &allowed,
+                              std::vector<uint64_t> *out, std::string *why)
+{
+    out->clear();
+    why->clear();
+    for (const std::string &c : tokens(list)) {
+        char *end = nullptr;
+        errno = 0;
+        /* strtoull takes a sign (and wraps a minus), so a leading + or - is
+         * refused before it. */
+        const uint64_t v = c[0] == '-' || c[0] == '+' ? 0 : std::strtoull(c.c_str(), &end, 0);
+        if (!v || !end || *end || errno == ERANGE) {
+            out->clear();
+            *why = key + " must be scene ids separated by commas, not \"" + c + "\"";
+            return false;
+        }
+        if ((v >> 16) != 0x0100 || std::find(allowed.begin(), allowed.end(), v) != allowed.end()) {
+            out->clear();
+            *why = key + ": \"" + c + "\" is not a stock HMI content (0x0100xxxx, not one of scene_ids_allowed)";
+            return false;
+        }
+        if (v == 0x01000314) {
+            out->clear();
+            *why = key + ": 0x1000314 is the seat-belt-warning panel, never taken over";
+            return false;
+        }
+        if (std::find(out->begin(), out->end(), v) == out->end())
+            out->push_back(v);
+    }
     return true;
 }
 

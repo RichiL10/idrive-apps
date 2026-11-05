@@ -56,15 +56,19 @@ void define_keys(cld::Config *cfg)
     cfg->define("map_size", "1088x480");
     cfg->define("map_linger_ms", "0");
     cfg->define("map_take_over_stock", "1");
+    cfg->define("map_take_over_contents", "0x01000300");
     cfg->define("panel_slot", "0x203");
     cfg->define("panel_content_class", "0");
     cfg->define("panel_scene_id", "0x01000400");
     cfg->define("panel_size", "1920x720");
     cfg->define("panel_linger_ms", "3000");
     cfg->define("panel_take_over_stock", "0");
+    cfg->define("panel_take_over_contents", "");
     cfg->define("hud_linger_ms", "3000");
     cfg->define("hud_take_over_stock", "0");
+    cfg->define("hud_take_over_contents", "");
     cfg->define("dcsm_hmi_client_handle", "1");
+    cfg->define("dcsm_liveness_ms", "3000");
     cfg->define("guide_hold", "1");
     cfg->define("guide_slots", "auto");
     cfg->define("guide_scene_id", "0x010004f1");
@@ -98,7 +102,7 @@ void define_keys(cld::Config *cfg)
     cfg->define("id8_widget_order", "50");
     cfg->define("id8_widget_preview", "");
     cfg->define("fade_ms", "250");
-    cfg->define("upload_kb_per_s", "5500");
+    cfg->define("upload_kb_per_s", "4500");
     cfg->define("upload_floor_kb_per_s", "2000");
     cfg->define("upload_step_kb_per_s", "500");
     cfg->define("upload_burst_ms", "250");
@@ -148,6 +152,14 @@ bool load_targets(const cld::Config &cfg, int generation, std::vector<TargetSpec
         } else {
             t.content_class = (uint32_t)cfg.num((p + "content_class").c_str());
             t.take_over_stock = cfg.num((p + "take_over_stock").c_str()) != 0;
+            /* The stock contents a take-over may unmap; empty: none. The
+             * guide hold has its own list (guide_take_over). */
+            std::string why;
+            if (!parse_take_over_contents(p + "take_over_contents", cfg.str((p + "take_over_contents").c_str()),
+                                          allowed, &t.take_over_contents, &why)) {
+                *err = "target " + name + ": " + why;
+                return false;
+            }
         }
         if (!cfg.size((p + "size").c_str(), &t.width, &t.height) || t.width < 16 || t.height < 16 ||
             t.width > 4096 || t.height > 4096) {

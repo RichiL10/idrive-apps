@@ -139,6 +139,25 @@ cluster is offered, and what differs is in "iDrive 8".
     contending layer, never in any other slot. Each one is logged with
     what was unmapped, and so is the KOMBI's reply. Unmap replies are
     matched in a queue of their own, so they never answer a fetch or a map.
+  - Only the stock contents in `<target>_take_over_contents` (Kiro test
+    build): the map's is `0x01000300`, the HMI's map in Map view. Any other
+    stock content shown in the slot, such as the speech dialog
+    `0x01000400`, a route preview or the assisted-driving view, is never
+    unmapped: the target stays parked behind it (logged once per content)
+    and is shown when that content goes. The list is scene ids separated by
+    commas or spaces; an empty list means no take-over at all. The service
+    refuses to start when an id has a sign, is out of range, is not a stock
+    HMI content (`0x0100xxxx`), is one of ours (`scene_ids_allowed`) or is
+    `0x01000314` (the seat-belt-warning panel). The `panel` and `hud`
+    lists are empty (they do not take over). The guide hold has its own
+    list, `guide_take_over` (below), which is what its take-overs unmap and
+    what it yields to; the two lists never widen each other, and the
+    allowlist does not change how the hold behaves.
+  - The fork's opt-in `<target>_take_over_remap` (unmap our parked map, the
+    stock content, then map ours again, back to back) is NOT part of this
+    build: upstream removed the state machine it relied on, it was never
+    switched on, and no car test supports it. The take-over is the single
+    stock unmap described above.
 - **The stock HMI and other apps** without a parked mapping (not asked yet,
   or a target that does not take over): content of an app that does not
   use this service is always yielded to: the slot is asked for again only
@@ -260,7 +279,8 @@ cluster is offered, and what differs is in "iDrive 8".
     that never sends the field gets the hold.
   - It is requested, contending and taking over from the stock HMI, as
     soon as `map` is shown. Parked behind the HMI's content, it takes over
-    as the map does, but only content in `guide_take_over` (0x01000310;
+    as the map does (its own list, not `map_take_over_contents`), but only
+    content in `guide_take_over` (0x01000310;
     0x01000314, the seat-belt-warning panel, is refused there): it
     unmaps that content shown in its slot and that can be parked ahead of
     ours, so none of it is shown in its place; the HMI maps it again behind
@@ -394,9 +414,11 @@ cluster is offered, and what differs is in "iDrive 8".
 ## Upload budget
 
 Every layer of every client writes within one budget (`src/governor.h`,
-`kit/upload_pacer.h`). Its ceiling, `upload_kb_per_s`, is 5500 KB/s: on the
+`kit/upload_pacer.h`). Its ceiling, `upload_kb_per_s`, is 4500 KB/s: on the
 car the cluster flashed black at 8000 KB/s, and once removed a shown map
-after a minute averaging 5774 KB/s. The cap follows what the link shows while writes go (64 KB
+after a minute averaging 5774 KB/s, under 5 % above the old 5500 ceiling.
+The key is shared by iDrive 7 and iDrive 8, so the iDrive 8 ceiling is 4500
+KB/s too (5500 in `local_conf` restores the old one there). The cap follows what the link shows while writes go (64 KB
 or more written within the last second, whether or not the flush went);
 evidence at other times is logged, not counted:
 
@@ -419,7 +441,7 @@ evidence at other times is logged, not counted:
   one not answered is arbitration, not evidence.
 - The cap steps back up 500 KB/s after each minute of healthy upload (at
   least 64 KB a second written, nothing in the window), to the ceiling
-  `upload_kb_per_s` (5500). Idle time neither counts nor resets that minute.
+  `upload_kb_per_s` (4500). Idle time neither counts nor resets that minute.
 - A step down within a minute of a step up doubles the minute (up to
   10 min); 10 min without a step down restores it.
 - A removal that steps the cap down, or comes at the floor, holds the cap
@@ -433,7 +455,7 @@ comes back when the budget allows, and only the newest frame waits.
 
 The cap and why it is what it is are in the status
 (`cluster-render status`, `/run/cluster-render/status.txt`: `upload: cap
-5000 KB/s (ceiling 5500, floor 2000): lowered from 5500 KB/s: in 30 s, 2 x
+4000 KB/s (ceiling 4500, floor 2000): lowered from 4500 KB/s: in 30 s, 2 x
 scene removed`). Every client also gets a `budget` event when it changes.
 Once a minute, each shown target logs what its layers wrote since its last
 such line, and whether it is rendered: `target map: in the last 60 s its
@@ -495,6 +517,25 @@ share a 2D pass, and the passes' render order follows the stack exactly
   within about 10 s and systemd starts it again: the watchdog is per client
   handle and unmaps every mapping of it (`dcsm/DCSM.md` "Heartbeat"), and
   the guide hold is a mapping of the same client as the map.
+- A `poll()` that fails in the render loop is not a stop: the targets are
+  taken down as for SIGTERM and the service exits 1, so systemd
+  (`Restart=on-failure`) starts it again. This holds on iDrive 7 and on
+  iDrive 8 (CAR-ONLY on iDrive 8: that restart; before 0.3.5 of the old
+  fork build and in upstream the service exited 0 and stayed stopped).
+- If the render loop stops making progress for 3 s (`dcsm_liveness_ms`,
+  `src/liveness.h`; it turns at least four times a second), the Dcsm2
+  heartbeats stop, so the KOMBI's own watchdog takes a frozen map off the
+  cluster within about 10 s. They go again with the loop's next turn, and
+  no heartbeat silence is reported until a reply is due again. Both
+  changes are logged. `dcsm_liveness_ms = 0` turns this off without a
+  rebuild (other values: 1000 to 9000, anything else is a startup error).
+  CAR-ONLY: what the KOMBI does when heartbeats go again after a gap
+  longer than its watchdog (whether it keeps our client handle, or refuses
+  with `E_DCSM_HANDLE_UNKNOWN` until Dcsm2 is next available). iDrive 7
+  only: on iDrive 8 the offers go through RAMSES 27's own DCSM provider,
+  which sends no heartbeat of ours to hold back, and its calls are made on
+  the render thread alone (`src/unit_idrive8.cpp`), so iDrive 8 has no
+  liveness gate.
 
 ## Supported head units
 
@@ -709,7 +750,8 @@ CAR-ONLY on iDrive 8:
 - what the unit does when `cluster-render.service` exits or is restarted:
   on the car, stopping a service restarted the head unit. The service
   waits for the generation and for RAMSES instead of exiting; a
-  configuration fault or a refused communication user still exits 1.
+  configuration fault, a refused communication user or a failed `poll()`
+  still exits 1, so systemd starts it again.
 
 ## Clients
 

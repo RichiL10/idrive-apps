@@ -29,7 +29,11 @@
  *   until the display shows it. A contending target whose slot shows the
  *   stock HMI's content and that takes over from the stock HMI
  *   (TargetSpec::take_over_stock) unmaps that content as the HMI
- *   (Port::take_over), at most once per kTakeOverMs[] step: 1.5 s apart
+ *   (Port::take_over), only when it is one of the target's
+ *   take_over_contents (the HMI's map, 0x01000300, for the map; never its
+ *   speech dialog or any other stock content, which the target stays
+ *   parked behind; an empty list: no take-over), at most once per
+ *   kTakeOverMs[] step: 1.5 s apart
  *   four times, then 10 s, then every 30 s, the count starting over once
  *   the target has been shown kTakeOverSettleMs, or when it is released
  *   (a hold's only after kTakeOverSettleMs shown). The KOMBI shows ours
@@ -141,8 +145,12 @@ struct TargetSpec {
     /* A hold (SlotManager::follow): the name of the target it follows. Its
      * scene is never drawn and takes no client's layers. */
     std::string follows;
-    /* A hold's: the only contents its take-overs unmap. Any other content
-     * shown in its slot makes it yield; parked, it is left alone. */
+    /* The only stock contents its take-overs unmap (take_over_stock). A
+     * main target's is <target>_take_over_contents (the map's 0x01000300;
+     * parse_take_over_contents): any other stock content shown in its slot
+     * is left alone and the target stays parked behind it; empty: no
+     * take-over. A hold's is guide_take_over: any other content shown in its
+     * slot makes it yield; parked, it is left alone. */
     std::vector<uint64_t> take_over_contents;
     /* A hold whose slot is whichever of these the slot table reports one of
      * take_over_contents mapped in (SlotManager::on_slots); before any has,
@@ -406,6 +414,9 @@ private:
          * may go. */
         int takeovers = 0;
         int64_t takeover_ms = 0, takeover_sent_ms = -1000000;
+        /* The last stock content left alone (not in take_over_contents), so
+         * it is logged once; 0: none. */
+        uint64_t takeover_skipped = 0;
         /* Acquiring: the table has reported the slot disabled since the
          * request, or did when it was sent. */
         bool lock_seen = false;

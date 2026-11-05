@@ -40,8 +40,11 @@ static std::string shipped(const std::string &key)
 {
     std::ifstream f("cluster-render.conf");
     for (std::string line; std::getline(f, line);)
-        if (line.compare(0, key.size() + 3, key + " = ") == 0)
-            return line.substr(key.size() + 3);
+        if (line.compare(0, key.size() + 2, key + " =") == 0) {
+            /* "key = value", or "key =" for an empty one */
+            const size_t at = line.find_first_not_of(' ', key.size() + 2);
+            return at == std::string::npos ? std::string() : line.substr(at);
+        }
     return "?";
 }
 
@@ -178,6 +181,64 @@ int main()
     ok("no map to follow: refused",
        !load_holds(HoldSettings{"1", "0x105", "0x010004f1", "0", "0x01000310"}, kAllowed, &none, &err) &&
                                        err.find("no map target") != std::string::npos);
+    /* <target>_take_over_contents (parse_take_over_contents). */
+    {
+        std::vector<uint64_t> got;
+        std::string why;
+        auto parse = [&](const std::string &list) { return parse_take_over_contents("map_take_over_contents", list, kAllowed, &got, &why); };
+        auto refuses = [&](const std::string &list, const std::string &what) {
+            const bool good = !parse(list) && got.empty() && why.find(what) != std::string::npos &&
+                              why.find("map_take_over_contents") != std::string::npos;
+            if (!good)
+                std::printf("     \"%s\": got \"%s\", %zu ids\n", list.c_str(), why.c_str(), got.size());
+            return good;
+        };
+        ok("take_over_contents shipped: the HMI's map alone, and it parses",
+           shipped("map_take_over_contents") == "0x01000300" && parse(shipped("map_take_over_contents")) &&
+               got == std::vector<uint64_t>{0x01000300} && why.empty());
+        ok("take_over_contents shipped for the panel and the hud: empty, so no take-over",
+           shipped("panel_take_over_contents") == "" && shipped("hud_take_over_contents") == "" &&
+               parse(shipped("panel_take_over_contents")) && got.empty());
+        ok("take_over_contents: a list by commas or spaces, decimal or hex, as given",
+           parse("0x01000300,0x01000101") && got == std::vector<uint64_t>{0x01000300, 0x01000101} &&
+               parse(" 0x01000300  0x01000101 ,") && got == std::vector<uint64_t>{0x01000300, 0x01000101} &&
+               parse("16777984") && got == std::vector<uint64_t>{0x01000300});
+        ok("take_over_contents empty or only separators: no ids, no error (take-over off)",
+           parse("") && got.empty() && parse(" , ") && got.empty());
+        ok("take_over_contents: one listed twice counts once", parse("0x01000300,0x1000300") &&
+                                                                  got == std::vector<uint64_t>{0x01000300});
+        ok("take_over_contents: a leading + or - is refused, not wrapped to a huge number",
+           refuses("-1", "not \"-1\"") && refuses("+0x01000300", "not \"+0x01000300\"") &&
+               refuses("-16777984", "not \"-16777984\""));
+        ok("take_over_contents: not a number, zero, or trailing text refused",
+           refuses("abc", "not \"abc\"") && refuses("0", "not \"0\"") && refuses("0x01000300x", "not \"0x01000300x\"") &&
+               refuses("0x", "not \"0x\"") && refuses("0x01000300;0x01000101", "not \"0x01000300;0x01000101\""));
+        ok("take_over_contents: out of range (ERANGE) refused",
+           refuses("0x1ffffffffffffffff", "not \"0x1ffffffffffffffff\"") &&
+               refuses("99999999999999999999999", "not \"99999999999999999999999\""));
+        ok("take_over_contents: a good id before a bad one: refused, nothing kept",
+           refuses("0x01000300,-1", "not \"-1\"") && refuses("0x01000300,0x02000300", "not a stock HMI content"));
+        ok("take_over_contents: not a stock HMI content (0x0100xxxx): refused",
+           refuses("0x02000300", "\"0x02000300\" is not a stock HMI content") &&
+               refuses("0x4d4755000108", "is not a stock HMI content") && refuses("0x300", "is not a stock HMI content"));
+        ok("take_over_contents: one of scene_ids_allowed (ours) refused, even in the stock range",
+           refuses("0x010004f0", "\"0x010004f0\" is not a stock HMI content") &&
+               refuses("0x01000300,0x010004f1", "is not a stock HMI content"));
+        ok("take_over_contents: the seat-belt-warning panel refused, as for guide_take_over",
+           refuses("0x01000314", "0x1000314 is the seat-belt-warning panel"));
+        /* The guide hold's list is its own: the map's list neither widens nor narrows it. */
+        std::vector<TargetSpec> h;
+        TargetSpec map;
+        map.name = "map";
+        map.slot = 0x100;
+        map.scene_id = 0x010004f0;
+        map.take_over_stock = true;
+        ok("take_over_contents: the map's list is left alone by load_holds, which gives the hold guide_take_over's",
+           parse("0x01000300") && (map.take_over_contents = got, h = {map}, true) &&
+               load_holds(HoldSettings{"1", "0x105", "0x010004f1", "0", "0x01000310 0x01000315"}, kAllowed, &h, &err) &&
+               h.size() == 2 && h[0].take_over_contents == std::vector<uint64_t>{0x01000300} &&
+               h[1].take_over_contents == std::vector<uint64_t>{0x01000310, 0x01000315});
+    }
     std::printf(failures ? "%d FAILED\n" : "all ok\n", failures);
     return failures ? 1 : 0;
 }

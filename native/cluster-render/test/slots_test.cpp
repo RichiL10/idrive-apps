@@ -138,12 +138,15 @@ struct Rig {
     FakeScenes scenes;
     SlotManager m{&port, &scenes};
     int64_t now = 100000;
-    Rig()
+    /* take_over_contents: the map's allowlist (<target>_take_over_contents),
+     * the HMI's map as shipped. */
+    explicit Rig(std::vector<uint64_t> take_over_contents = {kHmiMap})
     {
         TargetSpec map;
         map.name = "map"; map.slot = kMapSlot; map.scene_id = kMapScene; map.width = 1088; map.height = 480;
         map.linger_ms = 2000;
         map.take_over_stock = true;
+        map.take_over_contents = take_over_contents;
         TargetSpec panel;
         panel.name = "panel"; panel.slot = kPanelSlot; panel.scene_id = kPanelScene; panel.width = 1920;
         panel.height = 720; panel.linger_ms = 3000;
@@ -824,6 +827,51 @@ static void take_over()
                                                            p.state(1) == TargetState::Parked);
 }
 
+/* Take-overs unmap only the stock contents the target lists
+ * (take_over_contents, the map's default the HMI's map 0x01000300): the
+ * speech dialog (0x01000400) or any other stock content is left alone, the
+ * target parked behind it; an empty list takes over nothing. */
+static void take_over_allowlist()
+{
+    Rig r;
+    park(r, true, kPanelScene);   /* the HMI's speech dialog shown in the map slot */
+    joined();
+    r.run(60000);
+    ok("parked behind the speech dialog 0x01000400: never unmapped, still parked",
+       joined().find("take over") == std::string::npos && r.state(0) == TargetState::Parked &&
+           r.m.status(0).holder == Holder::Stock);
+    r.rows(kMapSlot, 2, {{kHmiMap, 1}, {kMapScene, 3}});
+    r.m.on_parked(kMapScene, r.now);
+    joined();
+    r.m.tick(r.now);
+    ok("the HMI's map 0x01000300 on top instead: unmapped at once",
+       joined().find("take over map 0x1000300") != std::string::npos);
+
+    Rig s;
+    park(s, true);
+    joined();
+    s.m.tick(s.now);
+    ok("parked behind 0x01000300: unmapped", calls_are("take over map 0x1000300; slots?"));
+
+    Rig o;
+    park(o, true, kStockMap);   /* other stock content: a route preview, the assisted-driving view */
+    o.run(60000);
+    ok("parked behind other stock content: never unmapped", joined().find("take over") == std::string::npos &&
+                                                             o.state(0) == TargetState::Parked);
+
+    Rig e(std::vector<uint64_t>{});
+    park(e, true);
+    e.run(60000);
+    ok("an empty take_over_contents: take-over off, parked behind the HMI's map",
+       joined().find("take over") == std::string::npos && e.state(0) == TargetState::Parked);
+
+    Rig l({kHmiMap, kStockMap});
+    park(l, true, kStockMap);
+    joined();
+    l.m.tick(l.now);
+    ok("a content added to the list is unmapped", calls_are("take over map 0x1000101; slots?"));
+}
+
 /* The map shown, then a lock (a door-open or check-control warning):
  * every mapping in the slot unmapped, the slot disabled. */
 static void lock_map(Rig &r)
@@ -1414,7 +1462,8 @@ static const uint64_t kBox = 0x01000310, kBoxAlt = 0x01000315, kBelt = 0x0100031
  * its slot from the slot table instead (guide_slots = auto). */
 struct GuideRig : Rig {
     static const int kGuide = 3;
-    explicit GuideRig(bool from_table = false)
+    /* map_takes: the map's own take_over_contents, apart from the hold's. */
+    explicit GuideRig(bool from_table = false, std::vector<uint64_t> map_takes = {kHmiMap}) : Rig(map_takes)
     {
         TargetSpec g;
         g.name = "guide"; g.slot = from_table ? 0 : kGuideSlot; g.scene_id = kGuideScene; g.width = g.height = 16;
@@ -1804,6 +1853,59 @@ static void guide_take_over_settle()
     r.pass();
     ok("parked again 10 s after shown: the count started over, the take-over at once",
        logged().find("take-over 1 (3 since start): unmapping the stock HMI's 0x1000310") != std::string::npos);
+}
+
+/* The map's <target>_take_over_contents and the hold's guide_take_over are
+ * separate lists (each target's own take_over_contents): neither widens or
+ * narrows the other, and the map's allowlist leaves the hold alone. */
+static void take_over_lists_are_separate()
+{
+    GuideRig a;   /* the map's list: the HMI's map only */
+    a.m.want(0, true, true);
+    a.pass();
+    a.rows(kMapSlot, 2, {{kBox, 1}, {kMapScene, 3}});   /* the box's content over the parked map */
+    a.m.on_parked(kMapScene, a.now);
+    joined();
+    a.pass(60000);
+    ok("the hold's list does not widen the map's: parked behind the box's content, never unmapped by the map",
+       joined().find("take over") == std::string::npos && a.state(0) == TargetState::Parked);
+
+    GuideRig b;
+    b.rows(kGuideSlot, 2, {{kHmiMap, 1}});   /* the HMI's map shown in the hold's slot */
+    b.show_map();
+    joined();
+    b.pass(3000);
+    ok("the map's list does not widen the hold's: the HMI's map shown in the guidance slot is yielded to, not "
+       "unmapped and not asked for",
+       joined().find("guide") == std::string::npos && b.state(GuideRig::kGuide) != TargetState::Acquiring);
+    b.rows(kGuideSlot, 2, {{kHmiMap, 3}, {kGuideScene, 3}});   /* only parked there: left alone */
+    b.pass();
+    b.m.on_parked(kGuideScene, b.now);
+    joined();
+    b.pass(60000);
+    ok("and parked behind it, the hold takes nothing over", joined().find("take over") == std::string::npos);
+
+    GuideRig c(false, std::vector<uint64_t>{});   /* the map takes over nothing */
+    c.rows(kGuideSlot, 2, {{kBox, 1}});
+    c.show_map();
+    joined();
+    c.pass();
+    ok("the map's list empty: the hold is still asked for with the map shown", calls_are("publish guide; request guide"));
+    c.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}});
+    c.m.on_parked(kGuideScene, c.now);
+    joined();
+    c.pass();
+    ok("and still takes over the box from guide_take_over: guide hold not broken",
+       calls_are("take over guide 0x1000310; slots?"));
+
+    GuideRig d(false, {kHmiMap, kBox});   /* the map's list names the box too: its own choice */
+    d.m.want(0, true, true);
+    d.pass();
+    d.rows(kMapSlot, 2, {{kBox, 1}, {kMapScene, 3}});
+    d.m.on_parked(kMapScene, d.now);
+    joined();
+    d.m.tick(d.now);
+    ok("a content added to the map's list is unmapped by the map", calls_are("take over map 0x1000310; slots?"));
 }
 
 static void guide_gives_up()
@@ -2488,6 +2590,7 @@ int main()
     multi_row_holder();
     parked_then_shown();
     take_over();
+    take_over_allowlist();
     lock_then_take_overs();
     brief_shows_back_off();
     take_overs_restart_when_shown();
@@ -2508,6 +2611,7 @@ int main()
     guide_yields();
     guide_door_lock();
     guide_take_over_settle();
+    take_over_lists_are_separate();
     guide_gives_up();
     guide_slot_disabled();
     guide_guard();

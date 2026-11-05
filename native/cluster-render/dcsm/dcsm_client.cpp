@@ -278,17 +278,25 @@ void Client::onMessage(const std::shared_ptr<vsomeip::message> &m) {
 }
 
 // Sends heartbeat(clientID, counter, CLOCK_MONOTONIC ns) while Dcsm2 is
-// available, the counter counting up from 0, as HmiMain3D does.
+// available and heartbeatGate (when set) allows, the counter counting up
+// from 0, as HmiMain3D does.
 void Client::heartbeatLoop() {
     uint32_t counter = 0;
+    bool held = false;   // the gate held the last heartbeat
     while (running_) {
-        if (available_) {
+        const bool allowed = available_ && (!heartbeatGate || heartbeatGate());
+        if (available_ && !allowed) held = true;
+        if (allowed) {
             bool request = false;
             if (heartbeatMode_ == HeartbeatMode::kRequest) {
                 std::lock_guard<std::mutex> l(hbMutex_);
+                // After a held stretch the last reply is old for want of
+                // heartbeats, not of answers: no silence before one is due.
+                if (held) hb_.resumed(steady_ms());
                 request = !hb_.refused();
                 if (request) hb_.sent(steady_ms());
             }
+            held = false;
             send(kHeartbeat, wire::heartbeat(clientHandle_, counter++, monotonic_ns()), request);
             if (request) checkHeartbeatSilence();
         }
@@ -324,69 +332,6 @@ void Client::checkHeartbeatSilence() {
     if (tell && onHeartbeat) onHeartbeat(r);
 }
 
-void HeartbeatTracker::sent(int64_t nowMs) {
-    if (firstSentMs_ < 0) firstSentMs_ = nowMs;
-    sent_++;
-}
-
-HeartbeatStats HeartbeatTracker::stats(int64_t nowMs) const {
-    HeartbeatStats s;
-    s.sent = sent_;
-    s.replies = replies_;
-    s.badReplies = badReplies_;
-    s.sinceReplyMs = lastReplyMs_ < 0 ? -1 : nowMs - lastReplyMs_;
-    return s;
-}
-
-// The KOMBI answers a heartbeat REQUEST with an empty E_OK RESPONSE. Any
-// other return code, or an ERROR, means it did not take the heartbeat: more
-// requests would starve its watchdog, so the stock form takes over.
-bool HeartbeatTracker::reply(int64_t nowMs, uint8_t messageType, uint8_t returnCode,
-                             size_t length, HeartbeatReport *r) {
-    int64_t previous = lastReplyMs_;
-    lastReplyMs_ = nowMs;
-    replies_++;
-    bool resumed = silent_;
-    silent_ = false;
-    bool taken = messageType == uint8_t(vsomeip::message_type_e::MT_RESPONSE) &&
-                 returnCode == uint8_t(vsomeip::return_code_e::E_OK);
-    if (taken && length != 0) badReplies_++;
-    r->stats = stats(nowMs);
-    r->stats.sinceReplyMs = previous < 0 ? -1 : nowMs - previous;
-    r->messageType = messageType;
-    r->returnCode = returnCode;
-    r->length = uint32_t(length);
-    if (!taken) {
-        if (refused_) return false;
-        refused_ = true;
-        r->event = HeartbeatReport::kRefused;
-        return true;
-    }
-    if (length != 0) {
-        if (!badReported_) {
-            badReported_ = true;
-            r->event = HeartbeatReport::kBadReply;
-            return true;
-        }
-    } else if (!answered_) {
-        answered_ = true;
-        r->event = HeartbeatReport::kFirstReply;
-        return true;
-    }
-    if (!resumed) return false;
-    r->event = HeartbeatReport::kResumed;
-    return true;
-}
-
-bool HeartbeatTracker::check(int64_t nowMs, HeartbeatReport *r) {
-    if (refused_ || silent_ || sent_ == 0) return false;
-    int64_t from = lastReplyMs_ >= 0 ? lastReplyMs_ : firstSentMs_;
-    if (nowMs - from < kHeartbeatSilence.count()) return false;
-    silent_ = true;
-    *r = HeartbeatReport();
-    r->event = HeartbeatReport::kSilent;
-    r->stats = stats(nowMs);
-    return true;
-}
+// HeartbeatTracker is in heartbeat_tracker.cpp (host-tested without vsomeip).
 
 }  // namespace dcsm

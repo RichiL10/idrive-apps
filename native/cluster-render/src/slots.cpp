@@ -627,8 +627,9 @@ void SlotManager::park(int i, int64_t now_ms)
 
 /* Parked behind the stock HMI's content while a layer contends: that
  * content is unmapped as the HMI, so the display shows ours (and the HMI's,
- * mapped again, parks behind it). Only content of the stock HMI, only in the
- * target's own slot, and spaced by kTakeOverMs[]. */
+ * mapped again, parks behind it). Only content of the stock HMI that the
+ * target lists in take_over_contents, only in the target's own slot, and
+ * spaced by kTakeOverMs[]. */
 void SlotManager::take_over(int i, int64_t now_ms)
 {
     Target &t = t_[i];
@@ -638,11 +639,25 @@ void SlotManager::take_over(int i, int64_t now_ms)
     const SlotInfo *row = holder_row(i);
     if (!row || holder_of(row->content) != Holder::Stock)
         return;
+    /* Only the stock contents the target lists (take_over_contents; the
+     * HMI's map for the map): the speech dialog, a route preview or the
+     * assisted-driving view are left alone, the target parked behind them,
+     * and an empty list takes nothing over. A hold's list is also what it
+     * yields to (yield_to), so it never gets here with another content. */
+    if (!takes(i, row->content)) {
+        if (spec.follows.empty() && t.takeover_skipped != row->content) {
+            t.takeover_skipped = row->content;
+            log_info("target %s: parked behind the stock HMI's 0x%llx in slot 0x%llx, not in %s_take_over_contents: "
+                     "left alone",
+                     spec.name.c_str(), (unsigned long long)row->content, (unsigned long long)spec.slot,
+                     spec.name.c_str());
+        }
+        return;   /* a hold: follow() yields to it */
+    }
+    t.takeover_skipped = 0;
     /* Copies: a take-over's answer can replace the rows. */
     std::vector<SlotInfo> unmapped(1, *row), behind;
     if (!spec.follows.empty()) {
-        if (!takes(i, row->content))
-            return;   /* follow() yields to it */
         for (const SlotInfo &s : slots_[spec.slot])
             if (s.map_status == 3 && holder_of(s.content) == Holder::Stock && takes(i, s.content))
                 (t.ahead.count(s.content) ? unmapped : behind).push_back(s);
