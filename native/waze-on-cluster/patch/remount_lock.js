@@ -114,12 +114,14 @@ function holderGone(text) {
     try { process.kill(pid, 0); } catch (e) { return e.code === 'ESRCH'; }
     /* The pid runs. A lock that carries the holder's start time (field 22 of /proc/<pid>/stat, written at
      * acquire) names that process only while the start time still matches: another process on a recycled
-     * pid, or one whose start time cannot be read (other than this process), is not the holder (R3-2).
+     * pid, which shows a different readable start time, is not the holder (R3-2); an unreadable start time proves nothing.
      * A lock without it (older, or the start time was unreadable at acquire) is judged by the pid alone. */
     var id = /^\d+$/.test(f[2] || '') ? f[2] : '';
     if (id) {
         var now = startId(pid);
-        if (now !== id && !(pid === process.pid && now === '')) return true;
+        /* Only a start time that can be read and differs proves a recycled pid. A read that fails (permission,
+         * transient /proc error) proves nothing: the pid runs, so it stays the holder (fail closed, no second writer). */
+        if (now !== '' && now !== id) return true;
     }
     return false;
 }

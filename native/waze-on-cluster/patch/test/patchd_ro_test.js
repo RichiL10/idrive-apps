@@ -277,7 +277,7 @@ async function main() {
     ok('F-P3 cleared: with / read-only again the next change clears the guard and runs', r.state !== 'error' && roNow() && !fs.existsSync(d.guard) && !fs.existsSync(d.lock), JSON.stringify(r));
 
     /* ---- R3-1 (review of fix5-p): patchd keeps the lock with the guard and does not retry the remount by itself ---- */
-    var dr = startPatchd('retry', TGT, PROC, { WOC_RO_RETRY_MS: '300' });
+    var dr = startPatchd('retry', TGT, PROC);
     for (i = 0; i < 200 && !fs.existsSync(dr.sock); i++) await sleep(25);
     dummy = dummyCarplay();
     setUnit('ok', dummy.pid);

@@ -55,11 +55,12 @@ lock.release();
 fs.writeFileSync(LOCKF, OTHER + ' ' + new Date().toISOString() + ' 9000\n');
 ok('same start time: a live holder keeps the lock', !lock.tryAcquire() && fs.readFileSync(LOCKF, 'utf8').split(' ')[0] === String(OTHER));
 
-/* the start time of a live pid cannot be read: not the holder */
+/* the start time of a live pid cannot be read: that proves nothing, the pid runs, so it stays the holder
+ * (review of fix5, Q1: breaking here would admit a second root writer) */
 fs.rmSync(path.join(PROCDIR, String(OTHER)), { recursive: true });
 fs.writeFileSync(LOCKF, OTHER + ' ' + new Date().toISOString() + ' 9000\n');
-ok('start time unreadable for another pid: not the holder, the lock is taken', lock.tryAcquire() && fs.readFileSync(LOCKF, 'utf8').split(' ')[0] === String(process.pid));
-lock.release();
+ok('start time unreadable for another live pid: still the holder, the lock stays', !lock.tryAcquire() && fs.readFileSync(LOCKF, 'utf8').split(' ')[0] === String(OTHER));
+clean();
 
 /* a lock without a start time (older format) is judged by the pid alone, as before */
 fs.writeFileSync(LOCKF, OTHER + ' ' + new Date().toISOString() + '\n');
