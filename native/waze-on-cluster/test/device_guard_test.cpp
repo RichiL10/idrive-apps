@@ -283,6 +283,39 @@ int main()
         expect(!start(&d, &g, true) && g.in_a_row() == 1, "counted once for a start with GPU copy");
         expect(!start(&d, &g, true) && !start(&d, &g, true) && g.fatal(), "three starts are fatal");
     });
+    /* Review N2: a hang or a lost device in the setup of a session with GPU
+     * copy counts through the guard like any other, three in a row are
+     * fatal and arm the watchdog. */
+    for (const char *call : {"SetHandle", "DECODE_QueryIOSurf", "VPP_QueryIOSurf", "DECODE_Init", "VPP_Init"}) {
+        for (const int status : {MFX_ERR_GPU_HANG, MFX_ERR_DEVICE_LOST}) {
+            char what[160];
+            snprintf(what, sizeof what, "%s with status %d in a session with GPU copy, three in a row", call, status);
+            isolated(what, [call, status] {
+                clear_faults();
+                fake_msdk::calls.clear();
+                g_exits = 0;
+                Decoder d;
+                DeviceGuard g;
+                g.attach(&d);
+                g.set_exit_watchdog(100, 1, test_exit);
+                fake_msdk::gpu_fault.call = call;
+                fake_msdk::gpu_fault.status = status;
+                fake_msdk::gpu_fault.times = 3;
+                for (int i = 1; i <= 3; i++) {
+                    if (start(&d, &g, true))
+                        feed_one(&d);
+                    d.shutdown();
+                    expect(g.in_a_row() == (uint64_t)i, "counted at each");
+                    expect(g.fatal() == (i == 3), "fatal at the third");
+                    if (i < 3)
+                        expect(!wait_exit(250), "the watchdog is not armed before");
+                }
+                expect(wait_exit(5000) && g_exit_code == 1, "and the third arms the watchdog");
+                expect(fake_msdk::count("session") == 0, "no session without GPU copy was made");
+                clear_faults();
+            });
+        }
+    }
     isolated("GPU copy alone failing", [] {
         /* a device status that only fails the GPU copy session is no failure */
         clear_faults();
