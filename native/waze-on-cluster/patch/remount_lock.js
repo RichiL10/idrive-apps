@@ -67,6 +67,9 @@ function tryAcquire() {
 function breakable(text) {
     var gone = holderGone(text);
     var age = Date.now() - fs.statSync(LOCK).mtime.getTime();
+    /* A live holder that keeps the lock with the ro-failed guard (this process, or the one the
+     * marker names) is never taken as hung: its lock is the guard's (review of fix4-p, B). */
+    if (gone === false && parseInt(text.split(' ')[0], 10) === guardOwnerPid()) return false;
     return gone === true || (gone === null && age > STALE_MS) || age > HUNG_MS;
 }
 
@@ -163,6 +166,11 @@ function markRoFailed(reason) {
     try { fs.writeFileSync(RO_FAILED, process.pid + ' ' + new Date().toISOString() + ' ' + reason + '\n'); return true; }
     catch (e) { return false; }
 }
+/* The pid that set the standing guard: this process (memRoFailed), else the marker's; 0 when none. */
+function guardOwnerPid() {
+    if (memRoFailed !== null) return process.pid;
+    try { return parseInt(fs.readFileSync(RO_FAILED, 'utf8').split(' ')[0], 10) || 0; } catch (e) { return 0; }
+}
 function clearRoFailed() { memRoFailed = null; try { fs.unlinkSync(RO_FAILED); } catch (e) {} }
 function ownsLock() {
     try { return (fs.readFileSync(LOCK, 'utf8').split(' ')[0] || '') === String(process.pid); } catch (e) { return false; }
@@ -223,7 +231,9 @@ function healRo(why, isRo, remountRo, cb) {
     if (!mine && !tryAcquire()) { cb(why); return; }
     remountRo(function () {
         if (isRo()) { cleared(); return; }
-        if (!mine) release();
+        /* A lock taken here stays taken while / is not verified read-only: the guard stands, and the
+         * lock is the guard's (review of fix4-p, A), marked with this pid; the next retry finds it. */
+        if (!mine) markRoFailed(why);
         cb(why);
     });
 }

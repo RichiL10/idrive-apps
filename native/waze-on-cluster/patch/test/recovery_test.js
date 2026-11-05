@@ -1011,7 +1011,7 @@ test('F-P2: a process runs the target and it cannot be kept linked: nothing is w
             let err = null;
             await new Promise((res) => recovery.restoreTarget(w.T.carplay, onlyIfRunning, 1, (e) => { err = e; res(); }));
             const tag = 'onlyIfRunning=' + onlyIfRunning;
-            assert(err && /keeping it linked as .* failed; nothing written/.test(err.message), tag + ': ' + err);
+            assert(err && /keeping .* linked as .* failed.*; nothing written/.test(err.message), tag + ': ' + err);
             assert.strictEqual(w.holds('carplay'), 'patched', tag + ': nothing written');
             assert(ro(), tag + ': / read-only');
             assert(!err.roFailed && !fs.existsSync(GUARD), tag + ': / was verified read-only, so no guard');
@@ -1022,16 +1022,16 @@ test('F-P2: a process runs the target and it cannot be kept linked: nothing is w
     }
 });
 
-test('F-P2: with no process on the target, a link that cannot be made is not fatal (re-checked), the restore goes on', async () => {
+test('F-P2 (G2-4): with no process on the target, a link that cannot be made still aborts the restore: nothing is written', async () => {
     const w = makeWorld();
     w.install('carplay', 'unproven');
     fs.mkdirSync(w.T.carplay.running);
     try {
         let outcome = null, err = null;
         await new Promise((res) => recovery.restoreTarget(w.T.carplay, false, 1, (e, o) => { err = e; outcome = o; res(); }));
-        assert.ifError(err);
-        assert.strictEqual(outcome, 'restored');
-        assert.strictEqual(w.holds('carplay'), 'original');
+        assert(err && /nothing written/.test(err.message), String(err));
+        assert.strictEqual(outcome, undefined);
+        assert.strictEqual(w.holds('carplay'), 'patched');
         assert(ro());
         assertLockFree();
     } finally { fs.rmdirSync(w.T.carplay.running); }
@@ -1164,7 +1164,8 @@ test('F2: a fresh watcher with only a guard on disk (nothing in its own memory) 
         assert.strictEqual(r.action, 'ro-retry', 'the first tick retries the imported guard');
         assert(mountCalls().some((c) => /remount,ro/.test(c)), 'remount,ro was tried: ' + mountCalls());
         assert(fs.existsSync(GUARD), 'still standing: / is read-write');
-        assertLockFree();
+        /* the lock the retry took stays taken, with the guard now this process's (review of fix4-p, A) */
+        assert.strictEqual(fs.readFileSync(path.join(ROOT, 'remount.lock'), 'utf8').split(' ')[0], String(process.pid), 'the lock is kept while / is read-write');
         /* within the probe interval: no new try */
         fs.writeFileSync(MOUNT_LOG, '');
         r = await tick(rec);
@@ -1773,7 +1774,7 @@ test('the boot step exits 0 whatever fails, so the service\'s start goes ahead',
         assert(/boot check: restore-failed/.test(r.stdout), r.stdout);
         assert(r.ms < 10000);
     }
-    assert.strictEqual(runBootStep(w, 'nothing', 'B').status, 0, 'an unknown service');
+    assert.strictEqual(runBootStep(w, 'nothing', 'B').status, 1, 'an unknown service fails (G2-2)');
 });
 
 test('a boot step out of time puts / back read-only and releases the lock before it exits', () => {
@@ -2544,6 +2545,135 @@ test('aa_enabled = 0: the real boot step for aapd exits 0 at once and leaves the
     assert(/aapd boot check: (armed|restore|idle)/.test(on.stdout), on.stdout);
 }));
 
+test('G2-2: aa_enabled = 0 and / read-write: the boot step for aapd still puts / back read-only before it exits 0, touching nothing of aapd\'s; an unknown service exits 1', withAa('0', async () => {
+    const w = makeWorld();
+    w.install('aapd', 'unproven');
+    const binBefore = fs.readFileSync(w.T.aapd.target), confBefore = fs.readFileSync(w.T.aapd.files[1]);
+    fs.writeFileSync(MOUNT_LOG, '');
+    fs.writeFileSync(MOUNTS, '/dev/root / ext4 rw 0 0\n');
+    try {
+        const r = runBootStep(w, 'aapd', 'B', { WOC_AA_ENABLED: '0' });
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        assert(/aapd boot check: off/.test(r.stdout), r.stdout);
+        assert(ro(), '/ read-only when the step exited 0');
+        assert(!/remount,rw/.test(fs.readFileSync(MOUNT_LOG, 'utf8')), 'never remounted read-write');
+        assert(fs.readFileSync(w.T.aapd.target).equals(binBefore) && fs.readFileSync(w.T.aapd.files[1]).equals(confBefore), 'aapd and its conf untouched');
+        assert.strictEqual(runBootStep(w, 'nosuch', 'B', { WOC_AA_ENABLED: '0' }).status, 1, 'an unknown service is a failure');
+    } finally { fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n'); }
+}));
+
+test('G2-1: the hard deadline with a read-write remount that cannot be reaped exits 1 and keeps the guard and the lock', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'unproven');
+    fs.writeFileSync(w.T.carplay.state, JSON.stringify({ fails: 1, unknown: 0, arm: null }));
+    const mounts = path.join(w.dir, 'mounts'), lockFile = path.join(w.dir, 'remount.lock');
+    fs.writeFileSync(mounts, '/dev/root / ext4 ro 0 0\n');
+    /* remount,rw hangs for 8 s ignoring SIGTERM, and the kill is switched off (WOC_TEST_NO_KILL): a mount stuck in the kernel */
+    fs.writeFileSync(path.join(w.dir, 'mount'), '#!' + process.execPath + '\nvar rw = process.argv.indexOf("remount,rw") > 0;\n' +
+        'if (rw) { process.on("SIGTERM", function () {}); setTimeout(function () {}, 8000); }\n', { mode: 0o755 });
+    cp.execFileSync(path.join(w.dir, 'mount'), ['first']);
+    const r = runBootStep(w, 'carplay', 'B', { WOC_RECOVERY_STEP_MS: '400', WOC_TEST_NO_KILL: '1', WOC_MOUNT: path.join(w.dir, 'mount'), WOC_PROC_MOUNTS: mounts, WOC_REMOUNT_LOCK: lockFile });
+    assert(/out of time/.test(r.stdout), r.stdout + r.stderr);
+    assert.strictEqual(r.status, 1, 'not a success: ' + r.stdout + r.stderr);
+    assert(fs.existsSync(lockFile) && fs.existsSync(lockFile + '.ro-failed'), 'the lock and the guard are kept');
+});
+
+test('G2-4: the watcher\'s restore needs the running link to be the target\'s inode before it replaces the file: a link that cannot be made aborts it', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'unproven');
+    fs.mkdirSync(w.T.carplay.running);   /* the name is taken by something unlink cannot remove */
+    try {
+        let err = null, outcome = null;
+        await new Promise((res) => recovery.restoreTarget(w.T.carplay, false, 1, (e, o) => { err = e; outcome = o; res(); }));
+        assert(err && /linked as .* failed.*nothing written/.test(err.message), String(err));
+        assert.strictEqual(w.holds('carplay'), 'patched', 'the target is untouched');
+        assert(ro(), '/ verified read-only');
+        assertLockFree();
+    } finally { fs.rmdirSync(w.T.carplay.running); }
+});
+
+test('G2-3: a due start is not held back by a standing guard, and the heal retry still runs in the same tick', async () => {
+    const w = makeWorld({ recmgr: true });
+    w.install('carplay', 'original');
+    const mount = path.join(ROOT, 'mount'), body = fs.readFileSync(mount, 'utf8');
+    try {
+        fs.writeFileSync(GUARD, '4242 2026-01-01T00:00:00.000Z / is read-write after a restore\n');
+        fs.writeFileSync(MOUNTS, RW_LINE);
+        fs.writeFileSync(mount, '#!/bin/sh\necho "$*" >> "' + MOUNT_LOG + '"\n');   /* remount,ro does nothing */
+        fs.writeFileSync(MOUNT_LOG, '');
+        const rec = w.recovery('carplay', 'B');
+        rec._startAt = rec._now() - 1;
+        const r = await tick(rec);
+        assert.strictEqual(r.action, 'started', 'the due start ran');
+        assert(w.events.some((e) => /^carplay-start/.test(e)), 'carplay was started: ' + w.events);
+        for (let t = Date.now(); !mountCalls().length && Date.now() - t < 3000;) await new Promise((res) => setTimeout(res, 20));
+        assert(mountCalls().some((c) => /remount,ro/.test(c)), 'the heal retry ran beside it: ' + mountCalls());
+        assert(fs.existsSync(GUARD), 'still standing: / is read-write');
+    } finally {
+        fs.writeFileSync(mount, body); fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n');
+        const lock = require('../remount_lock.js');
+        lock.clearRoFailed(); lock.release();
+    }
+});
+
+test('A: healRo that took the lock itself keeps it, with the guard, when remount,ro does not take', () => {
+    const lock = require('../remount_lock.js');
+    const lockFile = path.join(ROOT, 'remount.lock');
+    try {
+        fs.writeFileSync(GUARD, '4242 2026-01-01T00:00:00.000Z / is read-write after a restore\n');
+        let answer = 'not called';
+        lock.healRo('r', () => false, (done) => done(new Error('busy')), (why) => { answer = why; });
+        assert.strictEqual(answer, 'r', 'the guard stands');
+        assert.strictEqual(fs.readFileSync(lockFile, 'utf8').split(' ')[0], String(process.pid), 'the lock it took is kept');
+        assert(fs.existsSync(GUARD), 'the marker stands');
+    } finally { lock.clearRoFailed(); lock.release(); }
+});
+
+test('B: a live holder of the ro-failed guard is never taken as hung; a start does not release a lock kept for the guard while / is read-write', async () => {
+    const lockPath = path.join(ROOT, 'guard-hung.lock');
+    const env = { WOC_REMOUNT_LOCK: process.env.WOC_REMOUNT_LOCK, WOC_REMOUNT_LOCK_HUNG_MS: process.env.WOC_REMOUNT_LOCK_HUNG_MS };
+    process.env.WOC_REMOUNT_LOCK = lockPath;
+    process.env.WOC_REMOUNT_LOCK_HUNG_MS = '8000';
+    const key = require.resolve('../remount_lock.js'), cached = require.cache[key];
+    delete require.cache[key];
+    try {
+        const lock = require('../remount_lock.js');
+        const holder = cp.spawn(process.execPath, ['-e', 'setTimeout(function () {}, 20000)'], { stdio: 'ignore' });
+        try {
+            fs.writeFileSync(lockPath, holder.pid + ' 2026-01-01T00:00:00.000Z\n');
+            fs.writeFileSync(lockPath + '.ro-failed', holder.pid + ' 2026-01-01T00:00:00.000Z / is read-write\n');
+            const hung = Date.now() / 1000 - 9;
+            fs.utimesSync(lockPath, hung, hung);
+            assert.strictEqual(await new Promise((r) => lock.acquire(300, r)), false, 'past HUNG_MS the guard holder keeps the lock');
+            assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(holder.pid));
+            /* its own guard: this process holds the lock and the reason */
+            fs.unlinkSync(lockPath + '.ro-failed');
+            fs.writeFileSync(lockPath, process.pid + ' 2026-01-01T00:00:00.000Z\n');
+            lock.markRoFailed('test');
+            fs.utimesSync(lockPath, hung, hung);
+            assert.strictEqual(lock.tryAcquire(), false, 'this process\'s own guard lock is not broken');
+            lock.clearRoFailed(); lock.release();
+        } finally { holder.kill('SIGKILL'); }
+    } finally {
+        try { fs.unlinkSync(lockPath); fs.unlinkSync(lockPath + '.ro-failed'); } catch (e) {}
+        require.cache[key] = cached;
+        Object.keys(env).forEach((k) => { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; });
+    }
+    /* _startDue with the real lock: a guard stands (another process's marker), / is read-write */
+    const w = makeWorld({ recmgr: true });
+    w.install('carplay', 'original');
+    const lock = require('../remount_lock.js');
+    try {
+        fs.writeFileSync(GUARD, '4242 2026-01-01T00:00:00.000Z / is read-write after a restore\n');
+        fs.writeFileSync(MOUNTS, RW_LINE);
+        const rec = w.recovery('carplay', 'B', { lock });
+        rec._startAt = rec._now() - 1;
+        rec._roTry = rec._now();   /* the heal retry is not due */
+        const r = await tick(rec);
+        assert.strictEqual(r.action, 'started');
+        assert.strictEqual(fs.readFileSync(path.join(ROOT, 'remount.lock'), 'utf8').split(' ')[0], String(process.pid), 'the lock is kept: / is read-write with the guard standing');
+    } finally { fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n'); lock.clearRoFailed(); lock.release(); }
+});
 /* TEST_ONLY=<part of a name> runs only the tests it names. */
 const run = tests.filter((t) => !process.env.TEST_ONLY || t.name.indexOf(process.env.TEST_ONLY) >= 0);
 

@@ -623,16 +623,18 @@ function restoreTarget(t, onlyIfRunning, fails, cb, waitMs) {
             var wErr = null;
             try {
                 if (writes.length && !lock.holds(t.running, t.target) && (!onlyIfRunning || lock.inUse(t.target))) {
-                    try { fs.unlinkSync(t.running); } catch (e) {}
-                    try { fs.linkSync(t.target, t.running); } catch (e) { log('keeping the running ' + t.name + ' linked failed: ' + e.message); }
-                    /* A process runs the target and nothing links its inode: the
-                     * rename would leave an unlinked file in use, / could not go
-                     * read-only. Nothing is written then; / goes read-only below
-                     * and the lock goes with it. With no process on the target
-                     * (checked again after the failure) the restore goes on
-                     * without the link. */
-                    if (!sameInode(t.target, t.running) && lock.inUse(t.target))
-                        throw new Error('a process runs ' + t.target + ' and keeping it linked as ' + t.running + ' failed; nothing written, the restore waits for the next boot');
+                    var linkErr = null;
+                    try { fs.unlinkSync(t.running); } catch (e) { if (e.code !== 'ENOENT') linkErr = e; }
+                    if (!linkErr) try { fs.linkSync(t.target, t.running); } catch (e) { linkErr = e; }
+                    /* Once the link is wanted it must be there, and be the target's inode, before
+                     * anything is written: a service can start between a look at /proc and the
+                     * rename, and the file it then runs would be unlinked, so / could not go
+                     * read-only (G2-4 of the review of fix4-p). Else nothing is written; / goes
+                     * read-only below and the lock goes with it. */
+                    if (linkErr || !sameInode(t.target, t.running)) {
+                        if (linkErr) log('keeping the running ' + t.name + ' linked failed: ' + linkErr.message);
+                        throw new Error('keeping ' + t.target + ' linked as ' + t.running + ' failed' + (linkErr ? ' (' + linkErr.message + ')' : ' (that name holds another file)') + '; nothing written');
+                    }
                 }
                 writes.forEach(function (w) { fileMode.replace(w.file, w.buf, w.want); });
                 record.write(t.target, !writes.length ? { patched: false } : refused ? { patched: false, by: 'refused', at: new Date().toISOString() }
@@ -679,7 +681,8 @@ function abandonRestore(cb) {
      * deadline in runBoot sets the guard and exits 1. */
     if (rwChild) {
         rwReaped = putBack;
-        try { rwChild.kill('SIGKILL'); } catch (e) {}
+        /* WOC_TEST_NO_KILL (tests only, with WOC_TEST): stands for a mount stuck in the kernel that no signal reaches. */
+        if (!(process.env.WOC_TEST && process.env.WOC_TEST_NO_KILL)) try { rwChild.kill('SIGKILL'); } catch (e) {}
         return;
     }
     putBack();
@@ -1004,13 +1007,21 @@ Recovery.prototype.tick = function (cb) {
     /* A standing ro-failed guard is retried here, once per PROBE_MS: the
      * process's own, or one on disk that another process (or an earlier run of
      * this one) set, which the start-up roGuard could not clear (review of fix3-p, F2). */
-    if (roStanding() !== null && now - this._roTry >= PROBE_MS) {
+    var startDue = this._startAt !== null && now >= this._startAt;
+    if (roStanding() !== null && !this._roBusy && now - this._roTry >= PROBE_MS) {
         this._roTry = now;
-        this._busy = true;
-        roGuard(function () { self._busy = false; cb({ action: 'ro-retry' }); });
-        return;
+        this._roBusy = true;
+        var retried = function () { self._roBusy = false; };
+        /* A due start is not held back by the guard: starting a service is not a root writer, and the
+         * heal retry runs beside it (G2-3 of the review of fix4-p). */
+        if (startDue) roGuard(retried);
+        else {
+            this._busy = true;
+            roGuard(function () { retried(); self._busy = false; cb({ action: 'ro-retry' }); });
+            return;
+        }
     }
-    if (this._startAt !== null && now >= this._startAt) { this._startDue(cb); return; }
+    if (startDue) { this._startDue(cb); return; }
     var fresh = now - this._lastProbe < (this._pid ? ALIVE_PROBE_MS : PROBE_MS);
     if (fresh && (!this._pid || this._alive(this._pid))) { cb({ action: this._healthy(now) }); return; }
     this._busy = true;
@@ -1155,7 +1166,9 @@ Recovery.prototype._startDue = function (cb) {
         if (info.state === 'active' || info.state === 'activating') { self._startAt = null; done('start-skipped'); return; }
         self._systemState(function (sys) {
             if (sys === 'stopping') { self._startAt = null; done('start-skipped'); return; }
-            if (!self._lock.tryAcquire()) { done('watch'); return; }
+            /* The lock this process keeps with a standing guard is already its own: no writer can come. */
+            var own = self._lock === lock && roStanding() !== null && lock.ownsLock();
+            if (!own && !self._lock.tryAcquire()) { done('watch'); return; }
             var n = self._startsThisBoot() + 1;
             self._starts = n;
             var st = self._load();
@@ -1164,7 +1177,8 @@ Recovery.prototype._startDue = function (cb) {
             self._startAt = null;
             self._log('starting ' + self.target.name + ' (start ' + n + ' this boot)');
             self._start(function (err) {
-                self._lock.release();
+                /* A lock kept for a guard stays while / is not verified read-only (review of fix4-p, B). */
+                if (!own && !(self._lock === lock && roStanding() !== null && !rootIsReadOnly())) self._lock.release();
                 if (err) self._log('starting ' + self.target.name + ' failed: ' + err.message);
                 self._lastProbe = -Infinity;   /* probe the new run at the next tick */
                 done('started');
@@ -1202,9 +1216,7 @@ module.exports = {
  * the patched binary only if a process runs it. */
 function runBoot(name) {
     var t = TARGETS[name || 'carplay'];
-    if (!t) { log('unknown service ' + name); process.exit(0); }
-    /* Android Auto off (S6): leave before anything of aapd's is read. */
-    if (off(t)) { log(t.name + ' boot check: off (' + aaSwitch.OFF_REASON + '); nothing checked'); process.exit(0); }
+    if (!t) { log('unknown service ' + name); process.exit(1); }
     /* The exit status: 0, or 1 while a ro-failed guard stands (/ may be
      * writable; the lock and <lock>.ro-failed are kept, see holdRoFailed).
      * The service's unit runs this with ExecStart=-, so the status changes
@@ -1226,11 +1238,20 @@ function runBoot(name) {
     setTimeout(function () {
         log(t.name + ' boot check: out of time after ' + BOOT_BOUND_MS + ' ms; ' + t.name + ' starts as it is');
         setTimeout(function () {
+            /* A read-write remount that could not be reaped may still land after the exit: the guard stays
+             * (never cleared by roSettled on a read-only reading now) and the step exits 1. */
+            if (rwChild) {
+                if (roFailed === null) holdRoFailed('the boot step ran out of time and its remount,rw could not be stopped');
+                exitWith(false);
+            }
             if (writing && roFailed === null) holdRoFailed('the boot step ran out of time and its remount,ro did not return');
             exitWith(roSettled());   /* the hard deadline: no more waiting */
         }, BOOT_EXIT_MS - BOOT_BOUND_MS).unref();
         abandonRestore(leave);
     }, BOOT_BOUND_MS).unref();
+    /* Android Auto off (S6): nothing of aapd's is read or written; only the generic
+     * step runs, / verified read-only before the exit (G2-2 of the review of fix4-p). */
+    if (off(t)) { log(t.name + ' boot check: off (' + aaSwitch.OFF_REASON + '); nothing checked'); leave(); return; }
     var t0 = monoMs();
     var rec = new Recovery({ target: t, restore: function (fails, cb) { restoreTarget(t, true, fails, cb, BOOT_LOCK_WAIT_MS); },
         repairModes: function (cb) { repairModes(t, BOOT_LOCK_WAIT_MS, cb); } });

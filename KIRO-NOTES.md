@@ -187,3 +187,19 @@ Not covered: `MFXInitEx` failing with a hang / lost device in a GPU-copy session
 - F4: `patchd.js oneShot` stops before the Android Auto step when the CarPlay step left the guard (no remount, no write; a removal exits 1, an install 0). Test `F4` in `patchd_ro_test.js` (aa_enabled=1).
 - F5: `patchWith` always makes and verifies the `.woc-running` link before the patcher; it removes it after the write when no process uses the old inode (`needed`). If it cannot be linked nothing is written. Test `F5` in `patchd_ro_test.js`.
 - Not verified: on a car. The F5 test shows no write when the link fails; it does not race a process start. The F4 test uses an absent aapd, so it shows the AA step is skipped (status and mount calls), not an AA write being blocked.
+
+
+## Review of the guard (fix4-p), G2-1..G2-4 and the second reviewer's A, B, C
+
+- G2-1 (`recovery.js`): a boot step that gives up (`abandonRestore`) cancels its write window. `remount(true)` never starts after that, the outstanding `mount -o remount,rw` child (`rwChild`) is killed and awaited before `remount,ro` is tried, and its callback is swallowed (no write, no release). A lock that arrives late (`takeLock`) is released at once. At the hard deadline, an `rwChild` that could not be stopped keeps the guard and the lock and the step exits 1 (the old code set the guard and then cleared it again because `/proc/mounts` still said ro). `WOC_TEST_NO_KILL` (only with `WOC_TEST`) stands for a mount no signal reaches.
+- G2-2: `recovery.js boot aapd` with `aa_enabled=0` skips everything of aapd's but runs the generic `leave()`/`settleRo()` before it exits; an unknown service exits 1.
+- G2-3: a due `_startAt` is no longer starved by a standing guard (the heal retry runs beside it, `_roBusy`). `_startDue` uses the lock the guard already keeps (`own`) and does not release a lock while a guard stands and `/` is not ro. patchd retries the ro remount itself every `WOC_RO_RETRY_MS` (5 s) while it keeps the lock with the guard (`scheduleRoRetry`).
+- G2-4: before a replacement, patchd (`patchWith`) aborts when an unneeded old `.woc-running` cannot be removed; recovery aborts (`restoreTarget`) when the link it wants cannot be removed/made or is not the target's inode. Both finish through the normal path (`/` verified ro, lock released).
+- A (`remount_lock.js healRo`): a lock `healRo` took is kept (marker rewritten with this pid) when `remount,ro` does not take. B: `breakable()` never breaks the lock of a live holder that owns the standing guard (`guardOwnerPid`, this process or the marker's pid). C (`patchd.js readState`): empty/unparsable status sets `unreadable`; a plain apply is refused before the remount.
+
+### Known limits of the guard
+
+- A `mount` child stuck in the kernel (uninterruptible) cannot be killed or reaped: the boot step then exits 1 with the guard and the lock kept, but the mount may still land later. Nothing in user space closes that; the guard (marker plus held lock) is what blocks the writers afterwards. Not tested on a car.
+- When an older, still-running inode occupies `.woc-running` (a deferred change), both writers still decide from one `inUse(target)` sample (the patchd and recovery code for a link a process runs). Requiring `sameInode(running, target)` there would block undo of a deferred change, so a process that starts the target between the sample and the rename is not covered.
+- The breaking of a live holder's lock after `HUNG_MS` still applies to a hung holder without a guard; a guard held by a hung process is never broken, and only that process (or a reboot, `/dev/shm` is cleared) frees it.
+- A recovery restore whose link cannot be made now stays deferred (counter kept) instead of restoring without the link, even when nothing runs the target.
