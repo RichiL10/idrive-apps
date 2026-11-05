@@ -385,6 +385,21 @@ static void backward_jump_rules()
     CHECK(ot.ev == want);
     CHECK(t.stats().gaps == 1 && t.stats().lost == 0 && t.stats().late == 0 && t.stats().stray == 0);
 
+    /* A restart on the same SSRC whose timestamp equals the old unit's, with
+     * that unit still open: the old unit ends at the restart, so its slice does
+     * not join the restarted stream's SPS and PPS. */
+    RtpH264 u;
+    Out ou;
+    push(u, ou, rtp(50, 5000, false, kP));         /* an open VCL access unit */
+    push(u, ou, rtp(30000, 5000, false, kSps));    /* far ahead, same timestamp: held */
+    CHECK(ou.ev == std::vector<Bytes>{annexb(kP)});
+    push(u, ou, rtp(30001, 5000, false, kPps));    /* confirms the restart */
+    want = {annexb(kP), kAuEnd, annexb(kSps), annexb(kPps)};
+    CHECK(ou.ev == want);
+    CHECK(u.stats().gaps == 1 && u.stats().aus == 1 && u.stats().lost == 0);
+    push(u, ou, rtp(30002, 6500, false, kP));      /* the next timestamp ends the restarted unit */
+    CHECK(u.stats().aus == 2);
+
     /* Across the sequence wrap: 65535 then 0 is no gap; 65534 after 0 is late. */
     RtpH264 w;
     Out ow;

@@ -88,6 +88,11 @@ bool RtpH264::push(const uint8_t *pkt, size_t len, const Sink &sink)
         have_seq_ = false;
         if (on_gap)
             on_gap(g);
+        /* The access unit still open ends here, as at an SSRC switch, and its
+         * timestamp is forgotten: the restarted sequence may carry the same
+         * timestamp, which must not join its NAL units to the old unit. */
+        end_au(sink);
+        have_ts_ = false;
         replay(sink);
     }
     ssrc_ = ssrc;
