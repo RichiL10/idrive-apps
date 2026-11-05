@@ -33,6 +33,7 @@
 #include <iterator>
 #include <locale>
 
+#include "connect_wait.h"
 #include "dcsm27_port.h"
 #include "graph_ramses27.h"
 #include "log.h"
@@ -229,8 +230,22 @@ int start(const cld::Config &cfg, char **)
             log_error("ramses: connect failed (communication user %u); trying again every %d s", user,
                       kConnectRetryMs / 1000);
         pollfd p{sig_fd, POLLIN, 0};
-        if (poll(&p, 1, kConnectRetryMs) > 0)
+        const int n = poll(&p, 1, kConnectRetryMs);
+        const int err = errno;
+        switch (connect_wait(n, err, p.revents)) {
+        case ConnectWait::Stop:
             _exit(0);
+        case ConnectWait::Fail:
+            /* Not a stop: a failure, so systemd starts the service again. */
+            if (n < 0)
+                log_error("poll: %s; leaving for systemd to start the service again", strerror(err));
+            else
+                log_error("poll: the signal descriptor reports 0x%x; leaving for systemd to start the service again",
+                          (unsigned)p.revents);
+            _exit(1);
+        case ConnectWait::Retry:
+            break;
+        }
     }
     log_info("ramses: connected as communication user %u", user);
     Ramses27Gpu gpu(*client);

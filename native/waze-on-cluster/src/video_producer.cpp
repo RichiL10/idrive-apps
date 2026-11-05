@@ -41,6 +41,9 @@ VideoProducer::VideoProducer(const VideoConfig &cfg)
       change_(cfg.tex_width, cfg.tex_height), freeze_(cfg.freeze)
 {
     device_.attach(&decoder_);
+    /* Before the decode thread starts: the fatal failure arms the exit
+     * watchdog itself, whatever the main loop is doing then. */
+    device_.set_exit_watchdog(kExitWatchdogMs, 1);
     rtp_sink_ = [this](const uint8_t *d, size_t n, bool end_of_au) { on_nal(d, n, end_of_au); };
     rtp_.on_gap = [this](const RtpH264::Gap &g) { gaps_.gap(g, packet_->source, packet_->dropped); };
     if (pipe2(ready_, O_NONBLOCK | O_CLOEXEC) < 0)

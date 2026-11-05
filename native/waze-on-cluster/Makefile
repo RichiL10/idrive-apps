@@ -148,7 +148,7 @@ $(BUILD)/host/decoder_test: $(DEC_SRC) test/fake_msdk.h src/decoder_msdk.h src/s
 	$(CXX) $(CXXFLAGS) -Isrc -I$(KIT) -I$(CR)/src -Iabi/include -o $@ $(DEC_SRC) -lpthread
 
 DG_SRC = test/device_guard_test.cpp test/fake_msdk.cpp src/decoder_msdk.cpp src/nal_reader.cpp $(KIT)/yuv_atlas.cpp $(CR)/src/log.cpp
-$(BUILD)/host/device_guard_test: $(DG_SRC) test/fake_msdk.h src/decoder_msdk.h src/device_guard.h src/device_watch.h src/source_crop.h src/nal_reader.h $(KIT)/yuv_atlas.h
+$(BUILD)/host/device_guard_test: $(DG_SRC) test/fake_msdk.h src/decoder_msdk.h src/device_guard.h src/device_watch.h src/exit_watchdog.h src/source_crop.h src/nal_reader.h $(KIT)/yuv_atlas.h
 	mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -Isrc -I$(KIT) -I$(CR)/src -Iabi/include -o $@ $(DG_SRC) -lpthread
 

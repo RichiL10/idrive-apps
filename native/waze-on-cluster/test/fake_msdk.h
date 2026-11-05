@@ -36,7 +36,8 @@ namespace fake_msdk {
 extern std::vector<std::string> calls;
 
 /* A failure to give in sessions made with GPU copy: call ("MFXInitEx",
- * "SetHandle", "DECODE_QueryIOSurf", "VPP_Init", "VPP_Run") returns status
+ * "SetHandle", "DECODE_QueryIOSurf", "VPP_QueryIOSurf", "DECODE_Init",
+ * "VPP_Init", "VPP_Run") returns status
  * after succeeding `after` times, `times` times (0: every time after). A
  * VPP run fails only into an output its GPU copy would take (planes and
  * pitch 16-byte aligned). */
@@ -48,7 +49,7 @@ extern GpuFault gpu_fault;
 
 /* A failure in any session, with or without GPU copy: call ("MFXInit",
  * "DecodeHeader", "DECODE_Init", "DecodeFrameAsync", "VPP_Run", "decode-sync",
- * "vpp-sync", "SetHandle") returns status after succeeding `after` times, `times` times
+ * "vpp-sync", "SetHandle", "VPP_QueryIOSurf") returns status after succeeding `after` times, `times` times
  * (0: every time after). Unlike gpu_fault, a VPP run fails whatever its
  * output's alignment. Used for the device statuses (MFX_ERR_GPU_HANG,
  * MFX_ERR_DEVICE_LOST, MFX_ERR_DEVICE_FAILED) and for any other status. */

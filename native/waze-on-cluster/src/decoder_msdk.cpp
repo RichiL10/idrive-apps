@@ -125,6 +125,14 @@ bool device_status(mfxStatus s)
     return s == MFX_ERR_GPU_HANG || s == MFX_ERR_DEVICE_LOST || s == MFX_ERR_DEVICE_FAILED;
 }
 
+/* A hang or a lost device: the device's in any session. MFX_ERR_DEVICE_FAILED
+ * is also how a failing GPU copy shows, so in a session with GPU copy it
+ * stays ambiguous. */
+bool hard_device_status(mfxStatus s)
+{
+    return s == MFX_ERR_GPU_HANG || s == MFX_ERR_DEVICE_LOST;
+}
+
 mfxU16 align16(uint32_t v) { return (mfxU16)((v + 15) & ~15u); }
 
 int64_t now_us()
@@ -217,8 +225,9 @@ struct Decoder::State {
 
     ~State();
     bool open_session();
-    bool session_up(bool gpu, std::string *why);
-    bool setup_failed(const AccessUnit &au, bool by_rect, const std::string &why);
+    bool session_up(bool gpu, std::string *why, bool *device);
+    bool setup_failed(const AccessUnit &au, bool by_rect, mfxStatus sts, const char *call);
+    void announce_setup(mfxStatus sts, const char *call);
     void place_vout();
     void access_unit(const AccessUnit &au, const FrameSink &cb);
     bool start(const AccessUnit &au);
@@ -248,7 +257,7 @@ struct Decoder::State {
     {
         if (!session_gpu_copy || cpu_layout)
             note(sts);
-        else if (sts == MFX_ERR_GPU_HANG || sts == MFX_ERR_DEVICE_LOST)
+        else if (hard_device_status(sts))
             note(sts);   /* a hung or lost device is not how a failing copy shows */
     }
     /* Tell the hook of the device failure in hand, once, before anything
@@ -303,18 +312,25 @@ Decoder::State::~State()
 bool Decoder::State::open_session()
 {
     std::string why;
+    bool device = false;
     if (gpu_copy && !g_gpu_copy_failed) {
-        if (session_up(true, &why))
+        if (session_up(true, &why, &device))
             return true;
+        if (device)
+            return fail(why);   /* a hang or a lost device: announced already, no session to follow */
         cpu_copy(why);
         device_failed = false;   /* the session without GPU copy decides */
     }
-    return session_up(false, &why) || fail(why);
+    return session_up(false, &why, &device) || fail(why);
 }
 
-/* A session, with GPU copy or not, on our VA display. */
-bool Decoder::State::session_up(bool gpu, std::string *why)
+/* A session, with GPU copy or not, on our VA display. *device: it failed on
+ * the device (a hang or a lost one, in a session with GPU copy; any device
+ * status otherwise) and the failure has been announced, so there is no
+ * session without GPU copy to follow. */
+bool Decoder::State::session_up(bool gpu, std::string *why, bool *device)
 {
+    *device = false;
     mfxVersion ver;
     ver.Major = MFX_VERSION_MAJOR;
     ver.Minor = MFX_VERSION_MINOR;
@@ -344,10 +360,14 @@ bool Decoder::State::session_up(bool gpu, std::string *why)
     if (sts < MFX_ERR_NONE) {
         note(sts);
         *why = mfx_error("MFXVideoCORE_SetHandle", sts);
-        /* With no session without GPU copy to follow, this is the final
-         * failure: publish it before MFXClose, which a hung GPU may block. */
-        if (!gpu && device_failed)
+        /* With no session without GPU copy to follow (one without GPU copy; or
+         * a hang or a lost device, which is not how a failing copy shows),
+         * this is the final failure: publish it before MFXClose, which a hung
+         * GPU may block. */
+        if (device_status(sts) && (!gpu || hard_device_status(sts))) {
             announce(*why);
+            *device = true;
+        }
         MFXClose(session);
         session = nullptr;
         return false;
@@ -356,12 +376,27 @@ bool Decoder::State::session_up(bool gpu, std::string *why)
     return true;
 }
 
+/* A step of start() after the header failed with sts: whether the device is
+ * to blame, before anything that can block on it. A hang or a lost device is
+ * the device's in any session; a failed device in a session with GPU copy may
+ * be the copy's. */
+void Decoder::State::announce_setup(mfxStatus sts, const char *call)
+{
+    note(sts);
+    if (device_status(sts) && (!session_gpu_copy || hard_device_status(sts)))
+        announce(mfx_error(call, sts));
+}
+
 /* A step of start() after the header failed. In a session with GPU copy the
  * sequence starts again, as it began, in a session without: the unit's
- * library fails Init when the GPU copy it sets up there cannot start. */
-bool Decoder::State::setup_failed(const AccessUnit &au, bool by_rect, const std::string &why)
+ * library fails Init when the GPU copy it sets up there cannot start. Not
+ * for a hang or a lost device: that is the device's, and the caller closes
+ * the session (device_lost) with the failure published first. */
+bool Decoder::State::setup_failed(const AccessUnit &au, bool by_rect, mfxStatus sts, const char *call)
 {
-    if (!session_gpu_copy)
+    announce_setup(sts, call);
+    const std::string why = mfx_error(call, sts);
+    if (!session_gpu_copy || hard_device_status(sts))
         return fail(why);
     cpu_copy(why);
     device_failed = false;   /* the session without GPU copy decides */
@@ -513,15 +548,11 @@ bool Decoder::State::start(const AccessUnit &au)
     memset(&dec_req, 0, sizeof dec_req);
     memset(vpp_req, 0, sizeof vpp_req);
     sts = MFXVideoDECODE_QueryIOSurf(session, &dec, &dec_req);
-    if (sts < MFX_ERR_NONE) {
-        note(sts);
-        return setup_failed(au, by_rect, mfx_error("MFXVideoDECODE_QueryIOSurf", sts));
-    }
+    if (sts < MFX_ERR_NONE)
+        return setup_failed(au, by_rect, sts, "MFXVideoDECODE_QueryIOSurf");
     sts = MFXVideoVPP_QueryIOSurf(session, &vpp, vpp_req);
-    if (sts < MFX_ERR_NONE) {
-        note(sts);
-        return setup_failed(au, by_rect, mfx_error("MFXVideoVPP_QueryIOSurf", sts));
-    }
+    if (sts < MFX_ERR_NONE)
+        return setup_failed(au, by_rect, sts, "MFXVideoVPP_QueryIOSurf");
     mfxU16 n = (mfxU16)(dec_req.NumFrameSuggested + vpp_req[0].NumFrameSuggested);
 
     /* Opaque surfaces: the application passes surface headers only, and MSDK
@@ -554,13 +585,13 @@ bool Decoder::State::start(const AccessUnit &au)
     if (sts >= MFX_ERR_NONE) {
         call = "MFXVideoVPP_Init";
         sts = MFXVideoVPP_Init(session, &vpp);
-        if (sts < MFX_ERR_NONE)
+        if (sts < MFX_ERR_NONE) {
+            announce_setup(sts, call);   /* before a close that a hung GPU may block */
             MFXVideoDECODE_Close(session);
+        }
     }
-    if (sts < MFX_ERR_NONE) {
-        note(sts);
-        return setup_failed(au, by_rect, mfx_error(call, sts));
-    }
+    if (sts < MFX_ERR_NONE)
+        return setup_failed(au, by_rect, sts, call);
 
     /* Each VPP run is synchronised before the next; the second surface
      * keeps the picture before for the comparison. NV12 is the Y plane, then

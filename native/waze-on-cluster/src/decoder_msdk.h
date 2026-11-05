@@ -163,10 +163,12 @@ public:
      * (not after kFailLimit access units), and the decoder then waits for the
      * next SPS (decoding() false). The caller drops the whole decoder (device
      * and VA display with it) and starts it afresh (device_watch.h). Two
-     * exceptions keep the GPU copy fallbacks as they are: a step of the setup
-     * that fails in a session with GPU copy goes on in one without, and a
-     * VPP run failing in a session with GPU copy is the copy's failure
-     * until the output is copied on the CPU (State::note_vpp). */
+     * exceptions keep the GPU copy fallbacks, and only for the ambiguous
+     * MFX_ERR_DEVICE_FAILED (a hang or a lost device is the device's in every
+     * step, counted before any close): a step of the setup that fails in a
+     * session with GPU copy goes on in one without, and a VPP run failing in a
+     * session with GPU copy is the copy's failure until the output is copied
+     * on the CPU (State::note_vpp). */
     uint64_t device_failures() const;
 
     /* Called, on the thread that feeds or inits the decoder, the moment a

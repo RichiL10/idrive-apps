@@ -206,6 +206,8 @@ mfxStatus MFXVideoDECODE_Init(mfxSession, mfxVideoParam *par)
     g.pic_w = f.CropW;
     g.pic_h = f.CropH;
     calls.push_back("init " + size(f.CropW, f.CropH));
+    if (const mfxStatus sts = fault("DECODE_Init", g.gpu_copy))
+        return sts;
     return any("DECODE_Init");
 }
 
@@ -251,7 +253,9 @@ mfxStatus MFXVideoDECODE_DecodeFrameAsync(mfxSession, mfxBitstream *bs, mfxFrame
 mfxStatus MFXVideoVPP_QueryIOSurf(mfxSession, mfxVideoParam *, mfxFrameAllocRequest r[2])
 {
     r[0].NumFrameSuggested = 2;
-    return MFX_ERR_NONE;
+    if (const mfxStatus sts = fault("VPP_QueryIOSurf", g.gpu_copy))
+        return sts;
+    return any("VPP_QueryIOSurf");
 }
 
 mfxStatus MFXVideoVPP_Init(mfxSession, mfxVideoParam *par)
