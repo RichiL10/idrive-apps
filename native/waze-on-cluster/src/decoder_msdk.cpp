@@ -798,6 +798,8 @@ void Decoder::shutdown() { s_.reset(); }
 
 bool Decoder::decoding() const { return s_ && s_->running; }
 
+uint64_t Decoder::buffer_overflows() const { return s_ ? s_->nal.overflows() : 0; }
+
 crk::Spread Decoder::pack_us() const { return s_ ? s_->pack_us : crk::Spread(); }
 
 crk::Spread Decoder::vpp_us() const { return s_ ? s_->vpp_us : crk::Spread(); }

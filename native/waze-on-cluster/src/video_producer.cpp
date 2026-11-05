@@ -146,14 +146,18 @@ std::string VideoProducer::probe_report() const
         pack = decoder_.pack_us();
         vpp = decoder_.vpp_us();
         const RtpH264::Stats &st = rtp_.stats();
-        char line[448];
+        char line[640];
         std::snprintf(line, sizeof line,
-                      "rtp: packets=%llu nals=%llu aus=%llu seq_gaps=%llu lost=%llu dropped=%llu bad=%llu\n"
+                      "rtp: packets=%llu nals=%llu aus=%llu seq_gaps=%llu lost=%llu dropped=%llu bad=%llu late=%llu "
+                      "streams=%llu stray=%llu fu_overflows=%llu framing_overflows=%llu idle_resets=%llu\n"
                       "queue: %llu dropped, at most %zu of %zu packets waiting, %zu KB held\n"
                       "decoder: %s (%llu frames decoded)%s\n",
                       (unsigned long long)st.packets, (unsigned long long)st.nals, (unsigned long long)st.aus,
                       (unsigned long long)st.gaps, (unsigned long long)st.lost, (unsigned long long)st.dropped,
-                      (unsigned long long)st.bad, (unsigned long long)queue_.overflows(), queue_.high_water(),
+                      (unsigned long long)st.bad, (unsigned long long)st.late, (unsigned long long)st.streams,
+                      (unsigned long long)st.stray, (unsigned long long)st.overflows,
+                      (unsigned long long)decoder_.buffer_overflows(), (unsigned long long)st.idle_resets,
+                      (unsigned long long)queue_.overflows(), queue_.high_water(),
                       kQueuePackets, queue_.held_bytes() / 1024,
                       !decoder_up_ ? "waiting for the stream's first SPS" : decoding_ ? "up" : "waiting for a keyframe",
                       (unsigned long long)decoded_total_.load(), wait);
@@ -215,8 +219,18 @@ void VideoProducer::feed_datagram(const PacketQueue::Packet &p)
         probe_.record_rtp(data, len);
         std::lock_guard<std::mutex> lock(decode_mutex_);
         packet_ = &p;
+        const uint64_t before = rtp_.stats().overflows;
+        /* When it arrived, not when it was taken off the queue: a decoder
+         * running behind is not silence on the wire. */
+        rtp_.arrival(cld::now_ms() - (int64_t)(p.waited_us / 1000), rtp_sink_);
         rtp_.push(data, len, rtp_sink_);
         packet_ = nullptr;
+        if (const uint64_t n = rtp_.stats().overflows - before) {
+            std::lock_guard<std::mutex> flock(frame_mutex_);
+            const std::string line = health_.overflow(cld::now_ms(), "RTP fragment buffer (FU-A)", (uint32_t)n);
+            if (!line.empty())
+                log_warn("%s", line.c_str());
+        }
         return;
     }
     feed_fifo(data, len);
@@ -294,8 +308,15 @@ bool VideoProducer::start_decoder(std::string *err)
 void VideoProducer::decode(const uint8_t *data, size_t len, bool end_of_au)
 {
     std::string derr;
+    const uint64_t overflows_before = decoder_.buffer_overflows();
     const bool ok = decoder_.feed(data, len, [this](const VideoFrame &f) { on_frame(f); }, &derr, end_of_au,
                                   !(packet_ && packet_->later_frame));
+    if (const uint64_t n = decoder_.buffer_overflows() - overflows_before) {
+        std::lock_guard<std::mutex> flock(frame_mutex_);
+        const std::string line = health_.overflow(cld::now_ms(), "decoder's NAL/access unit buffer", (uint32_t)n);
+        if (!line.empty())
+            log_warn("%s", line.c_str());
+    }
     const bool decoding = decoder_.decoding();
     if (ok && decoding == decoding_)
         return;

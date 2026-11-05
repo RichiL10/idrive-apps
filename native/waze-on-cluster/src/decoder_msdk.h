@@ -153,6 +153,10 @@ public:
      * after a sequence was given up, until the next SPS. */
     bool decoding() const;
 
+    /* NAL units and access units the framing (nal_reader.h) dropped at its
+     * size cap since init(). */
+    uint64_t buffer_overflows() const;
+
     /* What comparing each picture with the one before and packing it took,
      * in microseconds. */
     crk::Spread pack_us() const;
