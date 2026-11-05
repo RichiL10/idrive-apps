@@ -1797,6 +1797,29 @@ test('a boot step out of time puts / back read-only and releases the lock before
     assert(!fs.existsSync(lockFile), 'the remount lock released');
 });
 
+test('G2-1: a read-write remount that would finish after the boot step gave up is killed: / stays read-only, nothing written, lock released', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'unproven');
+    fs.writeFileSync(w.T.carplay.state, JSON.stringify({ fails: 1, unknown: 0, arm: null }));
+    const mounts = path.join(w.dir, 'mounts'), lockFile = path.join(w.dir, 'remount.lock');
+    fs.writeFileSync(mounts, '/dev/root / ext4 ro 0 0\n');
+    /* remount,rw takes / read-write, ignores SIGTERM, and takes / read-write again and exits 0 at 3 s:
+     * after the boot step's bound (2.3 s at a 400 ms step) and after the abandon remount,ro reported ro. */
+    const put = 'fs.writeFileSync(' + JSON.stringify(mounts) + ', "/dev/root / ext4 " + (rw ? "rw" : "ro") + " 0 0\\n");\n';
+    fs.writeFileSync(path.join(w.dir, 'mount'), '#!' + process.execPath + '\nvar fs = require("fs"), rw = process.argv.indexOf("remount,rw") > 0;\n' + put +
+        'if (rw) { process.on("SIGTERM", function () {}); setTimeout(function () {' + put + ' process.exit(0); }, 3000); }\n', { mode: 0o755 });
+    cp.execFileSync(path.join(w.dir, 'mount'), ['first']);
+    fs.writeFileSync(mounts, '/dev/root / ext4 ro 0 0\n');
+    const before = fs.readFileSync(w.T.carplay.target);
+    const r = runBootStep(w, 'carplay', 'B', { WOC_RECOVERY_STEP_MS: '400', WOC_MOUNT: path.join(w.dir, 'mount'), WOC_PROC_MOUNTS: mounts, WOC_REMOUNT_LOCK: lockFile });
+    assert(/out of time/.test(r.stdout), r.stdout + r.stderr);
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    await new Promise((res) => setTimeout(res, 2000));   /* the old remount would have finished by now */
+    assert(/\bro\b/.test(fs.readFileSync(mounts, 'utf8')), '/ still read-only after the old remount\'s time: ' + r.stdout);
+    assert(fs.readFileSync(w.T.carplay.target).equals(before), 'nothing written');
+    assert(!fs.existsSync(lockFile), 'the remount lock released');
+});
+
 test('a backup without its record: restored when it is the proven build\'s shipped file, refused otherwise', () => {
     const w = makeWorld();
     w.install('carplay', 'unproven');

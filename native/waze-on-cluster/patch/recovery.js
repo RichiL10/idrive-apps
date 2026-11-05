@@ -364,8 +364,25 @@ function rootIsReadOnly() {
     return false;
 }
 
+/* The boot step ran out of time (abandonRestore): the write window it cut
+ * short is cancelled. A cancelled window never remounts read-write (remount
+ * below), and the continuation of its outstanding read-write remount never
+ * runs (nothing is written, nothing is released: abandonRestore owns the end).
+ * rwChild: that remount's process, killed and awaited (rwReaped) before / is
+ * put back read-only. (G2-1 of the review of fix4-p.) */
+var abandoned = false, rwChild = null, rwReaped = null;
 function remount(rw, cb, ms) {
-    cp.execFile(MOUNT, ['-o', 'remount,' + (rw ? 'rw' : 'ro'), '/'], { timeout: ms || STEP_MS }, function (err) { cb(err); });
+    if (rw && abandoned) return;
+    var child = cp.execFile(MOUNT, ['-o', 'remount,' + (rw ? 'rw' : 'ro'), '/'], { timeout: ms || STEP_MS }, function (err) {
+        if (rw) {
+            rwChild = null;
+            var reaped = rwReaped;
+            rwReaped = null;
+            if (abandoned) { if (reaped) reaped(); return; }
+        }
+        cb(err);
+    });
+    if (rw) rwChild = child;
 }
 
 function remountRo(tries, cb) {
@@ -468,6 +485,8 @@ function takeLock(waitMs, cb) {
         /* Under the lock, / is verified read-only before anything remounts it read-write; if it is
          * not and cannot be put back, the lock is kept with the guard set (acquireWrite). */
         lock.acquireWrite(waitMs || 0, function (got, rf) {
+            /* The lock came after the boot step gave up: no window opens (G2-1). */
+            if (abandoned && got) { lock.release(); cb(new Error('the boot step is out of time; nothing written')); return; }
             if (got) { cb(null); return; }
             if (rf === null) { cb(new Error(waitMs ? 'remount lock held for ' + waitMs + ' ms; deferring' : 'remount lock held; deferring')); return; }
             if (lock.ownsLock()) holdRoFailed(rf);   /* the verification failed here: this process keeps the lock */
@@ -642,16 +661,28 @@ var writing = false;
  * and the boot step exits 1. */
 var ABANDON_TRIES = 3;
 function abandonRestore(cb) {
+    abandoned = true;   /* the window is cancelled: see remount */
     if (!writing) { cb(); return; }
     var per = Math.max(100, Math.floor(STEP_MS / ABANDON_TRIES));
-    (function attempt(n) {
-        remount(false, function () {
-            if (rootIsReadOnly()) { roFailed = null; writing = false; lock.clearRoFailed(); lock.release(); cb(); return; }
-            if (n > 1) { attempt(n - 1); return; }
-            holdRoFailed('the boot step ran out of time and / is still read-write after ' + ABANDON_TRIES + ' remount,ro tries');
-            cb();
-        }, per);
-    })(ABANDON_TRIES);
+    function putBack() {
+        (function attempt(n) {
+            remount(false, function () {
+                if (rootIsReadOnly()) { roFailed = null; writing = false; lock.clearRoFailed(); lock.release(); cb(); return; }
+                if (n > 1) { attempt(n - 1); return; }
+                holdRoFailed('the boot step ran out of time and / is still read-write after ' + ABANDON_TRIES + ' remount,ro tries');
+                cb();
+            }, per);
+        })(ABANDON_TRIES);
+    }
+    /* An outstanding read-write remount is killed and awaited first: it must not
+     * finish after / was verified read-only. If it cannot be reaped, the hard
+     * deadline in runBoot sets the guard and exits 1. */
+    if (rwChild) {
+        rwReaped = putBack;
+        try { rwChild.kill('SIGKILL'); } catch (e) {}
+        return;
+    }
+    putBack();
 }
 
 /* ---- the service's run ---- */
