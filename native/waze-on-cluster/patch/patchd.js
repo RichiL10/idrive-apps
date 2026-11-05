@@ -64,6 +64,9 @@
  *                    unproven: true when the carplay build is outside the
  *                    proven list and not patched yet: Enable map needs the
  *                    user's confirmation, sent as apply's unproven:true
+ *                    failed: text, only while the binary is not the original:
+ *                    boot recovery marked the patch failed (carplay crashed
+ *                    with it and no backup can restore it; recovery.js)
  *                    aa: Android Auto's patch, {enabled (false while
  *                    aa_enabled is 0: state is then "off", nothing under
  *                    aapd's paths is read for writing or written), state, reason, conflict, pending,
@@ -453,7 +456,12 @@ function readState(cb) {
                         conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable, proven: proven, recovered: recovered(TARGET),
                         /* the first edit of this build needs the user's confirmation (S3);
                          * a modified build is refused by the patcher anyway (a conflict) */
-                        unproven: known && !hasBackup && pristine && !proven };
+                        unproven: known && !hasBackup && pristine && !proven,
+                        /* boot recovery marked the patch failed (S4): crashing, no backup
+                         * restores it. Reported only while the binary is not the original:
+                         * restored by hand, the mark is stale and clears at the next boot
+                         * step or crash. */
+                        failed: binary !== 'original' ? failedReason() : '' };
         cb(cachedState);
     });
 }
@@ -589,6 +597,7 @@ function status(extra, aaExtra) {
             if (!cpBusy && st.conflict) msg.conflict = st.conflict;
             if (!cpBusy && st.recovered) msg.recovered = st.recovered;
             if (st.unproven) msg.unproven = true;
+            if (st.failed) msg.failed = st.failed;
             if (extra) Object.keys(extra).forEach(function (k) { msg[k] = extra[k]; });
             msg.aa = aaMsg(aa);
             if (aaExtra) Object.keys(aaExtra).forEach(function (k) { msg.aa[k] = aaExtra[k]; });
@@ -636,6 +645,7 @@ function remountRo(tries, cb) {
  * effect at the next head-unit start. */
 var recmgrLoaded = require('./recmgr_list.js').recmgrLoaded;
 var parseShow = require('./recovery.js').parseShow;
+var failedReason = require('./recovery.js').failedReason;
 var DROPIN = process.env.WOC_CARPLAY_DROPIN || '/etc/systemd/system/carplay.service.d/50-waze-on-cluster.conf';
 
 /* cb(null) when t's service may be restarted, else cb(why not). */

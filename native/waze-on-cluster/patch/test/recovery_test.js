@@ -37,6 +37,9 @@ Object.assign(process.env, {
     WOC_REMOUNT_LOCK: path.join(ROOT, 'remount.lock'),
     /* No btime unless a test writes one: the host's own /proc/stat is no boot of the worlds'. */
     WOC_PROC_STAT: path.join(ROOT, 'no-proc-stat'),
+    /* Android Auto is opt-in (S6, aa_enabled.js). These tests are about both
+     * services, so it is on here; the tests of the default turn it off. */
+    WOC_AA_ENABLED: '1',
 });
 
 const recovery = require('../recovery.js');

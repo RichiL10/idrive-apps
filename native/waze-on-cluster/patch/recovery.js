@@ -66,6 +66,28 @@
  * crash or a SIGKILL patchd did not send, never stop or restart, bounded by
  * START_DELAYS_MS per boot.
  *
+ * The failed mark (Kiro test build, S4). A patched carplay that keeps
+ * crashing while no usable backup can restore it (the backup is missing, or
+ * neither its record nor the proven stock SHA-256 vouches for it) is not
+ * touched: nothing else is written over it, and the tool never stops or
+ * masks it. It writes a persistent mark to the state file ({failed: {since,
+ * boot, fails, why}}), logs an ERROR at every boot and crash, no longer
+ * starts carplay again after a crash (the head unit's own restart for the
+ * crash is not ours to add to: no reboot storm from this tool), and patchd
+ * reports the mark in its status (failedReason) for as long as the binary is
+ * not the original. A SIGKILL that patchd did not send (the OOM killer, a
+ * shell) is no crash of the patch, so carplay is still started again for it,
+ * bounded by START_DELAYS_MS per boot, mark or not. The mark clears when the
+ * binary is stock again (restored by hand, a firmware update), when a
+ * verified backup restores it, or when the count falls below the threshold
+ * (carplay ran healthy). Only carplay has the mark.
+ *
+ * Android Auto is opt-in (aa_enabled.js, S6): with aa_enabled = 0, the
+ * default, the aapd boot step and the watcher's aapd side exit or stay away
+ * before they read, stat, write or remount for /usr/bin/aapd, /etc/aapd.conf,
+ * their backups and markers, and carplay's count ignores aapd's state and
+ * shutdown mark.
+ *
  * Node 8.16.2 on the unit. No dependencies.
  */
 'use strict';
@@ -74,6 +96,7 @@ var fs = require('fs');
 var path = require('path');
 var cp = require('child_process');
 
+var aaSwitch = require('./aa_enabled.js');
 var record = require('./patch_record.js');
 var lock = require('./remount_lock.js');
 var headUnit = require('./head_unit.js');
@@ -105,7 +128,7 @@ function targets(o) {
     var sin = o.sin || '/var/opt/public/sin', restartInfo = [path.join(sin, 'recmgr', 'restartInfo.xml'), path.join(sin, 'crashhandler', 'restartInfo.xml')];
     var t = {
         carplay: {
-            name: 'carplay', unit: 'carplay.service', target: o.carplay, files: [o.carplay], floors: [fileMode.EXEC],
+            name: 'carplay', unit: 'carplay.service', target: o.carplay, files: [o.carplay], floors: [fileMode.EXEC], failedMark: true,
             check: function (i, cur) {
                 if (!exists(o.carplay + '.woc-orig')) return null;
                 var cpp = require('./carplay_patch.js'), b = cpp.trustedBackup(o.carplay, cur || Buffer.alloc(0));
@@ -123,7 +146,7 @@ function targets(o) {
             killedRun: function (i) { return i.state === 'inactive' && i.result === 'success' && i.code === CLD_KILLED && i.status === '9'; },
         },
         aapd: {
-            name: 'aapd', unit: 'aapd.service', target: o.aapd, files: [o.aapd, o.aapdConf], floors: [fileMode.EXEC, fileMode.READ],
+            name: 'aapd', unit: 'aapd.service', target: o.aapd, files: [o.aapd, o.aapdConf], floors: [fileMode.EXEC, fileMode.READ], gated: true,
             check: function (i, cur) {
                 var ap = require('./aapd_patch.js'), f = i ? o.aapdConf : o.aapd;
                 var b = exists(f + '.woc-orig.json') ? ap.trusted(f) : stockBackup(f, i ? require('./aapd_conf.js').ORIGINAL_SHA256 : ap.KNOWN.sha256);
@@ -204,6 +227,10 @@ var BOOT_LOCK_WAIT_MS = STEP_MS;
 var BOOT_BOUND_MS = BOOT_LOCK_WAIT_MS + RESTORE_BOUND_MS;
 var BOOT_EXIT_MS = BOOT_BOUND_MS + STEP_MS + 500;
 
+/* Whether t is off by the owner's choice: aapd while aa_enabled is not 1
+ * (S6). Nothing of an off target is read, written or remounted. */
+function off(t) { return !!t.gated && !aaSwitch.enabled(); }
+
 function readText(f) { try { return fs.readFileSync(f, 'utf8'); } catch (e) { return ''; } }
 function monoMs() { var t = process.hrtime(); return t[0] * 1000 + t[1] / 1e6; }
 function exists(f) { return fs.existsSync(f); }
@@ -214,10 +241,18 @@ function log(line) { process.stdout.write('[' + new Date().toISOString() + '] re
  * 'unproven' build, or 'unknown' (a backup of ours beside a target the
  * record does not describe). */
 function patchKind(t) {
-    if (!t.backups.some(exists)) return 'none';
+    if (!t.backups.some(exists)) {
+        /* carplay with no backup but a record that names our patch (S4): the
+         * binary is patched and nothing can restore it. It is counted like any
+         * patch, and marked failed at the threshold instead of restored. */
+        var lost = t.failedMark ? record.current(t.target) : null;
+        return lost && lost.patched ? (lost.proven ? 'proven' : 'unproven') : 'none';
+    }
     var rec = record.current(t.target);
     return !rec ? 'unknown' : !rec.patched ? 'original' : rec.proven ? 'proven' : 'unproven';
 }
+
+function hasBackup(t) { return t.backups.some(exists); }
 
 /* Whether a file besides the binary (aapd.conf) still differs from its
  * verified backup: part of a patch a restore did not get to. */
@@ -252,6 +287,7 @@ function restartRecorded(t, arm) {
  * its watcher recorded, or its shutdown mark. */
 function otherCrashed(t, boot) {
     var o = t.other, st = null;
+    if (off(o)) return false;   /* Android Auto is off: its state and mark are not read */
     try { st = JSON.parse(fs.readFileSync(o.state, 'utf8')); } catch (e) { return false; }
     var arms = [st && st.arm, st && st.prev].filter(function (a) { return !!a && a.boot === boot; });
     if (!arms.length) return false;
@@ -345,6 +381,8 @@ function restorePlan(t, i) {
 
 var fsyncPath = record.fsyncPath;
 
+function unavailable(err) { err.unavailable = true; return err; }
+
 /* Permissions-only damage: the files of t that hold exactly their original
  * (the verified backup of ours, or the proven build's shipped file) but
  * lack the access the service's user needs, as a write under a restrictive
@@ -416,8 +454,11 @@ function repairModes(t, waitMs, cb) {
 function restoreTarget(t, onlyIfRunning, fails, cb, waitMs) {
     var plans = t.files.map(function (f, i) { return restorePlan(t, i); });
     var bin = plans[0];
-    if (!bin) { cb(new Error('no backup of ' + t.target)); return; }
-    if (bin.err) { cb(new Error('refusing the backup: ' + bin.err)); return; }
+    /* These two stay the same on every try: no backup, or one nothing vouches
+     * for. Marked so the failed mark (S4) tells them from a lock held or a
+     * remount that failed, which a later try may get past. */
+    if (!bin) { cb(unavailable(new Error('no backup of ' + t.target))); return; }
+    if (bin.err) { cb(unavailable(new Error('refusing the backup: ' + bin.err))); return; }
     if (bin.other) { cb(null, 'other'); return; }
     plans.slice(1).forEach(function (p, i) { if (p && (p.err || p.other)) log(t.files[i + 1] + ' left as it is: ' + (p.err || 'another file than its backup: ' + p.other)); });
     var writes = [];
@@ -558,6 +599,26 @@ function Recovery(opts) {
     this._ended = '';
     this._crashes = 0;
     this._starts = 0;
+    /* Marked failed in this process, also when the state cannot be written. */
+    this._failed = false;
+}
+
+/* The failed mark: {since, boot, fails, why}, or null when not failed. */
+function normFailed(f) {
+    if (!f || typeof f !== 'object') return null;
+    return { since: f.since || null, boot: f.boot || null, fails: f.fails || 0, why: typeof f.why === 'string' ? f.why : '' };
+}
+
+/* What patchd reports for the failed mark: the reason text, or '' when the
+ * tool is not marked failed (or the state cannot be read). */
+function failedReason(statePath) {
+    try { return failedText(normFailed(JSON.parse(fs.readFileSync(statePath || TARGETS.carplay.state, 'utf8')).failed)); } catch (e) { return ''; }
+}
+
+function failedText(f) {
+    if (!f) return '';
+    return 'carplay crashed ' + f.fails + ' times with the map patch and cannot be restored automatically' + (f.why ? ' (' + f.why + ')' : '') +
+        '; it is not started again by this tool after a crash. Keep the phone unplugged and restore carplay by hand (PATCH.md, Boot recovery)';
 }
 
 /* read: the state file was read, or there is none. */
@@ -569,9 +630,9 @@ Recovery.prototype._load = function () {
          * rules: its counts start again. */
         var legacy = !!st && typeof st === 'object' && !('unknown' in st);
         if (st && typeof st === 'object') return { fails: legacy ? 0 : st.fails || 0, unknown: legacy ? 0 : st.unknown || 0, arm: normArm(st.arm),
-            prev: normArm(st.prev), starts: st.starts || null, ended: st.ended || null, read: true };
+            prev: normArm(st.prev), starts: st.starts || null, ended: st.ended || null, failed: normFailed(st.failed), read: true };
     } catch (e) { read = e.code === 'ENOENT'; }
-    return { fails: 0, unknown: 0, arm: null, prev: null, starts: null, ended: null, read: read };
+    return { fails: 0, unknown: 0, arm: null, prev: null, starts: null, ended: null, failed: null, read: read };
 };
 
 /* Persist durably: the state must survive the reboot a crash can cause the
@@ -583,7 +644,7 @@ Recovery.prototype._save = function (st) {
         try { fs.mkdirSync(dir, 0o755); } catch (e) { if (e.code !== 'EEXIST') throw e; }
         fd = fs.openSync(tmp, 'w', 0o644);
         try {
-            fs.writeFileSync(fd, JSON.stringify({ fails: st.fails || 0, unknown: st.unknown || 0, arm: st.arm || null, prev: st.prev || null, starts: st.starts || null, ended: st.ended || null }) + '\n');
+            fs.writeFileSync(fd, JSON.stringify({ fails: st.fails || 0, unknown: st.unknown || 0, arm: st.arm || null, prev: st.prev || null, starts: st.starts || null, ended: st.ended || null, failed: st.failed || null }) + '\n');
             fs.fsyncSync(fd);
         } finally { fs.closeSync(fd); }
         fs.renameSync(tmp, this.statePath);
@@ -615,6 +676,12 @@ Recovery.prototype._thisBoot = function (rec) { return !!rec && rec.boot === thi
 Recovery.prototype.startBoot = function (cb) {
     cb = cb || function () {};
     var self = this;
+    /* Android Auto off (S6): nothing of aapd's is read, written or remounted. */
+    if (off(this.target)) {
+        this._log(this.target.name + ' is off (' + aaSwitch.OFF_REASON + '): nothing checked');
+        cb({ action: 'idle' });
+        return;
+    }
     /* First, whatever the count or the patch: an original that lacks the
      * access its service's user needs gets its mode and owner back. A stop
      * meanwhile waits for it, as for a restore (whenRestored), and nothing
@@ -635,7 +702,8 @@ Recovery.prototype._decide = function (cb) {
         /* A head unit that refuses our parts: a patch of ours goes, whatever
          * the count; nothing is armed. */
         var k = patchKind(t);
-        if (k === 'none' || (k === 'original' && !leftover(t))) { cb({ action: 'idle' }); return; }
+        /* No backup of ours: nothing to restore, as before the failed mark. */
+        if (k === 'none' || !hasBackup(t) || (k === 'original' && !leftover(t))) { cb({ action: 'idle' }); return; }
         this._restoreWith(st.fails, true, cb, refused);
         return;
     }
@@ -651,10 +719,15 @@ Recovery.prototype._decide = function (cb) {
     }
     var kind = patchKind(t);
     if (kind === 'none' || kind === 'original') {
-        if (tallied || st.fails || st.unknown || st.arm) { st.fails = 0; st.unknown = 0; st.arm = null; this._save(st); }
+        /* The binary is stock again (by hand, a firmware update, Disable): the
+         * failed mark, if any, is stale. */
+        if (tallied || st.fails || st.unknown || st.arm || st.failed) { st.fails = 0; st.unknown = 0; st.arm = null; st.failed = null; this._failed = false; this._save(st); }
         cb({ action: 'idle' });
         return;
     }
+    /* Below the threshold again (carplay ran healthy): no longer failed. */
+    if (st.failed && st.fails < THRESHOLD[kind]) { st.failed = null; this._failed = false; }
+    if (st.failed) this._log('ERROR: ' + t.name + ' is marked FAILED since ' + st.failed.since + ': ' + failedText(st.failed));
     if (!st.arm) st.arm = newArm(this.bootId, kind);
     var saved = this._save(st);
     if (saved && st.fails < THRESHOLD[kind]) { cb({ action: 'armed', patch: kind, fails: st.fails }); return; }
@@ -677,6 +750,8 @@ Recovery.prototype._restoreWith = function (fails, saved, cb, refused) {
             /* The counter stays, so the next start tries again. */
             self._log('boot recovery restore failed: ' + err.message + '; ' + n + ' starts as it is');
             r = { action: 'restore-failed', fails: fails, error: err.message };
+            /* Patched, crashing, and no backup can ever restore it (S4). */
+            if (err.unavailable && self.target.failedMark && !refused) { self._markFailed(fails, err.message); r.failed = true; }
         } else {
             self._log(outcome === 'restored' ? 'restored the original ' + n + ' in ' + Math.round(self._now() - t0) + ' ms; its patch is off until its Patch button applies it'
                 : outcome === 'other' ? n + ' is another build than our backup (a firmware update): not ours to restore'
@@ -689,11 +764,28 @@ Recovery.prototype._restoreWith = function (fails, saved, cb, refused) {
     });
 };
 
+/* Patched, crashing, and no backup can restore it: carplay is left as it is
+ * (writing anything else over it, or stopping or masking it, could leave the
+ * head unit worse off than a crashing CarPlay), and the mark is written to the
+ * state file for patchd's status. */
+Recovery.prototype._markFailed = function (fails, why) {
+    var st = this._load();
+    if (!st.failed) st.failed = { since: new Date().toISOString(), boot: this.bootId, fails: fails, why: why || '' };
+    else st.failed.fails = Math.max(st.failed.fails, fails);
+    this._failed = true;
+    if (!this._save(st)) this._log('could not persist the failed mark; it holds until this process ends');
+    this._log('ERROR: ' + this.target.name + ' is marked FAILED: it crashed ' + fails + ' times while patched and no backup can restore it (' + why +
+        '). It is left as it is and not started again by this tool after a crash. Keep the phone unplugged and restore ' + this.target.name +
+        ' by hand (PATCH.md, Boot recovery)');
+};
+
 Recovery.prototype._clear = function () {
     var st = this._load();
     st.fails = 0;
     st.unknown = 0;
     st.arm = null;
+    st.failed = null;
+    this._failed = false;
     this._crashes = 0;
     this._save(st);
 };
@@ -718,7 +810,7 @@ Recovery.prototype.whenRestored = function (cb) {
 Recovery.prototype.tick = function (cb) {
     cb = cb || function () {};
     var self = this;
-    if (this._busy || this.restoring) { cb({ action: 'skip' }); return; }
+    if (this._busy || this.restoring || off(this.target)) { cb({ action: 'skip' }); return; }
     var now = this._now();
     if (this._startAt !== null && now >= this._startAt) { this._startDue(cb); return; }
     var fresh = now - this._lastProbe < (this._pid ? ALIVE_PROBE_MS : PROBE_MS);
@@ -742,7 +834,7 @@ Recovery.prototype.tick = function (cb) {
         self._systemState(function (sys) {
             /* An end while the head unit shuts down, its mark already written, is no crash. */
             if (sys === 'stopping' || markOf(self.target, self.bootId)) { self._busy = false; cb({ action: 'watch' }); return; }
-            if (killed) { self._onKill(info, cb); return; }
+            if (killed) { self._onKill(info, cb); return; }   /* a SIGKILL that was not patchd's (_onKill) */
             self._onCrash(info, cb);
         });
     });
@@ -823,7 +915,7 @@ Recovery.prototype._onCrash = function (info, cb) {
  * the head unit for the exit). */
 Recovery.prototype._onKill = function (info, cb) {
     this._log(this.target.name + ' (run ' + info.run + ') was killed');
-    if (this._recmgrLoaded(this.target.name)) this._scheduleStart();
+    if (this._recmgrLoaded(this.target.name)) this._scheduleStart(true);
     this._busy = false;
     cb({ action: 'killed' });
 };
@@ -833,7 +925,19 @@ Recovery.prototype._startsThisBoot = function () {
     return Math.max(this._thisBoot(s) ? s.n : 0, this._starts);
 };
 
-Recovery.prototype._scheduleStart = function () {
+/* afterKill: the start follows a SIGKILL that was not patchd's. That is no
+ * crash of the patch, so it is started again (bounded by START_DELAYS_MS per
+ * boot) even while the patch is marked failed. After a crash, a failed
+ * patch stays down: crashing, with no backup to restore it, carplay is not
+ * started again by this tool. */
+Recovery.prototype._scheduleStart = function (afterKill) {
+    var marked = this._failed || !!this._load().failed;
+    if (marked && afterKill) {
+        this._log(this.target.name + ' was killed while its patch is marked failed: starting it again (bounded per boot), the kill was not a crash of the patch');
+    } else if (marked) {
+        this._log(this.target.name + ' stays down: its patch is marked failed (crashing, no backup restores it); restore it by hand');
+        return;
+    }
     var n = this._startsThisBoot();
     if (n >= START_DELAYS_MS.length) {
         this._log(this.target.name + ' stays down: started ' + n + ' times this boot already');
@@ -875,6 +979,7 @@ Recovery.prototype._startDue = function (cb) {
  * crash; a SIGTERM from a service restart does not. */
 Recovery.prototype.onShutdown = function (cb) {
     var self = this;
+    if (off(this.target)) { cb(); return; }
     var st = this._load();
     if (!this._armed(st) || st.arm.crashes || this._crashes || st.arm.clean) { cb(); return; }
     this._systemState(function (sys) {
@@ -887,7 +992,7 @@ Recovery.prototype.onShutdown = function (cb) {
 module.exports = {
     Recovery: Recovery, tally: tally, parseShow: parseShow, targets: targets, TARGETS: TARGETS, THRESHOLD: THRESHOLD,
     RESTORE_BOUND_MS: RESTORE_BOUND_MS, BOOT_BOUND_MS: BOOT_BOUND_MS, BOOT_EXIT_MS: BOOT_EXIT_MS, restoreTarget: restoreTarget, repairModes: repairModes,
-    realSystemState: realSystemState,
+    realSystemState: realSystemState, failedReason: failedReason,
 };
 
 /* ---- run as the boot step or the watcher ---- */
@@ -899,6 +1004,8 @@ module.exports = {
 function runBoot(name) {
     var t = TARGETS[name || 'carplay'];
     if (!t) { log('unknown service ' + name); process.exit(0); }
+    /* Android Auto off (S6): leave before anything of aapd's is read. */
+    if (off(t)) { log(t.name + ' boot check: off (' + aaSwitch.OFF_REASON + '); nothing checked'); process.exit(0); }
     setTimeout(function () {
         log(t.name + ' boot check: out of time after ' + BOOT_BOUND_MS + ' ms; ' + t.name + ' starts as it is');
         setTimeout(function () { process.exit(0); }, BOOT_EXIT_MS - BOOT_BOUND_MS).unref();
@@ -921,7 +1028,10 @@ function runBoot(name) {
  * own counter and acts alone. */
 function runWatcher() {
     var recs = [new Recovery({ target: TARGETS.carplay })];
-    if (exists(TARGETS.aapd.target)) recs.push(new Recovery({ target: TARGETS.aapd }));
+    /* aapd only when the owner turned Android Auto on (S6): with it off its
+     * paths are not even looked at. */
+    if (!off(TARGETS.aapd) && exists(TARGETS.aapd.target)) recs.push(new Recovery({ target: TARGETS.aapd }));
+    else if (off(TARGETS.aapd)) log('aapd is off (' + aaSwitch.OFF_REASON + '): not watched');
     var timer = null;
     var starting = recs.length;
     var stopping = false;
