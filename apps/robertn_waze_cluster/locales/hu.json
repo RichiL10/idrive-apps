@@ -66,6 +66,10 @@
     "Not enough space": "Nincs elég hely",
     "Too large to save": "Túl nagy a mentéshez",
     "Save failed": "Sikertelen mentés",
-    "Waze on cluster": "Waze a műszerfalon"
+    "Waze on cluster": "Waze a műszerfalon",
+    "Confirm": "Megerősítés",
+    "Untested version, press Confirm to patch": "Nem tesztelt verzió, a javításhoz nyomja meg a Megerősítést",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Sikertelen, a CarPlay folyamatosan összeomlik: állítsa vissza kézzel",
+    "Busy, try again in two minutes": "Foglalt, próbálja újra két perc múlva"
   }
 }

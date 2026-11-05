@@ -66,6 +66,10 @@
     "Not enough space": "Za mało miejsca",
     "Too large to save": "Za duże do zapisania",
     "Save failed": "Zapis nieudany",
-    "Waze on cluster": "Waze na zegarach"
+    "Waze on cluster": "Waze na zegarach",
+    "Confirm": "Potwierdź",
+    "Untested version, press Confirm to patch": "Nieprzetestowana wersja, naciśnij Potwierdź, aby zainstalować łatkę",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Niepowodzenie, CarPlay stale się zawiesza: przywróć go ręcznie",
+    "Busy, try again in two minutes": "Zajęte, spróbuj ponownie za dwie minuty"
   }
 }

@@ -66,6 +66,10 @@
     "Not enough space": "Ανεπαρκής χώρος",
     "Too large to save": "Πολύ μεγάλο για αποθήκευση",
     "Save failed": "Η αποθήκευση απέτυχε",
-    "Waze on cluster": "Waze στα όργανα"
+    "Waze on cluster": "Waze στα όργανα",
+    "Confirm": "Επιβεβαίωση",
+    "Untested version, press Confirm to patch": "Μη δοκιμασμένη έκδοση, πατήστε Επιβεβαίωση για εφαρμογή",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Απέτυχε, το CarPlay διακόπτεται συνεχώς: επαναφέρετέ το χειροκίνητα",
+    "Busy, try again in two minutes": "Απασχολημένο, δοκιμάστε ξανά σε δύο λεπτά"
   }
 }

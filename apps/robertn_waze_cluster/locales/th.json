@@ -66,6 +66,10 @@
     "Not enough space": "พื้นที่ไม่พอ",
     "Too large to save": "ใหญ่เกินกว่าจะบันทึก",
     "Save failed": "บันทึกไม่สำเร็จ",
-    "Waze on cluster": "Waze บนหน้าปัด"
+    "Waze on cluster": "Waze บนหน้าปัด",
+    "Confirm": "ยืนยัน",
+    "Untested version, press Confirm to patch": "เวอร์ชันที่ยังไม่ผ่านการทดสอบ กดยืนยันเพื่อติดตั้งแพตช์",
+    "Failed, CarPlay keeps crashing: restore it by hand": "ล้มเหลว CarPlay ขัดข้องซ้ำๆ: กู้คืนด้วยตนเอง",
+    "Busy, try again in two minutes": "ไม่ว่าง ลองใหม่อีกครั้งในอีกสองนาที"
   }
 }

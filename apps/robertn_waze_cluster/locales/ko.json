@@ -66,6 +66,10 @@
     "Not enough space": "공간 부족",
     "Too large to save": "너무 커서 저장 불가",
     "Save failed": "저장 실패",
-    "Waze on cluster": "Waze 계기판 표시"
+    "Waze on cluster": "Waze 계기판 표시",
+    "Confirm": "확인",
+    "Untested version, press Confirm to patch": "검증되지 않은 버전입니다. 패치하려면 확인을 누르세요",
+    "Failed, CarPlay keeps crashing: restore it by hand": "실패, CarPlay가 계속 중단됩니다. 수동으로 복원하세요",
+    "Busy, try again in two minutes": "사용 중입니다. 2분 후에 다시 시도하세요"
   }
 }

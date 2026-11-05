@@ -68,6 +68,10 @@
     "Not enough space": "空间不足",
     "Too large to save": "文件过大，无法保存",
     "Save failed": "保存失败",
-    "Waze on cluster": "Waze 仪表盘显示"
+    "Waze on cluster": "Waze 仪表盘显示",
+    "Confirm": "确认",
+    "Untested version, press Confirm to patch": "未经测试的版本，按“确认”以应用补丁",
+    "Failed, CarPlay keeps crashing: restore it by hand": "失败，CarPlay 持续崩溃：请手动恢复",
+    "Busy, try again in two minutes": "忙碌，请两分钟后重试"
   }
 }

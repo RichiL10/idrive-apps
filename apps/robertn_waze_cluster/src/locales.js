@@ -70,7 +70,11 @@ module.exports = [
    "Not enough space": "المساحة غير كافية",
    "Too large to save": "أكبر من أن يُحفظ",
    "Save failed": "فشل الحفظ",
-   "Waze on cluster": "Waze على لوحة العدادات"
+   "Waze on cluster": "Waze على لوحة العدادات",
+   "Confirm": "تأكيد",
+   "Untested version, press Confirm to patch": "إصدار غير مختبر، اضغط تأكيد للتثبيت",
+   "Failed, CarPlay keeps crashing: restore it by hand": "فشل، يتعطل CarPlay باستمرار: استعده يدويًا",
+   "Busy, try again in two minutes": "مشغول، حاول مرة أخرى بعد دقيقتين"
   }
  },
  {
@@ -142,7 +146,11 @@ module.exports = [
    "Not enough space": "Nedostatek místa",
    "Too large to save": "Příliš velké k uložení",
    "Save failed": "Uložení selhalo",
-   "Waze on cluster": "Waze na přístrojovém štítu"
+   "Waze on cluster": "Waze na přístrojovém štítu",
+   "Confirm": "Potvrdit",
+   "Untested version, press Confirm to patch": "Netestovaná verze, pro záplatu stiskněte Potvrdit",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Selhalo, CarPlay stále padá: obnovte jej ručně",
+   "Busy, try again in two minutes": "Zaneprázdněno, zkuste to znovu za dvě minuty"
   }
  },
  {
@@ -214,7 +222,11 @@ module.exports = [
    "Not enough space": "Ikke nok plads",
    "Too large to save": "For stor til at gemme",
    "Save failed": "Kunne ikke gemme",
-   "Waze on cluster": "Waze i instrumentpanelet"
+   "Waze on cluster": "Waze i instrumentpanelet",
+   "Confirm": "Bekræft",
+   "Untested version, press Confirm to patch": "Ikke testet version, tryk Bekræft for at patche",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Mislykkedes, CarPlay bliver ved med at gå ned: gendan det manuelt",
+   "Busy, try again in two minutes": "Optaget, prøv igen om to minutter"
   }
  },
  {
@@ -286,7 +298,11 @@ module.exports = [
    "Not enough space": "Nicht genug Speicherplatz",
    "Too large to save": "Zu groß zum Speichern",
    "Save failed": "Speichern fehlgeschlagen",
-   "Waze on cluster": "Waze im Kombiinstrument"
+   "Waze on cluster": "Waze im Kombiinstrument",
+   "Confirm": "Bestätigen",
+   "Untested version, press Confirm to patch": "Ungetestete Version, zum Patchen Bestätigen drücken",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Fehlgeschlagen, CarPlay stürzt ständig ab: von Hand wiederherstellen",
+   "Busy, try again in two minutes": "Beschäftigt, in zwei Minuten erneut versuchen"
   }
  },
  {
@@ -358,7 +374,11 @@ module.exports = [
    "Not enough space": "Ανεπαρκής χώρος",
    "Too large to save": "Πολύ μεγάλο για αποθήκευση",
    "Save failed": "Η αποθήκευση απέτυχε",
-   "Waze on cluster": "Waze στα όργανα"
+   "Waze on cluster": "Waze στα όργανα",
+   "Confirm": "Επιβεβαίωση",
+   "Untested version, press Confirm to patch": "Μη δοκιμασμένη έκδοση, πατήστε Επιβεβαίωση για εφαρμογή",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Απέτυχε, το CarPlay διακόπτεται συνεχώς: επαναφέρετέ το χειροκίνητα",
+   "Busy, try again in two minutes": "Απασχολημένο, δοκιμάστε ξανά σε δύο λεπτά"
   }
  },
  {
@@ -430,7 +450,11 @@ module.exports = [
    "Not enough space": "Espacio insuficiente",
    "Too large to save": "Demasiado grande para guardar",
    "Save failed": "Error al guardar",
-   "Waze on cluster": "Waze en el tablero"
+   "Waze on cluster": "Waze en el tablero",
+   "Confirm": "Confirmar",
+   "Untested version, press Confirm to patch": "Versión sin probar, presiona Confirmar para aplicar el parche",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Error, CarPlay se cierra continuamente: restáuralo a mano",
+   "Busy, try again in two minutes": "Ocupado, inténtalo de nuevo en dos minutos"
   }
  },
  {
@@ -502,7 +526,11 @@ module.exports = [
    "Not enough space": "Espacio insuficiente",
    "Too large to save": "Demasiado grande para guardar",
    "Save failed": "Error al guardar",
-   "Waze on cluster": "Waze en el cuadro"
+   "Waze on cluster": "Waze en el cuadro",
+   "Confirm": "Confirmar",
+   "Untested version, press Confirm to patch": "Versión sin probar, pulsa Confirmar para aplicar el parche",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Error, CarPlay se cierra continuamente: restáuralo a mano",
+   "Busy, try again in two minutes": "Ocupado, inténtalo de nuevo en dos minutos"
   }
  },
  {
@@ -574,7 +602,11 @@ module.exports = [
    "Not enough space": "Tila ei riitä",
    "Too large to save": "Liian suuri tallennettavaksi",
    "Save failed": "Tallennus epäonnistui",
-   "Waze on cluster": "Waze mittaristossa"
+   "Waze on cluster": "Waze mittaristossa",
+   "Confirm": "Vahvista",
+   "Untested version, press Confirm to patch": "Testaamaton versio, korjaa painamalla Vahvista",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Epäonnistui, CarPlay kaatuu jatkuvasti: palauta se käsin",
+   "Busy, try again in two minutes": "Varattu, yritä uudelleen kahden minuutin kuluttua"
   }
  },
  {
@@ -646,7 +678,11 @@ module.exports = [
    "Not enough space": "Espace insuffisant",
    "Too large to save": "Trop volumineux pour être enregistré",
    "Save failed": "Échec de l'enregistrement",
-   "Waze on cluster": "Waze au combiné"
+   "Waze on cluster": "Waze au combiné",
+   "Confirm": "Confirmer",
+   "Untested version, press Confirm to patch": "Version non testée, appuyez sur Confirmer pour appliquer le correctif",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Échec, CarPlay plante en boucle : restaurez-le à la main",
+   "Busy, try again in two minutes": "Occupé, réessayez dans deux minutes"
   }
  },
  {
@@ -718,7 +754,11 @@ module.exports = [
    "Not enough space": "Espace insuffisant",
    "Too large to save": "Trop volumineux pour être enregistré",
    "Save failed": "Échec de l'enregistrement",
-   "Waze on cluster": "Waze au combiné"
+   "Waze on cluster": "Waze au combiné",
+   "Confirm": "Confirmer",
+   "Untested version, press Confirm to patch": "Version non testée, appuyez sur Confirmer pour appliquer le correctif",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Échec, CarPlay plante en boucle : restaurez-le à la main",
+   "Busy, try again in two minutes": "Occupé, réessayez dans deux minutes"
   }
  },
  {
@@ -790,7 +830,11 @@ module.exports = [
    "Not enough space": "אין מספיק מקום",
    "Too large to save": "גדול מדי לשמירה",
    "Save failed": "השמירה נכשלה",
-   "Waze on cluster": "Waze בלוח המחוונים"
+   "Waze on cluster": "Waze בלוח המחוונים",
+   "Confirm": "אישור",
+   "Untested version, press Confirm to patch": "גרסה שלא נבדקה, לחצו אישור להתקנת התיקון",
+   "Failed, CarPlay keeps crashing: restore it by hand": "נכשל, CarPlay קורס שוב ושוב: שחזרו אותו ידנית",
+   "Busy, try again in two minutes": "תפוס, נסו שוב בעוד שתי דקות"
   }
  },
  {
@@ -862,7 +906,11 @@ module.exports = [
    "Not enough space": "Nincs elég hely",
    "Too large to save": "Túl nagy a mentéshez",
    "Save failed": "Sikertelen mentés",
-   "Waze on cluster": "Waze a műszerfalon"
+   "Waze on cluster": "Waze a műszerfalon",
+   "Confirm": "Megerősítés",
+   "Untested version, press Confirm to patch": "Nem tesztelt verzió, a javításhoz nyomja meg a Megerősítést",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Sikertelen, a CarPlay folyamatosan összeomlik: állítsa vissza kézzel",
+   "Busy, try again in two minutes": "Foglalt, próbálja újra két perc múlva"
   }
  },
  {
@@ -934,7 +982,11 @@ module.exports = [
    "Not enough space": "Ruang tidak cukup",
    "Too large to save": "Terlalu besar untuk disimpan",
    "Save failed": "Gagal menyimpan",
-   "Waze on cluster": "Waze di panel instrumen"
+   "Waze on cluster": "Waze di panel instrumen",
+   "Confirm": "Konfirmasi",
+   "Untested version, press Confirm to patch": "Versi belum diuji, tekan Konfirmasi untuk memasang patch",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Gagal, CarPlay terus mogok: pulihkan secara manual",
+   "Busy, try again in two minutes": "Sibuk, coba lagi dalam dua menit"
   }
  },
  {
@@ -1006,7 +1058,11 @@ module.exports = [
    "Not enough space": "Spazio insufficiente",
    "Too large to save": "Troppo grande da salvare",
    "Save failed": "Salvataggio non riuscito",
-   "Waze on cluster": "Waze sul quadro"
+   "Waze on cluster": "Waze sul quadro",
+   "Confirm": "Conferma",
+   "Untested version, press Confirm to patch": "Versione non testata, premi Conferma per applicare la patch",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Non riuscito, CarPlay va in crash di continuo: ripristinalo a mano",
+   "Busy, try again in two minutes": "Occupato, riprova tra due minuti"
   }
  },
  {
@@ -1078,7 +1134,11 @@ module.exports = [
    "Not enough space": "空き容量不足",
    "Too large to save": "サイズが大きすぎて保存不可",
    "Save failed": "保存に失敗",
-   "Waze on cluster": "Waze メーター表示"
+   "Waze on cluster": "Waze メーター表示",
+   "Confirm": "確認",
+   "Untested version, press Confirm to patch": "未検証のバージョンです。パッチを適用するには確認を押してください",
+   "Failed, CarPlay keeps crashing: restore it by hand": "失敗、CarPlayが繰り返し停止します。手動で復元してください",
+   "Busy, try again in two minutes": "使用中です。2分後にもう一度お試しください"
   }
  },
  {
@@ -1150,7 +1210,11 @@ module.exports = [
    "Not enough space": "공간 부족",
    "Too large to save": "너무 커서 저장 불가",
    "Save failed": "저장 실패",
-   "Waze on cluster": "Waze 계기판 표시"
+   "Waze on cluster": "Waze 계기판 표시",
+   "Confirm": "확인",
+   "Untested version, press Confirm to patch": "검증되지 않은 버전입니다. 패치하려면 확인을 누르세요",
+   "Failed, CarPlay keeps crashing: restore it by hand": "실패, CarPlay가 계속 중단됩니다. 수동으로 복원하세요",
+   "Busy, try again in two minutes": "사용 중입니다. 2분 후에 다시 시도하세요"
   }
  },
  {
@@ -1222,7 +1286,11 @@ module.exports = [
    "Not enough space": "Ikke nok plass",
    "Too large to save": "For stor til å lagres",
    "Save failed": "Lagring mislyktes",
-   "Waze on cluster": "Waze i instrumentpanelet"
+   "Waze on cluster": "Waze i instrumentpanelet",
+   "Confirm": "Bekreft",
+   "Untested version, press Confirm to patch": "Utestet versjon, trykk Bekreft for å legge på patchen",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Mislyktes, CarPlay krasjer hele tiden: gjenopprett det manuelt",
+   "Busy, try again in two minutes": "Opptatt, prøv igjen om to minutter"
   }
  },
  {
@@ -1296,7 +1364,11 @@ module.exports = [
    "Not enough space": "Niet genoeg ruimte",
    "Too large to save": "Te groot om op te slaan",
    "Save failed": "Opslaan mislukt",
-   "Waze on cluster": "Waze in instrumentpaneel"
+   "Waze on cluster": "Waze in instrumentpaneel",
+   "Confirm": "Bevestigen",
+   "Untested version, press Confirm to patch": "Niet geteste versie, druk op Bevestigen om te patchen",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Mislukt, CarPlay crasht steeds: herstel het handmatig",
+   "Busy, try again in two minutes": "Bezet, probeer het over twee minuten opnieuw"
   }
  },
  {
@@ -1368,7 +1440,11 @@ module.exports = [
    "Not enough space": "Za mało miejsca",
    "Too large to save": "Za duże do zapisania",
    "Save failed": "Zapis nieudany",
-   "Waze on cluster": "Waze na zegarach"
+   "Waze on cluster": "Waze na zegarach",
+   "Confirm": "Potwierdź",
+   "Untested version, press Confirm to patch": "Nieprzetestowana wersja, naciśnij Potwierdź, aby zainstalować łatkę",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Niepowodzenie, CarPlay stale się zawiesza: przywróć go ręcznie",
+   "Busy, try again in two minutes": "Zajęte, spróbuj ponownie za dwie minuty"
   }
  },
  {
@@ -1440,7 +1516,11 @@ module.exports = [
    "Not enough space": "Espaço insuficiente",
    "Too large to save": "Grande demais para salvar",
    "Save failed": "Falha ao salvar",
-   "Waze on cluster": "Waze no painel"
+   "Waze on cluster": "Waze no painel",
+   "Confirm": "Confirmar",
+   "Untested version, press Confirm to patch": "Versão não testada, pressione Confirmar para aplicar o patch",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Falhou, o CarPlay trava continuamente: restaure-o manualmente",
+   "Busy, try again in two minutes": "Ocupado, tente novamente em dois minutos"
   }
  },
  {
@@ -1512,7 +1592,11 @@ module.exports = [
    "Not enough space": "Espaço insuficiente",
    "Too large to save": "Demasiado grande para guardar",
    "Save failed": "Falha ao guardar",
-   "Waze on cluster": "Waze no quadrante"
+   "Waze on cluster": "Waze no quadrante",
+   "Confirm": "Confirmar",
+   "Untested version, press Confirm to patch": "Versão não testada, prima Confirmar para aplicar a correção",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Falhou, o CarPlay bloqueia continuamente: restaure-o manualmente",
+   "Busy, try again in two minutes": "Ocupado, tente novamente dentro de dois minutos"
   }
  },
  {
@@ -1584,7 +1668,11 @@ module.exports = [
    "Not enough space": "Spațiu insuficient",
    "Too large to save": "Prea mare pentru salvare",
    "Save failed": "Salvare eșuată",
-   "Waze on cluster": "Waze pe bord"
+   "Waze on cluster": "Waze pe bord",
+   "Confirm": "Confirmă",
+   "Untested version, press Confirm to patch": "Versiune netestată, apasă Confirmă pentru a aplica patch-ul",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Eșuat, CarPlay se oprește mereu: restaurează-l manual",
+   "Busy, try again in two minutes": "Ocupat, încearcă din nou peste două minute"
   }
  },
  {
@@ -1656,7 +1744,11 @@ module.exports = [
    "Not enough space": "Недостаточно места",
    "Too large to save": "Слишком большой размер",
    "Save failed": "Ошибка сохранения",
-   "Waze on cluster": "Waze на приборах"
+   "Waze on cluster": "Waze на приборах",
+   "Confirm": "Подтвердить",
+   "Untested version, press Confirm to patch": "Непроверенная версия, нажмите Подтвердить для установки патча",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Сбой, CarPlay постоянно падает: восстановите его вручную",
+   "Busy, try again in two minutes": "Занято, повторите через две минуты"
   }
  },
  {
@@ -1728,7 +1820,11 @@ module.exports = [
    "Not enough space": "Nedostatok miesta",
    "Too large to save": "Príliš veľké na uloženie",
    "Save failed": "Uloženie zlyhalo",
-   "Waze on cluster": "Waze na prístrojovke"
+   "Waze on cluster": "Waze na prístrojovke",
+   "Confirm": "Potvrdiť",
+   "Untested version, press Confirm to patch": "Netestovaná verzia, na záplatu stlačte Potvrdiť",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Zlyhalo, CarPlay stále padá: obnovte ho ručne",
+   "Busy, try again in two minutes": "Zaneprázdnené, skúste to znova o dve minúty"
   }
  },
  {
@@ -1800,7 +1896,11 @@ module.exports = [
    "Not enough space": "Premalo prostora",
    "Too large to save": "Preveliko za shranjevanje",
    "Save failed": "Shranjevanje ni uspelo",
-   "Waze on cluster": "Waze na armaturi"
+   "Waze on cluster": "Waze na armaturi",
+   "Confirm": "Potrdi",
+   "Untested version, press Confirm to patch": "Nepreizkušena različica, za popravek pritisnite Potrdi",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Ni uspelo, CarPlay se stalno zruši: obnovite ga ročno",
+   "Busy, try again in two minutes": "Zasedeno, poskusite znova čez dve minuti"
   }
  },
  {
@@ -1872,7 +1972,11 @@ module.exports = [
    "Not enough space": "Inte tillräckligt med utrymme",
    "Too large to save": "För stor för att sparas",
    "Save failed": "Sparandet misslyckades",
-   "Waze on cluster": "Waze i kombiinstrumentet"
+   "Waze on cluster": "Waze i kombiinstrumentet",
+   "Confirm": "Bekräfta",
+   "Untested version, press Confirm to patch": "Otestad version, tryck på Bekräfta för att patcha",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Misslyckades, CarPlay kraschar hela tiden: återställ det manuellt",
+   "Busy, try again in two minutes": "Upptaget, försök igen om två minuter"
   }
  },
  {
@@ -1944,7 +2048,11 @@ module.exports = [
    "Not enough space": "พื้นที่ไม่พอ",
    "Too large to save": "ใหญ่เกินกว่าจะบันทึก",
    "Save failed": "บันทึกไม่สำเร็จ",
-   "Waze on cluster": "Waze บนหน้าปัด"
+   "Waze on cluster": "Waze บนหน้าปัด",
+   "Confirm": "ยืนยัน",
+   "Untested version, press Confirm to patch": "เวอร์ชันที่ยังไม่ผ่านการทดสอบ กดยืนยันเพื่อติดตั้งแพตช์",
+   "Failed, CarPlay keeps crashing: restore it by hand": "ล้มเหลว CarPlay ขัดข้องซ้ำๆ: กู้คืนด้วยตนเอง",
+   "Busy, try again in two minutes": "ไม่ว่าง ลองใหม่อีกครั้งในอีกสองนาที"
   }
  },
  {
@@ -2016,7 +2124,11 @@ module.exports = [
    "Not enough space": "Yeterli alan yok",
    "Too large to save": "Kaydetmek için çok büyük",
    "Save failed": "Kaydedilemedi",
-   "Waze on cluster": "Waze göstergede"
+   "Waze on cluster": "Waze göstergede",
+   "Confirm": "Onayla",
+   "Untested version, press Confirm to patch": "Test edilmemiş sürüm, yama için Onayla düğmesine basın",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Başarısız, CarPlay sürekli çöküyor: elle geri yükleyin",
+   "Busy, try again in two minutes": "Meşgul, iki dakika sonra tekrar deneyin"
   }
  },
  {
@@ -2088,7 +2200,11 @@ module.exports = [
    "Not enough space": "Недостатньо місця",
    "Too large to save": "Завеликий розмір",
    "Save failed": "Помилка збереження",
-   "Waze on cluster": "Waze на приладах"
+   "Waze on cluster": "Waze на приладах",
+   "Confirm": "Підтвердити",
+   "Untested version, press Confirm to patch": "Неперевірена версія, натисніть Підтвердити для встановлення патча",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Збій, CarPlay постійно падає: відновіть його вручну",
+   "Busy, try again in two minutes": "Зайнято, повторіть через дві хвилини"
   }
  },
  {
@@ -2160,7 +2276,11 @@ module.exports = [
    "Not enough space": "Không đủ dung lượng",
    "Too large to save": "Quá lớn để lưu",
    "Save failed": "Lưu thất bại",
-   "Waze on cluster": "Waze trên bảng đồng hồ"
+   "Waze on cluster": "Waze trên bảng đồng hồ",
+   "Confirm": "Xác nhận",
+   "Untested version, press Confirm to patch": "Phiên bản chưa được kiểm thử, nhấn Xác nhận để vá",
+   "Failed, CarPlay keeps crashing: restore it by hand": "Thất bại, CarPlay liên tục bị lỗi: hãy khôi phục thủ công",
+   "Busy, try again in two minutes": "Đang bận, hãy thử lại sau hai phút"
   }
  },
  {
@@ -2234,7 +2354,11 @@ module.exports = [
    "Not enough space": "空间不足",
    "Too large to save": "文件过大，无法保存",
    "Save failed": "保存失败",
-   "Waze on cluster": "Waze 仪表盘显示"
+   "Waze on cluster": "Waze 仪表盘显示",
+   "Confirm": "确认",
+   "Untested version, press Confirm to patch": "未经测试的版本，按“确认”以应用补丁",
+   "Failed, CarPlay keeps crashing: restore it by hand": "失败，CarPlay 持续崩溃：请手动恢复",
+   "Busy, try again in two minutes": "忙碌，请两分钟后重试"
   }
  },
  {
@@ -2308,7 +2432,11 @@ module.exports = [
    "Not enough space": "空間不足",
    "Too large to save": "檔案過大，無法儲存",
    "Save failed": "儲存失敗",
-   "Waze on cluster": "Waze 儀表板顯示"
+   "Waze on cluster": "Waze 儀表板顯示",
+   "Confirm": "確認",
+   "Untested version, press Confirm to patch": "未經測試的版本，按「確認」以套用修補",
+   "Failed, CarPlay keeps crashing: restore it by hand": "失敗，CarPlay 持續當機：請手動還原",
+   "Busy, try again in two minutes": "忙碌中，請兩分鐘後重試"
   }
  }
 ];

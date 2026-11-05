@@ -66,6 +66,10 @@
     "Not enough space": "אין מספיק מקום",
     "Too large to save": "גדול מדי לשמירה",
     "Save failed": "השמירה נכשלה",
-    "Waze on cluster": "Waze בלוח המחוונים"
+    "Waze on cluster": "Waze בלוח המחוונים",
+    "Confirm": "אישור",
+    "Untested version, press Confirm to patch": "גרסה שלא נבדקה, לחצו אישור להתקנת התיקון",
+    "Failed, CarPlay keeps crashing: restore it by hand": "נכשל, CarPlay קורס שוב ושוב: שחזרו אותו ידנית",
+    "Busy, try again in two minutes": "תפוס, נסו שוב בעוד שתי דקות"
   }
 }

@@ -629,7 +629,7 @@ test('Android Auto: its line per state; Patch, Remove patch and zoom only where 
         [{ state: 'unknown', pending: 'revert', aapd: 'deferred', density: 180 }, 'Status: Removed after restart', [false, false, false, false]],
         [{ state: 'busy', reason: 'applying', density: 180 }, 'Status: Patching…', [false, false, false, false]],
         [{ state: 'busy', reason: 'reverting', density: 180 }, 'Status: Removing patch…', [false, false, false, false]],
-        [{ state: 'error', reason: 'another change to / is running; try again', density: 180 }, 'Status: Failed', [true, true, false, false]],
+        [{ state: 'error', reason: 'another change to / is running; try again', density: 180 }, 'Status: Busy, try again in two minutes', [true, true, false, false]],
         [{ state: 'patched', dpi: 180, diskCard: 'shown', density: 170, densities: D, error: 'Command failed' }, 'Status: Failed', [false, true, true, true]],
         [{ state: 'original', density: 180, conflict: 'aapd was modified by something else' }, 'Status: Changed by another tool', [false, false, false, false]],
         [{ state: 'unknown', density: 180, conflict: 'aapd status unreadable: Error: Command failed: …' }, 'Status: Unavailable', [false, true, false, false]],
@@ -945,6 +945,185 @@ test('logs: Save logs saves once, then lists the archive; the address and QR tex
         await logs.close();
         try { fs.unlinkSync(LSOCK); } catch (e) { /* gone */ }
     }
+});
+
+/* ---- Kiro test build, S10: the safeguards of patchd (S2, S3, S4, S6) as the app shows them ---- */
+const UNTESTED = 'untested carplay build';
+
+test('an untested CarPlay build: Patch asks to confirm, only the confirmed press sends unproven', async (render, patch) => {
+    patch.unproven = true;
+    patch.conflict = UNTESTED;
+    const c = new WazeClusterControl({ renderPath: RSOCK, patchPath: PSOCK, pendingPath: PENDING, retryMs: 100, confirmMinMs: 200 });
+    c.open();
+    await until('unproven', () => c.connectedPatch() && c.needsConfirm());
+    assert.strictEqual(c.statusText(), 'Status: Untested version', 'before the first press: the conflict');
+    assert.strictEqual(c.enableButtonText(), 'Patch');
+    assert(c.canEnable(), 'the button is offered');
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), 'Confirm', 'the first press only asks');
+    assert.strictEqual(c.statusText(), 'Status: Untested version, press Confirm to patch');
+    await sleep(50);
+    assert.strictEqual(patch.count('apply'), 0, 'nothing sent by the first press');
+    c.enableMap();   /* inside the minimum: a doubled event or a bounce */
+    await sleep(50);
+    assert.strictEqual(patch.count('apply'), 0, 'a confirming press too soon is ignored');
+    assert.strictEqual(c.enableButtonText(), 'Confirm', 'and the question stays open');
+    await sleep(200);
+    c.enableMap();
+    await until('applied', () => patch.count('apply') === 1);
+    assert.deepStrictEqual(patch.received.filter((m) => m.cmd === 'apply'), [{ cmd: 'apply', panel: 'high', mode: 'avb', unproven: true }]);
+    assert.strictEqual(c.enableButtonText(), 'Patch', 'the step is over once the press went out');
+    await until('patched', () => c.statusText() === 'Status: Patched');
+    assert.strictEqual(c.needsConfirm(), false, 'patched: our backup exists, nothing to confirm');
+    c.close();
+});
+
+test('an untested CarPlay build: the default minimum between the two presses is a second', async (render, patch) => {
+    patch.unproven = true;
+    patch.conflict = UNTESTED;
+    const c = control();
+    c.open();
+    await until('unproven', () => c.connectedPatch() && c.needsConfirm());
+    c.enableMap();
+    c.enableMap();
+    await sleep(100);
+    c.enableMap();
+    await sleep(100);
+    assert.strictEqual(patch.count('apply'), 0, 'presses inside 1000 ms of the first send nothing');
+    assert.strictEqual(c.enableButtonText(), 'Confirm');
+    c.close();
+});
+
+test('an untested CarPlay build: the confirm step lapses by time', async (render, patch) => {
+    patch.unproven = true;
+    patch.conflict = UNTESTED;
+    const c = new WazeClusterControl({ renderPath: RSOCK, patchPath: PSOCK, pendingPath: PENDING, retryMs: 100, confirmMs: 100 });
+    c.open();
+    await until('unproven', () => c.connectedPatch() && c.needsConfirm());
+    let changes = 0;
+    c.on('change', () => { changes += 1; });
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), 'Confirm');
+    await until('lapsed', () => c.enableButtonText() === 'Patch');
+    assert.strictEqual(c.statusText(), 'Status: Untested version');
+    assert(changes >= 2, 'the page is told when it lapses');
+    assert.strictEqual(patch.count('apply'), 0, 'a lapsed question sends nothing');
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), 'Confirm', 'the next press asks again');
+    c.close();
+});
+
+test('an untested CarPlay build: a status that is no longer unproven ends the step; a proven build never asks', async (render, patch) => {
+    patch.unproven = true;
+    patch.conflict = UNTESTED;
+    const c = control();
+    c.open();
+    await until('unproven', () => c.connectedPatch() && c.needsConfirm());
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), 'Confirm');
+    patch.unproven = false;
+    patch.conflict = null;
+    patch.announce('original', null, null);
+    await until('status ended it', () => c.enableButtonText() === 'Patch' && !c.needsConfirm());
+    assert.strictEqual(c.statusText(), 'Status: Not patched');
+    /* the plain press applies at once, without unproven */
+    c.enableMap();
+    await until('plain apply', () => patch.count('apply') === 1);
+    assert.deepStrictEqual(patch.received.filter((m) => m.cmd === 'apply'), [{ cmd: 'apply', panel: 'high', mode: 'avb' }]);
+    c.close();
+});
+
+test('an untested CarPlay build: closing the page drops the confirm step', async (render, patch) => {
+    patch.unproven = true;
+    patch.conflict = UNTESTED;
+    const c = control();
+    c.open();
+    await until('unproven', () => c.connectedPatch() && c.needsConfirm());
+    c.enableMap();
+    assert.strictEqual(c.enableButtonText(), 'Confirm');
+    c.close();
+    assert.strictEqual(c.enableButtonText(), 'Patch');
+    c.open();
+    await until('reopened', () => c.connectedPatch() && c.needsConfirm());
+    assert.strictEqual(c.enableButtonText(), 'Patch', 'a reopened page asks nothing until pressed');
+    c.close();
+});
+
+test('boot recovery marked the patch failed: the status line says so, whatever the patch state', async (render, patch) => {
+    patch.failed = 'carplay crashed 3 times with the map patch and cannot be restored automatically';
+    const c = control();
+    c.open();
+    const FAILED = 'Status: Failed, CarPlay keeps crashing: restore it by hand';
+    await until('failed', () => c.statusText() === FAILED);
+    patch.announce('patched', 'high', null);
+    await until('failed, patched', () => c.patchStatus.state === 'patched');
+    assert.strictEqual(c.statusText(), FAILED);
+    patch.announce('unknown', null, 'self-start edit missing');
+    await until('failed, unknown', () => c.patchStatus.state === 'unknown');
+    assert.strictEqual(c.statusText(), FAILED);
+    patch.failed = null;
+    patch.announce('original', null, null);
+    await until('mark gone', () => c.statusText() === 'Status: Not patched');
+    c.close();
+});
+
+test('the shared remount lock stayed held: a busy line, other errors stay Failed, Android Auto the same', async (render, patch) => {
+    const LOCK = 'another change to / is running (a boot-recovery restore or another write); nothing changed, try again in two minutes';
+    const c = control();
+    c.open();
+    await until('connected', () => c.connectedPatch());
+    patch._broadcast(Object.assign(patch._status(), { state: 'error', reason: LOCK }));
+    await until('lock busy', () => c.statusText() === 'Status: Busy, try again in two minutes');
+    patch._broadcast(Object.assign(patch._status(), { state: 'error', reason: 'carplay restart failed' }));
+    await until('failed', () => c.statusText() === 'Status: Failed');
+    patch.aa = { state: 'error', reason: LOCK, error: LOCK, density: 180, densities: [150, 400, 10] };
+    patch.announce('original', null, null);
+    await until('aa lock busy', () => c.aaStatusText() === 'Status: Busy, try again in two minutes');
+    patch.aa = { state: 'error', reason: 'Command failed', error: 'Command failed', density: 180, densities: [150, 400, 10] };
+    patch.announce('original', null, null);
+    await until('aa failed', () => c.aaStatusText() === 'Status: Failed');
+    c.close();
+});
+
+test('Android Auto off (aa_enabled = 0): the section reads Off, nothing is offered or sent; a daemon without the key is on', async (render, patch) => {
+    patch.aa = { enabled: false, state: 'off', reason: 'Android Auto is off', conflict: null, dpi: null, density: 180, card: 'shown',
+        densities: [150, 400, 10] };
+    const c = control();
+    c.open();
+    await until('aa off', () => c.connectedPatch() && c.aa() && c.aaStatusText() === 'Status: Off');
+    assert.strictEqual(c.aaEnabled(), false);
+    assert.deepStrictEqual([c.canEnableAa(), c.canDisableAa(), c.canZoom(-ZOOM_STEP), c.canZoom(ZOOM_STEP), c.canToggleCard()],
+        [false, false, false, false, false], 'every Android Auto control is greyed');
+    c.enableAa();
+    c.disableAa();
+    c.zoom(ZOOM_STEP);
+    c.toggleCard();
+    await sleep(50);
+    assert.deepStrictEqual(patch.received.filter((m) => /^aa-/.test(m.cmd)), [], 'no aa-* command goes out');
+    assert.strictEqual(c.mapText(), 'Cluster map: Off', 'and it does not count as a patch in effect');
+    /* CarPlay's side is unaffected */
+    assert.strictEqual(c.statusText(), 'Status: Not patched');
+    assert.strictEqual(c.canEnable(), true);
+    /* turned on in the conf: the section works as before */
+    patch.aa = { enabled: true, state: 'original', density: 180, densities: [150, 400, 10] };
+    patch.announce('original', null, null);
+    await until('aa on', () => c.aaStatusText() === 'Status: Not patched');
+    assert.strictEqual(c.aaEnabled(), true);
+    assert.strictEqual(c.canEnableAa(), true);
+    /* an older daemon says nothing: on */
+    patch.aa = { state: 'original', density: 180, densities: [150, 400, 10] };
+    patch.announce('original', null, null);
+    await until('aa without the key', () => !('enabled' in c.aa()));
+    assert.strictEqual(c.aaEnabled(), true);
+    c.close();
+});
+
+test('the new texts carry no em dash, no emoji and no line break', async () => {
+    const { t } = require('../src/i18n.js');
+    ['Confirm', 'Untested version, press Confirm to patch', 'Failed, CarPlay keeps crashing: restore it by hand',
+        'Busy, try again in two minutes'].forEach((w) => {
+        assert(!/[\u2014\u2013\n\r]/.test(t(w)) && !/[\u2190-\u21FF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]|[\uD83C-\uD83E]/.test(t(w)), w);
+    });
 });
 
 async function main() {

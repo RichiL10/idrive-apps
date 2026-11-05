@@ -447,7 +447,7 @@ class WazeClusterApp extends OnlineApp {
             return;
         }
         const c = this._control;
-        [[ENABLE_NAME, t('Patch')], [DISABLE_NAME, t('Remove patch')], [AA_ENABLE_NAME, t('Patch')], [AA_DISABLE_NAME, t('Remove patch')],
+        [[ENABLE_NAME, c.enableButtonText()], [DISABLE_NAME, t('Remove patch')], [AA_ENABLE_NAME, t('Patch')], [AA_DISABLE_NAME, t('Remove patch')],
             [AA_ZOOM_OUT_NAME, t('Zoom out')], [AA_ZOOM_IN_NAME, t('Zoom in')], [HEAD_GENERAL_NAME, t('General')], [LOGS_NAME, t('Logs')],
             [RESTART_NAME, t('Restart head unit')]].forEach(([name, text]) => this._write(name, text));
         this._write(STATUS_NAME, c.statusText());

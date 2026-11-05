@@ -66,6 +66,10 @@
     "Not enough space": "Ruang tidak cukup",
     "Too large to save": "Terlalu besar untuk disimpan",
     "Save failed": "Gagal menyimpan",
-    "Waze on cluster": "Waze di panel instrumen"
+    "Waze on cluster": "Waze di panel instrumen",
+    "Confirm": "Konfirmasi",
+    "Untested version, press Confirm to patch": "Versi belum diuji, tekan Konfirmasi untuk memasang patch",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Gagal, CarPlay terus mogok: pulihkan secara manual",
+    "Busy, try again in two minutes": "Sibuk, coba lagi dalam dua menit"
   }
 }

@@ -66,6 +66,10 @@
     "Not enough space": "Tila ei riitä",
     "Too large to save": "Liian suuri tallennettavaksi",
     "Save failed": "Tallennus epäonnistui",
-    "Waze on cluster": "Waze mittaristossa"
+    "Waze on cluster": "Waze mittaristossa",
+    "Confirm": "Vahvista",
+    "Untested version, press Confirm to patch": "Testaamaton versio, korjaa painamalla Vahvista",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Epäonnistui, CarPlay kaatuu jatkuvasti: palauta se käsin",
+    "Busy, try again in two minutes": "Varattu, yritä uudelleen kahden minuutin kuluttua"
   }
 }

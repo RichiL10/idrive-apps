@@ -66,6 +66,10 @@
     "Not enough space": "Không đủ dung lượng",
     "Too large to save": "Quá lớn để lưu",
     "Save failed": "Lưu thất bại",
-    "Waze on cluster": "Waze trên bảng đồng hồ"
+    "Waze on cluster": "Waze trên bảng đồng hồ",
+    "Confirm": "Xác nhận",
+    "Untested version, press Confirm to patch": "Phiên bản chưa được kiểm thử, nhấn Xác nhận để vá",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Thất bại, CarPlay liên tục bị lỗi: hãy khôi phục thủ công",
+    "Busy, try again in two minutes": "Đang bận, hãy thử lại sau hai phút"
   }
 }

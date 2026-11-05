@@ -66,6 +66,10 @@
     "Not enough space": "Inte tillräckligt med utrymme",
     "Too large to save": "För stor för att sparas",
     "Save failed": "Sparandet misslyckades",
-    "Waze on cluster": "Waze i kombiinstrumentet"
+    "Waze on cluster": "Waze i kombiinstrumentet",
+    "Confirm": "Bekräfta",
+    "Untested version, press Confirm to patch": "Otestad version, tryck på Bekräfta för att patcha",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Misslyckades, CarPlay kraschar hela tiden: återställ det manuellt",
+    "Busy, try again in two minutes": "Upptaget, försök igen om två minuter"
   }
 }

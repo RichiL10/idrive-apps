@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.8
+
+Kiro test build (not an upstream release; see KIRO-NOTES.md). Upstream 0.5.7
+plus the app side of the Kiro safeguards S3, S4, S6 and S2:
+
+- On a CarPlay build outside the patcher's proven list, the Patch button
+  first asks to be confirmed: the button reads `Confirm` and the Status row
+  `Untested version, press Confirm to patch`, for 15 s. Only the confirming
+  press sends `unproven:true`; a confirming press less than 1 s after the
+  first is ignored. The question lapses with its time, a status that no
+  longer calls the build untested, and closing the page.
+- When boot recovery marked the patch failed, Status reads `Failed, CarPlay
+  keeps crashing: restore it by hand`.
+- When a change could not take the shared remount lock, Status reads `Busy,
+  try again in two minutes` (nothing was changed).
+- With Android Auto off (`aa_enabled = 0`, the default), the Android Auto
+  section is greyed out and reads `Off`.
+
+Requires waze-on-cluster 0.8.9.
+
 ## 0.5.7
 
 The map's capture starts at boot after the head unit's media bus is up,

@@ -186,6 +186,8 @@ class FakePatch extends LineServer {
         this.pending = null;  /* 'apply' | 'revert': the change waiting for a head-unit start */
         this.conflict = null; /* why the install left carplay as it was */
         this.recovered = null; /* boot recovery removed the patch after that many failed starts */
+        this.unproven = false; /* a carplay build outside the proven list, not patched yet */
+        this.failed = null;    /* boot recovery marked the patch failed: its reason */
         this.busy = false;
         this.reason = null;
         this.aa = { state: 'original', density: 180, densities: [150, 400, 10] };   /* Android Auto's patch */
@@ -208,11 +210,18 @@ class FakePatch extends LineServer {
     }
 
     _status() {
-        return { ev: 'status', state: this.busy ? 'busy' : this.state, panel: this.panel,
+        const s = { ev: 'status', state: this.busy ? 'busy' : this.state, panel: this.panel,
             res: this.res, safe: this.safe, carplay: this.carplay, reason: this.reason,
             pending: this.pending, conflict: this.conflict, recovered: this.recovered, aa: this.aa,
             busy: this.busy ? 'carplay' : this.aa.state === 'busy' ? 'aa' : this._rebooting ? 'restart' : null,
             restart: this.restart };
+        if (this.unproven) {
+            s.unproven = true;
+        }
+        if (this.failed) {
+            s.failed = this.failed;
+        }
+        return s;
     }
 
     _onConnect(socket) {
@@ -256,6 +265,12 @@ class FakePatch extends LineServer {
             this._send(socket, { ev: 'refused', cmd: msg.cmd, reason: 'another operation is running' });
             return;
         }
+        if (msg.cmd === 'apply' && this.unproven && msg.unproven !== true) {
+            /* patchd: a build outside the proven list needs the confirmation */
+            this._broadcast(Object.assign(this._status(), { state: 'error',
+                reason: 'untested carplay build: Enable map needs your confirmation; nothing changed' }));
+            return;
+        }
         clearTimeout(this._timer);
         if (/^aa-/.test(msg.cmd)) {
             const density = msg.cmd === 'aa-density' ? msg.value : this.aa.density;
@@ -274,6 +289,7 @@ class FakePatch extends LineServer {
             if (this.holdAa) this.releaseAa = finish;
             else this._timer = setTimeout(finish, STEP_MS);
         } else if (msg.cmd === 'apply') {
+            this.unproven = false;   /* patched: our backup exists */
             this.busy = true;
             this.reason = 'applying IC_' + String(msg.panel).toUpperCase();
             this.log(this.reason);

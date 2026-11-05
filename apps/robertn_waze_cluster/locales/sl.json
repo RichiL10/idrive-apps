@@ -66,6 +66,10 @@
     "Not enough space": "Premalo prostora",
     "Too large to save": "Preveliko za shranjevanje",
     "Save failed": "Shranjevanje ni uspelo",
-    "Waze on cluster": "Waze na armaturi"
+    "Waze on cluster": "Waze na armaturi",
+    "Confirm": "Potrdi",
+    "Untested version, press Confirm to patch": "Nepreizkušena različica, za popravek pritisnite Potrdi",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Ni uspelo, CarPlay se stalno zruši: obnovite ga ročno",
+    "Busy, try again in two minutes": "Zasedeno, poskusite znova čez dve minuti"
   }
 }

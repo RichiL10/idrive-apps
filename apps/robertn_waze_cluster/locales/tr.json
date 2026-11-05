@@ -66,6 +66,10 @@
     "Not enough space": "Yeterli alan yok",
     "Too large to save": "Kaydetmek için çok büyük",
     "Save failed": "Kaydedilemedi",
-    "Waze on cluster": "Waze göstergede"
+    "Waze on cluster": "Waze göstergede",
+    "Confirm": "Onayla",
+    "Untested version, press Confirm to patch": "Test edilmemiş sürüm, yama için Onayla düğmesine basın",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Başarısız, CarPlay sürekli çöküyor: elle geri yükleyin",
+    "Busy, try again in two minutes": "Meşgul, iki dakika sonra tekrar deneyin"
   }
 }

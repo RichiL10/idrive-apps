@@ -66,6 +66,10 @@
     "Not enough space": "Spațiu insuficient",
     "Too large to save": "Prea mare pentru salvare",
     "Save failed": "Salvare eșuată",
-    "Waze on cluster": "Waze pe bord"
+    "Waze on cluster": "Waze pe bord",
+    "Confirm": "Confirmă",
+    "Untested version, press Confirm to patch": "Versiune netestată, apasă Confirmă pentru a aplica patch-ul",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Eșuat, CarPlay se oprește mereu: restaurează-l manual",
+    "Busy, try again in two minutes": "Ocupat, încearcă din nou peste două minute"
   }
 }

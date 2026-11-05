@@ -66,6 +66,10 @@
     "Not enough space": "Ikke nok plass",
     "Too large to save": "For stor til å lagres",
     "Save failed": "Lagring mislyktes",
-    "Waze on cluster": "Waze i instrumentpanelet"
+    "Waze on cluster": "Waze i instrumentpanelet",
+    "Confirm": "Bekreft",
+    "Untested version, press Confirm to patch": "Utestet versjon, trykk Bekreft for å legge på patchen",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Mislyktes, CarPlay krasjer hele tiden: gjenopprett det manuelt",
+    "Busy, try again in two minutes": "Opptatt, prøv igjen om to minutter"
   }
 }

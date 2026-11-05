@@ -66,6 +66,10 @@
     "Not enough space": "Espace insuffisant",
     "Too large to save": "Trop volumineux pour être enregistré",
     "Save failed": "Échec de l'enregistrement",
-    "Waze on cluster": "Waze au combiné"
+    "Waze on cluster": "Waze au combiné",
+    "Confirm": "Confirmer",
+    "Untested version, press Confirm to patch": "Version non testée, appuyez sur Confirmer pour appliquer le correctif",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Échec, CarPlay plante en boucle : restaurez-le à la main",
+    "Busy, try again in two minutes": "Occupé, réessayez dans deux minutes"
   }
 }

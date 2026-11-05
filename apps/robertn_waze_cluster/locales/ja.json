@@ -66,6 +66,10 @@
     "Not enough space": "空き容量不足",
     "Too large to save": "サイズが大きすぎて保存不可",
     "Save failed": "保存に失敗",
-    "Waze on cluster": "Waze メーター表示"
+    "Waze on cluster": "Waze メーター表示",
+    "Confirm": "確認",
+    "Untested version, press Confirm to patch": "未検証のバージョンです。パッチを適用するには確認を押してください",
+    "Failed, CarPlay keeps crashing: restore it by hand": "失敗、CarPlayが繰り返し停止します。手動で復元してください",
+    "Busy, try again in two minutes": "使用中です。2分後にもう一度お試しください"
   }
 }

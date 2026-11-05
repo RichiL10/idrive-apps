@@ -66,6 +66,10 @@
     "Not enough space": "Недостаточно места",
     "Too large to save": "Слишком большой размер",
     "Save failed": "Ошибка сохранения",
-    "Waze on cluster": "Waze на приборах"
+    "Waze on cluster": "Waze на приборах",
+    "Confirm": "Подтвердить",
+    "Untested version, press Confirm to patch": "Непроверенная версия, нажмите Подтвердить для установки патча",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Сбой, CarPlay постоянно падает: восстановите его вручную",
+    "Busy, try again in two minutes": "Занято, повторите через две минуты"
   }
 }

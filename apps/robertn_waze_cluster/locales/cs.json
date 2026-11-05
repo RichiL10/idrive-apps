@@ -66,6 +66,10 @@
     "Not enough space": "Nedostatek místa",
     "Too large to save": "Příliš velké k uložení",
     "Save failed": "Uložení selhalo",
-    "Waze on cluster": "Waze na přístrojovém štítu"
+    "Waze on cluster": "Waze na přístrojovém štítu",
+    "Confirm": "Potvrdit",
+    "Untested version, press Confirm to patch": "Netestovaná verze, pro záplatu stiskněte Potvrdit",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Selhalo, CarPlay stále padá: obnovte jej ručně",
+    "Busy, try again in two minutes": "Zaneprázdněno, zkuste to znovu za dvě minuty"
   }
 }

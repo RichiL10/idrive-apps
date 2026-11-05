@@ -22,7 +22,9 @@
  *
  *   Patch daemon socket (PATCH_PATH; root helper, group tm_oap_app)
  *     app    -> daemon  {"cmd":"status"}
- *                       {"cmd":"apply","panel":"high","mode":"avb"}
+ *                       {"cmd":"apply","panel":"high","mode":"avb"[,"unproven":true]}
+ *                        unproven only after the user confirmed patching a
+ *                        build the daemon reports as unproven (Kiro test build)
  *                       {"cmd":"revert"}
  *                       {"cmd":"aa-apply"} | {"cmd":"aa-revert"}
  *                       {"cmd":"aa-density","value":n} | {"cmd":"aa-card","value":"shown"|"hidden"}
@@ -37,9 +39,20 @@
  *                       only at the next head-unit start (a restart is needed)
  *                       pending "apply" | "revert": which change waits for it
  *                       conflict: why the install left carplay as it was
+ *                       unproven true: a CarPlay build outside the patcher's
+ *                        proven list, not patched yet; the Patch button then
+ *                        asks to be confirmed before it sends unproven:true
+ *                       failed: boot recovery marked the patch failed (CarPlay
+ *                        crashes while patched and no backup restores it); the
+ *                        status line says so whatever the patch state
+ *                       an error whose reason says another change to / is
+ *                        running: the shared remount lock stayed held, nothing
+ *                        changed, try again later (the status says so)
  *                       recovered: boot recovery removed the patch (after that
  *                        many failed head-unit starts); also in aa
- *                       aa: Android Auto's patch, {"state":"original"|"patched"|
+ *                       aa: Android Auto's patch, {"enabled":false,"state":"off"}
+ *                        while aa_enabled is 0 (the default; the section is then
+ *                        greyed and reads Off), else {"state":"original"|"patched"|
  *                        "unknown"|"absent"|"busy"|"error","reason","conflict",
  *                        "pending","aapd","dpi","diskCard","runDpi","runCard","density",
  *                        "card","densities":[min,max,step],"changeAt","error"}
@@ -85,6 +98,15 @@ const PENDING_PATH = '/dev/shm/waze-on-cluster/activation-pending';
 const AA_PENDING_PATH = '/dev/shm/waze-on-cluster/aa-pending';
 const BOOT_ID_PATH = '/proc/sys/kernel/random/boot_id';
 const RETRY_MS = 1000;
+/* On a CarPlay build outside the patcher's proven list the Patch button asks
+ * to be confirmed first, for CONFIRM_MS; a confirming press sooner than
+ * CONFIRM_MIN_MS after the first (a doubled HMI event, a controller bounce)
+ * is ignored: nobody can have read the line yet. */
+const CONFIRM_MS = 15000;
+const CONFIRM_MIN_MS = 1000;
+/* patchd's reason when a change could not take the shared remount lock in
+ * time (patch/patchd.js LOCK_BUSY_REASON): nothing was changed. */
+const LOCK_BUSY = /another change to \/ is running/;
 /* One Zoom in or Zoom out press, in dpi: the densities' own step. */
 const ZOOM_STEP = 10;
 /* Why a restart failed, by patchd's code (English keys of src/i18n.js). */
@@ -252,6 +274,8 @@ class WazeClusterControl extends EventEmitter {
         this._pendingPath = o.pendingPath || PENDING_PATH;
         this._aaPendingPath = o.aaPendingPath || AA_PENDING_PATH;
         this._bootIdPath = o.bootIdPath || BOOT_ID_PATH;
+        this._confirmMs = o.confirmMs || CONFIRM_MS;
+        this._confirmMinMs = o.confirmMinMs !== undefined ? o.confirmMinMs : CONFIRM_MIN_MS;
         this._lastPatchCmd = 'apply';
         this._restartRequested = false;   /* a restart was asked for; waiting for the unit to go down */
         this._wakeTimer = null;
@@ -311,12 +335,64 @@ class WazeClusterControl extends EventEmitter {
     }
 
     /* ---- CarPlay ---- */
+    /* On a build the daemon reports as unproven (status field unproven), the
+     * first press only asks for confirmation: the button reads Confirm and
+     * the status line says the build is untested, for CONFIRM_MS. Only a press
+     * while it asks, and at least CONFIRM_MIN_MS after the first, sends
+     * unproven:true; an earlier one is ignored and the question stays open.
+     * The question lapses with its time, a status that no longer calls the
+     * build unproven or lets the button act, and closing. */
     enableMap() {
-        if (this.canEnable()) {
-            this._lastPatchCmd = 'apply';
-            /* The stock media-bus sink: the capture path the render joins. */
-            this.patch.send({ cmd: 'apply', panel: 'high', mode: 'avb' });
+        if (!this.canEnable()) {
+            return;
         }
+        if (this.confirming() && Date.now() < this._confirmFrom) {
+            return;
+        }
+        if (this.needsConfirm() && !this.confirming()) {
+            this._confirmFrom = Date.now() + this._confirmMinMs;
+            this._confirmUntil = Date.now() + this._confirmMs;
+            clearTimeout(this._confirmTimer);
+            this._confirmTimer = setTimeout(() => {
+                this._confirmTimer = null;
+                this._confirmUntil = 0;
+                this.emit('change');
+            }, this._confirmMs);
+            this.emit('change');
+            return;
+        }
+        const confirmed = this.confirming();
+        this._cancelConfirm();
+        this._lastPatchCmd = 'apply';
+        /* The stock media-bus sink: the capture path the render joins. */
+        const cmd = { cmd: 'apply', panel: 'high', mode: 'avb' };
+        if (confirmed) {
+            cmd.unproven = true;
+        }
+        this.patch.send(cmd);
+    }
+
+    /* The daemon reports a CarPlay build outside the proven list, not patched yet. */
+    needsConfirm() {
+        const ps = this.patchStatus;
+        return !!(this.connectedPatch() && ps && ps.unproven === true);
+    }
+
+    /* The Patch button is asking to confirm an untested build. */
+    confirming() {
+        return this._confirmUntil > Date.now() && this.needsConfirm() && this.canEnable();
+    }
+
+    /* CarPlay's Patch button: Confirm while it asks to confirm. */
+    enableButtonText() {
+        return this.confirming() ? t('Confirm') : t('Patch');
+    }
+
+    _cancelConfirm() {
+        clearTimeout(this._confirmTimer);
+        this._confirmTimer = null;
+        this._confirmUntil = 0;
+        this._confirmFrom = 0;
     }
 
     disableMap() {
@@ -369,6 +445,15 @@ class WazeClusterControl extends EventEmitter {
             return t('Connecting…');
         }
         const pending = this.pending(), ps = this.patchStatus;
+        if (this.confirming()) {
+            return t('Untested version, press Confirm to patch');
+        }
+        /* Boot recovery gave up: CarPlay crashes while patched and no backup
+         * restores it. Nothing else this line could say matters more, bar a
+         * change that is running. */
+        if (p === 'up' && ps && ps.failed && ps.state !== 'busy' && ps.busy !== 'carplay') {
+            return t('Failed, CarPlay keeps crashing: restore it by hand');
+        }
         if (pending === 'apply' && ps && headUnitRefused(ps.conflict)) {
             return conflictText(ps.conflict);
         }
@@ -382,7 +467,7 @@ class WazeClusterControl extends EventEmitter {
             return this._lastPatchCmd === 'revert' ? t('Removing patch…') : t('Patching…');
         }
         if (ps.state === 'error') {
-            return t('Failed');
+            return LOCK_BUSY.test(ps.reason || '') ? t('Busy, try again in two minutes') : t('Failed');
         }
         if (ps.recovered && ps.state !== 'patched' && !headUnitRefused(ps.conflict)) {
             return t('Removed — head unit kept restarting');
@@ -466,9 +551,18 @@ class WazeClusterControl extends EventEmitter {
         return this.connectedPatch() && ps && ps.aa ? ps.aa : null;
     }
 
+    /* Android Auto is opt-in (aa_enabled = 1 in the conf; the default 0 keeps
+     * the tool away from aapd). patchd then reports aa.enabled false and
+     * state "off", and turns every aa-* command away. A patchd that says
+     * nothing about it is taken as on. */
+    aaEnabled() {
+        const aa = this.aa();
+        return !!aa && aa.enabled !== false;
+    }
+
     _aaIdle() {
         const aa = this.aa();
-        return !!aa && !this.busy() && !aa.pending;
+        return !!aa && this.aaEnabled() && !this.busy() && !aa.pending;
     }
 
     /* A density or card change is refused until aa.changeAt. */
@@ -563,11 +657,14 @@ class WazeClusterControl extends EventEmitter {
             const marker = this.connectedPatch() ? null : this._marker(this._aaPendingPath);
             return marker === 'apply' ? t('Patched after restart') : marker === 'revert' ? t('Removed after restart') : t('Unavailable');
         }
+        if (!this.aaEnabled()) {
+            return t('Off');
+        }
         if (aa.state === 'busy') {
             return aa.reason === 'reverting' ? t('Removing patch…') : t('Patching…');
         }
         if (aa.state === 'error' || aa.error) {
-            return t('Failed');
+            return LOCK_BUSY.test(aa.error || aa.reason || '') ? t('Busy, try again in two minutes') : t('Failed');
         }
         if (aa.pending && !(aa.pending === 'apply' && headUnitRefused(aa.conflict))) {
             return aa.pending === 'revert' ? t('Removed after restart') : t('Patched after restart');
@@ -722,6 +819,7 @@ class WazeClusterControl extends EventEmitter {
         this.patchStatus = null;     /* the patch daemon's last status while connected */
         this._inEffect = { carplay: false, androidAuto: false };
         this._cardAsked = null;      /* the turn card an aa-card change asked for, while it runs */
+        this._cancelConfirm();       /* and no confirmation of an untested build asked for */
     }
 
     /* From a status outside a change (neither busy nor an error): which
@@ -764,6 +862,10 @@ class WazeClusterControl extends EventEmitter {
             this.patchStatus = !status.aa && prev && prev.aa ? Object.assign({}, status, { aa: prev.aa }) : status;
             this._noteInEffect();
             this._noteCardAsked(msg);
+            /* the question lapses once the build is no longer unproven or the button cannot act */
+            if (!this.needsConfirm() || !this.canEnable()) {
+                this._cancelConfirm();
+            }
             this._wake();
             this.emit('change');
         } else if (msg.ev === 'reboot-reply') {

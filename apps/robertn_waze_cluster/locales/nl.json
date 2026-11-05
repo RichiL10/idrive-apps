@@ -68,6 +68,10 @@
     "Not enough space": "Niet genoeg ruimte",
     "Too large to save": "Te groot om op te slaan",
     "Save failed": "Opslaan mislukt",
-    "Waze on cluster": "Waze in instrumentpaneel"
+    "Waze on cluster": "Waze in instrumentpaneel",
+    "Confirm": "Bevestigen",
+    "Untested version, press Confirm to patch": "Niet geteste versie, druk op Bevestigen om te patchen",
+    "Failed, CarPlay keeps crashing: restore it by hand": "Mislukt, CarPlay crasht steeds: herstel het handmatig",
+    "Busy, try again in two minutes": "Bezet, probeer het over twee minuten opnieuw"
   }
 }
