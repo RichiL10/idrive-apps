@@ -177,3 +177,13 @@ take-over is allowlist-based (S9d). No upstream test was removed or weakened.
 | F-N4 same-SSRC sequence restart left the access unit open | restart branch ends the access unit and forgets the timestamp, like the SSRC switch |
 
 Not covered: `MFXInitEx` failing with a hang / lost device in a GPU-copy session still falls back to a session without GPU copy (no session exists then to close; the fallback session decides). Nothing ran on a car.
+
+
+## Review of the guard (fix3-p), F1..F5
+
+- F3 (76975d9): the guard no longer depends on its marker file; a writer verifies `/` read-only under the lock before it remounts read-write.
+- F1: the recovery boot step exits 0 only when `rootIsReadOnly()` (`/proc/mounts`) says so (`roSettled`, `settleRo` in `recovery.js`). `/` read-write with no guard: it takes the remount lock (waits up to the boot bound), puts `/` back, else sets the guard, keeps the lock and exits 1. Another process in its write window: the step waits, exits 1 if still held. `healRo` also removes the lock a dead writer left with the guard. Tests: three `F1:` cases in `recovery_test.js`.
+- F2: `Recovery.tick` retries the guard when one stands in memory or on disk (`roStanding()`), so a freshly started watcher keeps retrying an imported guard. Test `F2:` (only a file on disk).
+- F4: `patchd.js oneShot` stops before the Android Auto step when the CarPlay step left the guard (no remount, no write; a removal exits 1, an install 0). Test `F4` in `patchd_ro_test.js` (aa_enabled=1).
+- F5: `patchWith` always makes and verifies the `.woc-running` link before the patcher; it removes it after the write when no process uses the old inode (`needed`). If it cannot be linked nothing is written. Test `F5` in `patchd_ro_test.js`.
+- Not verified: on a car. The F5 test shows no write when the link fails; it does not race a process start. The F4 test uses an absent aapd, so it shows the AA step is skipped (status and mount calls), not an AA write being blocked.

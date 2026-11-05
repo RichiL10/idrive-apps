@@ -384,6 +384,10 @@ function remountRo(tries, cb) {
  * a write and once per PROBE_MS in the watcher: the guard goes when / is
  * verified read-only. The boot step exits 1 while it stands. */
 var roFailed = null;
+/* What a writer needs to verify / read-only under the lock, or put it back (remount_lock.js verifyRo). */
+var RO = { isRo: rootIsReadOnly, remountRo: function (done) { remountRo(RO_TRIES, done); } };
+/* The standing guard's reason: this process's, else the marker's (or the lock module's, set in this process); null when none. */
+function roStanding() { return roFailed !== null ? roFailed : lock.roFailedReason(); }
 function roFailedError(why) {
     var e = new Error('ro-failed: ' + why + '; / may be writable, nothing is written until it is read-only again (mount -o remount,ro /)');
     e.roFailed = true;
@@ -392,24 +396,47 @@ function roFailedError(why) {
 function holdRoFailed(why) {
     roFailed = why;
     writing = true;
-    lock.markRoFailed(why);
+    var marked = lock.markRoFailed(why);
     log('ERROR: ro-failed: ' + why + '. / may still be writable: the remount lock is kept and no restore or patch writes until / is read-only again ' +
         '(mount -o remount,ro /; the next run clears the guard)');
+    /* A marker that cannot be written (F3 of fix3-p) is a distinct failure: the guard stands in this
+     * process only, and once it exits the next writer does not find it. It finds the lock gone (the
+     * holder is dead), takes it and verifies / read-only itself before it writes (lock.acquireWrite
+     * with RO), and puts / back or refuses. */
+    if (!marked) log('ERROR: the ro-failed marker could not be written; the guard stands in this process only, and the next writer verifies / read-only itself before it writes');
 }
-/* True when no guard stands; one whose / is read-only now is cleared. */
+/* True only when / is read-only per /proc/mounts, now (review of fix3-p, F1:
+ * no guard standing is no proof of it); a guard that stands is cleared then. */
 function roSettled() {
-    var why = roFailed !== null ? roFailed : lock.roFailedReason();
-    if (why === null) return true;
     if (!rootIsReadOnly()) return false;
-    roFailed = null;
-    writing = false;
-    lock.clearRoFailed();
-    lock.release();
+    if (roStanding() !== null) {
+        roFailed = null;
+        writing = false;
+        lock.clearRoFailed();
+        lock.release();
+    }
     return true;
+}
+/* The boot step's last word, cb(true) once / is verified read-only (roSettled),
+ * after it was put back if it was not: a standing guard is retried (roGuard);
+ * with / read-write and no guard (a writer that died with it writable, or one
+ * in its window) the lock is waited for, and under it / is verified and
+ * put back (acquireWrite with RO), else the guard is set and the lock kept.
+ * cb(false) when it could not. */
+function settleRo(cb) {
+    if (roSettled()) { cb(true); return; }
+    if (roStanding() !== null) { roGuard(function () { cb(roSettled()); }); return; }
+    log('/ is read-write and no ro-failed guard stands: taking the remount lock to verify and put it back read-only');
+    lock.acquireWrite(BOOT_LOCK_WAIT_MS, function (got, rf) {
+        if (got) { lock.release(); cb(roSettled()); return; }
+        if (rf !== null) { if (lock.ownsLock()) holdRoFailed(rf); }
+        else log('the remount lock is held by another process for ' + BOOT_LOCK_WAIT_MS + ' ms: / is not verified read-only');
+        cb(false);
+    }, RO);
 }
 /* cb(null) with no guard (synchronously) or once it is cleared, else cb(why). */
 function roGuard(cb) {
-    var why = roFailed !== null ? roFailed : lock.roFailedReason();
+    var why = roStanding();
     if (why === null) { cb(null); return; }
     lock.healRo(why, rootIsReadOnly, function (done) { remountRo(RO_TRIES, done); }, function (left) {
         if (!left) {
@@ -438,14 +465,14 @@ function endWindow(err, roErr) {
 function takeLock(waitMs, cb) {
     roGuard(function (standing) {
         if (standing) { cb(roFailedError(standing)); return; }
-        if (waitMs) {
-            lock.acquireWrite(waitMs, function (got, rf) {
-                cb(got ? null : rf !== null ? roFailedError(rf) : new Error('remount lock held for ' + waitMs + ' ms; deferring'));
-            });
-            return;
-        }
-        if (!lock.tryAcquireWrite()) { var rf = lock.roFailedReason(); cb(rf !== null ? roFailedError(rf) : new Error('remount lock held; deferring')); return; }
-        cb(null);
+        /* Under the lock, / is verified read-only before anything remounts it read-write; if it is
+         * not and cannot be put back, the lock is kept with the guard set (acquireWrite). */
+        lock.acquireWrite(waitMs || 0, function (got, rf) {
+            if (got) { cb(null); return; }
+            if (rf === null) { cb(new Error(waitMs ? 'remount lock held for ' + waitMs + ' ms; deferring' : 'remount lock held; deferring')); return; }
+            if (lock.ownsLock()) holdRoFailed(rf);   /* the verification failed here: this process keeps the lock */
+            cb(roFailedError(rf));
+        }, RO);
     });
 }
 
@@ -943,8 +970,10 @@ Recovery.prototype.tick = function (cb) {
     var self = this;
     if (this._busy || this.restoring || off(this.target)) { cb({ action: 'skip' }); return; }
     var now = this._now();
-    /* A standing ro-failed guard is retried here, once per PROBE_MS. */
-    if (roFailed !== null && now - this._roTry >= PROBE_MS) {
+    /* A standing ro-failed guard is retried here, once per PROBE_MS: the
+     * process's own, or one on disk that another process (or an earlier run of
+     * this one) set, which the start-up roGuard could not clear (review of fix3-p, F2). */
+    if (roStanding() !== null && now - this._roTry >= PROBE_MS) {
         this._roTry = now;
         this._busy = true;
         roGuard(function () { self._busy = false; cb({ action: 'ro-retry' }); });
@@ -1149,17 +1178,25 @@ function runBoot(name) {
      * writable; the lock and <lock>.ro-failed are kept, see holdRoFailed).
      * The service's unit runs this with ExecStart=-, so the status changes
      * no ordering; it is the terminal failure the journal shows. */
-    function leave() {
-        if (roSettled()) process.exit(0);
-        log('ERROR: ' + t.name + ' boot check failed: / is not verified read-only (ro-failed: ' + (roFailed !== null ? roFailed : lock.roFailedReason()) +
-            '); the remount lock is kept and nothing writes / until it is read-only again; exiting 1');
+    function exitWith(settled) {
+        if (settled) process.exit(0);
+        var why = roStanding();
+        log('ERROR: ' + t.name + ' boot check failed: / is not verified read-only (' + (why !== null ? 'ro-failed: ' + why : 'read-write, or the remount lock is held by another process') +
+            '); any guard and lock are kept and nothing writes / until it is read-only again; exiting 1');
         process.exit(1);
+    }
+    /* The step ends by verifying / read-only (F1 of fix3-p): never by the mere absence of a guard. */
+    var leaving = false;
+    function leave() {
+        if (leaving) return;
+        leaving = true;
+        settleRo(exitWith);
     }
     setTimeout(function () {
         log(t.name + ' boot check: out of time after ' + BOOT_BOUND_MS + ' ms; ' + t.name + ' starts as it is');
         setTimeout(function () {
             if (writing && roFailed === null) holdRoFailed('the boot step ran out of time and its remount,ro did not return');
-            leave();
+            exitWith(roSettled());   /* the hard deadline: no more waiting */
         }, BOOT_EXIT_MS - BOOT_BOUND_MS).unref();
         abandonRestore(leave);
     }, BOOT_BOUND_MS).unref();

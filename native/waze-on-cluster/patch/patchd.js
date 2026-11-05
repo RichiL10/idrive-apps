@@ -663,9 +663,21 @@ function roHeal(cb) {
 /* The end of a write window: the lock goes only once / is read-only; else it
  * is kept with the guard set. */
 function endWindow(roErr) {
-    if (roErr) { lock.markRoFailed(roErr.message); log('ERROR: ro-failed: ' + roErr.message + '; the remount lock is kept and nothing writes / until it is read-only again'); }
+    if (roErr) holdRoFailed(roErr.message);
     else lock.release();
 }
+/* Sets the guard (remount_lock.js markRoFailed) and says so. A marker that cannot be
+ * written (F3 of fix3-p) is a distinct failure: the guard stands in this process only (the
+ * lock module keeps the reason, so this process's writers and its one-shot exit keep the
+ * lock), and once it exits the next writer takes the dead holder's lock and verifies /
+ * read-only itself before it writes (acquireWrite with RO), putting it back or refusing. */
+function holdRoFailed(message) {
+    var marked = lock.markRoFailed(message);
+    log('ERROR: ro-failed: ' + message + '; the remount lock is kept and nothing writes / until it is read-only again');
+    if (!marked) log('ERROR: the ro-failed marker could not be written; the guard stands in this process only, and the next writer verifies / read-only itself before it writes');
+}
+/* What a writer verifies under the lock before it remounts / read-write (lock.acquireWrite). */
+var RO = { isRo: rootIsReadOnly, remountRo: function (done) { remountRo(3, done); } };
 
 /* Restarting carplay or aapd is safe only while nothing takes its SIGKILL
  * for a failure: recmgr loaded its entry this boot (recmgr_list.js), and,
@@ -1031,7 +1043,7 @@ function dropUnusedRunning(cb) {
                 cb();
             });
         });
-    });
+    }, RO);
 }
 
 function sameFile(a, b) {
@@ -1065,23 +1077,23 @@ function patchWith(t, args, action, blocked, done, run) {
          * a restart can fail (systemctl, the SIGKILL, the wait for the PID),
          * and an unlinked file still held open keeps / from going read-only.
          * When it cannot be linked and verified, nothing is written. */
-        var linked = false, targetRuns = lock.inUse(t.target);
+        /* The link is made and verified before EVERY write, not only when a
+         * process is seen to run the file: a process can start between a look
+         * at /proc and the patcher's rename (review of fix3-p, F5). It goes
+         * after the write when nothing runs the old inode (needed). */
         if (fs.existsSync(t.running)) {
             /* What is left here is a link a process runs (needed above) and it
              * is not the target's own file: no name is left for the target's. */
-            if (targetRuns) { fin(new Error(t.name + ' not changed: processes run both ' + t.target + ' and ' + t.running + '; nothing written, try after the next head-unit start'), null); return; }
-        } else if (!restartable || targetRuns) {
+            if (lock.inUse(t.target)) { fin(new Error(t.name + ' not changed: processes run both ' + t.target + ' and ' + t.running + '; nothing written, try after the next head-unit start'), null); return; }
+        } else {
             var linkErr = null;
             try { fs.linkSync(t.target, t.running); } catch (e) { linkErr = e; }
             if (!linkErr && !sameInode(t.running, t.target)) linkErr = new Error(t.running + ' is not the inode of ' + t.target);
-            if (!linkErr) linked = !restartable;
-            else {
+            if (linkErr) {
                 log('keeping the running ' + t.name + ' linked failed: ' + linkErr.message);
-                if (targetRuns || lock.inUse(t.target)) {
-                    unlinkQuiet(t.running);
-                    fin(new Error(t.name + ' not changed: a process runs ' + t.target + ' and keeping it linked as ' + t.running + ' failed (' + linkErr.message + '); nothing written'), null);
-                    return;
-                }
+                unlinkQuiet(t.running);
+                fin(new Error(t.name + ' not changed: ' + (lock.inUse(t.target) ? 'a process runs ' + t.target + ' and ' : '') + 'keeping it linked as ' + t.running + ' failed (' + linkErr.message + '); nothing written'), null);
+                return;
             }
         }
         var extraBefore = t.extra.map(sha).join();
@@ -1117,7 +1129,7 @@ function patchWith(t, args, action, blocked, done, run) {
                 if (!needed(t)) unlinkQuiet(t.running);
                 writePending(t, action, run);
                 fin(null, 'deferred');
-            } else if (linked && !sameInode(t.running, t.target)) {
+            } else if (!sameInode(t.running, t.target)) {
                 /* The patcher failed after replacing the binary: the running
                  * one stays linked and the change waits like any other. */
                 log(action + ' failed after writing; ' + t.reasons[action]);
@@ -1125,7 +1137,7 @@ function patchWith(t, args, action, blocked, done, run) {
                 writePending(t, action, run);
                 fin(pErr || null, 'deferred', why);
             } else {
-                if (linked) unlinkQuiet(t.running);
+                if (!needed(t)) unlinkQuiet(t.running);
                 fin(pErr || null, null, why);
             }
         });
@@ -1285,7 +1297,7 @@ function rebootCmd(sock) {
 function acquireOp(cb) {
     roHeal(function (standing) {
         if (standing !== null) { cb(false, roReason(standing)); return; }
-        lock.acquireWrite(OP_LOCK_WAIT_MS, function (got, roWhy) { cb(got, got ? null : roWhy !== null ? roReason(roWhy) : LOCK_BUSY_REASON); });
+        lock.acquireWrite(OP_LOCK_WAIT_MS, function (got, roWhy) { cb(got, got ? null : roWhy !== null ? roReason(roWhy) : LOCK_BUSY_REASON); }, RO);
     });
 }
 
@@ -1586,7 +1598,7 @@ function hookStep(which, t, read, run, done) {
         run(p.op, function (pErr, roErr, activation, refused, aaRun) {
             var written = files.map(sha).join() !== before;
             if (roErr) {
-                lock.markRoFailed(roErr.message);
+                holdRoFailed(roErr.message);
                 log('WARNING: ' + roErr.message + ' — the next head-unit start mounts / read-only again; until then no writer takes the remount lock (ro-failed)');
             }
             if (written && pErr) writePending(t, p.op, aaRun);
@@ -1659,9 +1671,11 @@ function oneShot(which) {
           finish(1);
           return;
       }
-      lock.acquireWrite(20000, function (got) {
+      lock.acquireWrite(20000, function (got, roWhy) {
         if (!got) {
-            result.status = 'the remount lock stayed held (a boot-recovery restore may be running); nothing changed, try again in two minutes';
+            /* roWhy: the guard stands, or / was found read-write under the lock and could not be put back (the lock is then kept, the guard set). */
+            result.status = roWhy !== null ? roReason(roWhy)
+                : 'the remount lock stayed held (a boot-recovery restore may be running); nothing changed, try again in two minutes';
             log(which + ': ' + result.status);
             finish(1);
             return;
@@ -1686,6 +1700,18 @@ function oneShot(which) {
                 finish(0);
                 return;
             }
+            /* The map step could not put / back read-only (review of fix3-p, F4):
+             * the guard stands and the lock is kept, and nothing more is written
+             * (this step runs under the lock it already holds, which no
+             * tryAcquireWrite would recheck). */
+            var guardWhy = lock.roFailedReason();
+            if (guardWhy !== null) {
+                result.aa = { status: which === 'deactivate' ? 'Android Auto not undone: ' + roReason(guardWhy) + '; the tool stays to guard it'
+                    : 'Android Auto left as it is: ' + roReason(guardWhy) + '; nothing more is written until / is read-only again' };
+                log(which + ': ' + result.aa.status);
+                finish(which === 'deactivate' ? 1 : 0);
+                return;
+            }
             if (hookDeadline - Date.now() < AA_HOOK_MIN_MS) {
                 result.aa = { status: which === 'deactivate' ? 'Android Auto not undone: out of time; the tool stays to guard it'
                     : 'Android Auto left as it is: out of time; the next install or Android Auto\'s Patch button applies it' };
@@ -1700,7 +1726,7 @@ function oneShot(which) {
                 finish(which === 'deactivate' ? aaCode : 0);
             });
         });
-      });
+      }, RO);
     });
 }
 
