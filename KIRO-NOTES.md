@@ -80,3 +80,24 @@ the 6 skips in waze-host are the same as in the upstream baseline.
 - Take-over allowlist, liveness gate and the confirm step have no on-car evidence.
 - The app was tested with the repo's fakes, not on the HMI.
 - Release signing/publishing was not done and must not be done from this branch (local only).
+
+
+## Test results on this branch (final run, Docker, runner `tools/run-suite.ps1`)
+
+Counts are the runner's indicators (cases plus C++ programs); upstream baseline is commit 0eabce5, nothing edited.
+Every suite exits 0 with 0 failures. No count is below the baseline.
+
+| suite | baseline | this branch | skipped | difference |
+|---|---|---|---|---|
+| waze-host | 651 | 763 | 6 (same as baseline: need real firmware) | +112: S1..S4, S6 node tests, S7/S8 C++ programs and cases |
+| waze-x86 (gcc 7.5, -Werror) | 381 | 386 | 0 | +5: S7/S8 C++ test programs |
+| waze-target | 1 | 1 | 0 | binary builds, import checks OK |
+| cr-host | 899 | 947 | 0 | +48: liveness gate, take-over allowlist, 4500 ceiling cases |
+| cr-x86 (gcc 7.5, -Werror) | 872 | 920 | 0 | +48, same cases as cr-host |
+| cr-target | 3 | 3 | 0 | 3 binaries, import checks OK |
+| app | 64 | 73 | 0 | +9: S10 confirm step, failed / busy texts, AA off |
+| release-check | 3 | 3 | 0 | cluster-render@0.3.12, waze-on-cluster@0.8.9, robertn_waze_cluster@0.5.8 reproducible |
+
+One upstream test row was changed on purpose (app `test_control.js`: "another change to / is running" now expects
+the Busy text); `map_feed_test` and the cluster-render take-over fixtures now list their stock contents because
+take-over is allowlist-based (S9d). No upstream test was removed or weakened.
