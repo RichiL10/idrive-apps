@@ -139,6 +139,25 @@ cluster is offered, and what differs is in "iDrive 8".
     contending layer, never in any other slot. Each one is logged with
     what was unmapped, and so is the KOMBI's reply. Unmap replies are
     matched in a queue of their own, so they never answer a fetch or a map.
+  - Only the stock contents in `<target>_take_over_contents` (Kiro test
+    build): the map's is `0x01000300`, the HMI's map in Map view. Any other
+    stock content shown in the slot, such as the speech dialog
+    `0x01000400`, a route preview or the assisted-driving view, is never
+    unmapped: the target stays parked behind it (logged once per content)
+    and is shown when that content goes. The list is scene ids separated by
+    commas or spaces; an empty list means no take-over at all. The service
+    refuses to start when an id has a sign, is out of range, is not a stock
+    HMI content (`0x0100xxxx`), is one of ours (`scene_ids_allowed`) or is
+    `0x01000314` (the seat-belt-warning panel). The `panel` and `hud`
+    lists are empty (they do not take over). The guide hold has its own
+    list, `guide_take_over` (below), which is what its take-overs unmap and
+    what it yields to; the two lists never widen each other, and the
+    allowlist does not change how the hold behaves.
+  - The fork's opt-in `<target>_take_over_remap` (unmap our parked map, the
+    stock content, then map ours again, back to back) is NOT part of this
+    build: upstream removed the state machine it relied on, it was never
+    switched on, and no car test supports it. The take-over is the single
+    stock unmap described above.
 - **The stock HMI and other apps** without a parked mapping (not asked yet,
   or a target that does not take over): content of an app that does not
   use this service is always yielded to: the slot is asked for again only
@@ -260,7 +279,8 @@ cluster is offered, and what differs is in "iDrive 8".
     that never sends the field gets the hold.
   - It is requested, contending and taking over from the stock HMI, as
     soon as `map` is shown. Parked behind the HMI's content, it takes over
-    as the map does, but only content in `guide_take_over` (0x01000310;
+    as the map does (its own list, not `map_take_over_contents`), but only
+    content in `guide_take_over` (0x01000310;
     0x01000314, the seat-belt-warning panel, is refused there): it
     unmaps that content shown in its slot and that can be parked ahead of
     ours, so none of it is shown in its place; the HMI maps it again behind

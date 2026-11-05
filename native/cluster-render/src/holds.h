@@ -34,6 +34,19 @@ struct HoldSettings {
 bool load_holds(const HoldSettings &cfg, const std::vector<uint64_t> &allowed, std::vector<TargetSpec> *targets,
                 std::string *warn);
 
+/* A target's <target>_take_over_contents (TargetSpec::take_over_contents):
+ * the stock contents its take-over may unmap, scene ids separated by commas
+ * or spaces, decimal or 0x hex; empty: none, the target takes nothing over.
+ * Each must be a whole number without a sign, not out of range, a stock
+ * HMI content (0x0100xxxx), not one of allowed (our own scene ids) and not
+ * 0x01000314 (the seat-belt-warning panel, as for guide_take_over); one
+ * listed twice counts once. key names the setting in *why. Anything else:
+ * false, with *why saying what was wrong and *out left empty. The guide
+ * hold's own list (guide_take_over, load_holds) is separate: it is what
+ * the holds' take-overs may unmap and what they yield to. */
+bool parse_take_over_contents(const std::string &key, const std::string &list, const std::vector<uint64_t> &allowed,
+                              std::vector<uint64_t> *out, std::string *why);
+
 }  // namespace crs
 
 #endif
