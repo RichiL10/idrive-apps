@@ -45,7 +45,7 @@ All ten are implemented and committed. "Tests" names the main test files; counts
 | S2 | Remount lock broken only when holder pid is gone, or alive but older than HUNG_MS 10 min, or no pid and older than STALE_MS 120 s. patchd waits 15 s then refuses ("try again in two minutes"); recovery never waits | `patch/remount_lock.js:34-58`; `patch/patchd.js:185,1234` | recovery tests, `patch/test/*` |
 | S3 | `--unproven` only for a request with `"unproven": true`; a plain apply on an unproven build is refused with a status asking for confirmation | `patch/patchd.js:599,1321` | `patch/test/patchd_unproven_test.js` |
 | S4 | Persistent recovery "failed" mark when patched, no usable backup and CarPlay keeps crashing; no more starts after crashes; status shows it; clears when the binary is stock; a foreign SIGKILL still restarts CarPlay (bounded); atomic state file | `patch/recovery.js:69,616,715-790` | recovery tests in `patch/test` |
-| S5 | `StartLimitIntervalSec=600`, `StartLimitBurst=30`, `Restart=on-failure` | `systemd/waze-on-cluster.service:32` | `patch/test/units_test.js:45` only checks that a limit exists (bounded restart), not the exact numbers |
+| S5 | `StartLimitIntervalSec=600`, `StartLimitBurst=30`, `Restart=on-failure` | `systemd/waze-on-cluster.service:32` | `patch/test/units_test.js` now asserts both numbers, that they sit in `[Unit]` (systemd 237 ignores them under `[Service]`) and `Restart=on-failure`; the same for `cluster-render.service` (review F4, N5) |
 | S6 | Android Auto OFF by default; aapd, aapd.conf and AA backups/markers never read for writing or written with `aa_enabled = 0`; patchd, recovery, install/remove all respect it; app greys the AA section | `patch/aa_enabled.js:70`; `patch/patchd.js:149,1307`; `patch/recovery.js:85`; conf `waze-on-cluster.conf:170-175` | `patch/test/patchd_aa_off_test.js`, recovery tests, upstream AA tests with AA on |
 | S7 | RTP/NAL hardening: SSRC probation, late/duplicate drop (kMisorder 100), far jumps held (kMaxDropout 3000), idle reset 1000 ms from ARRIVAL time, FU-A cap 4 MiB, buffer caps with resync, counters in stream health | `src/rtp_h264.h:69-79`; `src/rtp_h264.cpp:91,97,157,184`; `src/stream_health.*`; `src/video_producer.cpp` | `test/rtp_h264_test.cpp`, `nal_reader`, `stream_health_test.cpp` |
 | S8 | Decoder device watch: GPU hang / device lost closes the session and waits for the next SPS; 3 consecutive device failures exit non-zero; poll() error in main exits 1 | `src/device_watch.h`; `src/decoder_msdk.cpp:256,882`; `src/video_producer.cpp:331`; `src/main.cpp:233-253` | device_watch tests, fake-MSDK cases in `test/decoder_test.cpp` |
@@ -69,6 +69,32 @@ Suites: waze-host, cr-host, app, cr-x86 and waze-x86 (gcc 7.5, -Werror), cr-targ
 binaries with import checks), release-check (reproducible build of the three components).
 Tests that need real firmware (`test-firmware`, `test-ramses`, CARPLAY_BIN/AAPD_BIN) are skipped or not run:
 the 6 skips in waze-host are the same as in the upstream baseline.
+
+## Review remediation (after the two reviews of this build)
+
+Fixed, each with a test: lock breaking is serialised (`remount_lock.js` `<lock>.break` guard, re-read under it);
+a plain apply on an unproven build is refused in patchd BEFORE the remount; `WOC_AA_ENABLED` is a test device and is
+honoured only with `WOC_TEST=1`; the failed mark in `status` has a patchd test; StartLimit values are asserted;
+a getfattr that fails is a WARNING (extended attributes, such as a file capability, are preserved only where
+getfattr works on the unit); a hung or lost device in a VPP run with GPU copy is counted at once (only
+`MFX_ERR_DEVICE_FAILED` stays ambiguous there); late / stray / new-stream / idle-reset counts reach the log and
+the minute line; the arrival time for the RTP idle reset is `arrival_ms()` (own header, tested); `cluster-render.service`
+has the same restart cap; the render exits through a watchdog 8 s after a fatal device failure even if MFXClose hangs.
+
+Left as they are, on purpose:
+- `recmgr` / `crashNames` in `component.json` still list `aapd` and the aa-boot unit. They are the names the deploy
+  tool puts on the head unit's restart and crash-handler lists; the deploy tool was not read or run here, and
+  `release/test/release_test.js` pins `mgu-deploy` 0.7.11 for them. With Android Auto off this only means a crash of
+  the stock aapd is handled as the tool's lists say, not that aapd is touched. Not verified on a head unit.
+- If the render hits the start limit (30 failed starts in 10 minutes), systemd probably also fails
+  `waze-on-cluster.socket` / `cluster-render.socket`, so the map stays down until `systemctl reset-failed` or the
+  next head-unit start. A guess about systemd 237, not run.
+- Setting `aa_enabled` back to 0 while aapd is patched leaves it patched and unguarded: revert the Android Auto
+  patch first (note in the conf). Not relevant to this car, where Android Auto was never patched.
+- No test drives `VideoProducer::decode -> DeviceWatch -> device_fatal_ -> main exit 1` as one chain (it needs the
+  whole producer with its sockets); the pieces are tested (DeviceWatch, decoder fake MSDK, the watchdog). That
+  `feed_datagram` passes `arrival_ms(now, waited_us)` is checked by reading, the arithmetic by test.
+- A new SSRC whose first two packets arrive swapped counts as stray (as in the fork and RFC 3550); unlikely on a local link.
 
 ## NOT verified
 
