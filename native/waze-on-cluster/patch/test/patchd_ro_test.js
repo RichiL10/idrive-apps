@@ -376,6 +376,13 @@ async function main() {
     ok('F-P1 link fails: / is read-only (verified), the lock released, no guard', roNow() && !fs.existsSync(d2.lock) && !fs.existsSync(d2.guard) &&
         mcalls.length === 2 && /remount,ro/.test(mcalls[1]), JSON.stringify(mcalls));
     ok('F-P1 link fails: carplay is neither killed nor started', calls.every(function (c) { return /^show .*DropInPaths/.test(c); }), JSON.stringify(calls));
+    /* ---- review of fix3-p, F5: the link is made before every write, also when no process is seen to run the file ---- */
+    noProc(PROC2);
+    newCalls(); newMountCalls();
+    r = await op(d2, APPLY);
+    ok('F5 nothing seen running, link cannot be made: still nothing written (the link is not conditional on a look at /proc)',
+        r.state === 'error' && /keeping it linked as .* failed/.test(r.reason || '') && !/a process runs/.test(r.reason || '') && fs.readFileSync(LONG).equals(SRC) && !fs.existsSync(LONG + '.woc-orig'), JSON.stringify(r));
+    ok('F5 nothing seen running: / read-only, lock free', roNow() && !fs.existsSync(d2.lock) && !fs.existsSync(d2.guard));
     d2.child.kill('SIGKILL');
 }
 

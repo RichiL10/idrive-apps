@@ -1077,23 +1077,23 @@ function patchWith(t, args, action, blocked, done, run) {
          * a restart can fail (systemctl, the SIGKILL, the wait for the PID),
          * and an unlinked file still held open keeps / from going read-only.
          * When it cannot be linked and verified, nothing is written. */
-        var linked = false, targetRuns = lock.inUse(t.target);
+        /* The link is made and verified before EVERY write, not only when a
+         * process is seen to run the file: a process can start between a look
+         * at /proc and the patcher's rename (review of fix3-p, F5). It goes
+         * after the write when nothing runs the old inode (needed). */
         if (fs.existsSync(t.running)) {
             /* What is left here is a link a process runs (needed above) and it
              * is not the target's own file: no name is left for the target's. */
-            if (targetRuns) { fin(new Error(t.name + ' not changed: processes run both ' + t.target + ' and ' + t.running + '; nothing written, try after the next head-unit start'), null); return; }
-        } else if (!restartable || targetRuns) {
+            if (lock.inUse(t.target)) { fin(new Error(t.name + ' not changed: processes run both ' + t.target + ' and ' + t.running + '; nothing written, try after the next head-unit start'), null); return; }
+        } else {
             var linkErr = null;
             try { fs.linkSync(t.target, t.running); } catch (e) { linkErr = e; }
             if (!linkErr && !sameInode(t.running, t.target)) linkErr = new Error(t.running + ' is not the inode of ' + t.target);
-            if (!linkErr) linked = !restartable;
-            else {
+            if (linkErr) {
                 log('keeping the running ' + t.name + ' linked failed: ' + linkErr.message);
-                if (targetRuns || lock.inUse(t.target)) {
-                    unlinkQuiet(t.running);
-                    fin(new Error(t.name + ' not changed: a process runs ' + t.target + ' and keeping it linked as ' + t.running + ' failed (' + linkErr.message + '); nothing written'), null);
-                    return;
-                }
+                unlinkQuiet(t.running);
+                fin(new Error(t.name + ' not changed: ' + (lock.inUse(t.target) ? 'a process runs ' + t.target + ' and ' : '') + 'keeping it linked as ' + t.running + ' failed (' + linkErr.message + '); nothing written'), null);
+                return;
             }
         }
         var extraBefore = t.extra.map(sha).join();
@@ -1129,7 +1129,7 @@ function patchWith(t, args, action, blocked, done, run) {
                 if (!needed(t)) unlinkQuiet(t.running);
                 writePending(t, action, run);
                 fin(null, 'deferred');
-            } else if (linked && !sameInode(t.running, t.target)) {
+            } else if (!sameInode(t.running, t.target)) {
                 /* The patcher failed after replacing the binary: the running
                  * one stays linked and the change waits like any other. */
                 log(action + ' failed after writing; ' + t.reasons[action]);
@@ -1137,7 +1137,7 @@ function patchWith(t, args, action, blocked, done, run) {
                 writePending(t, action, run);
                 fin(pErr || null, 'deferred', why);
             } else {
-                if (linked) unlinkQuiet(t.running);
+                if (!needed(t)) unlinkQuiet(t.running);
                 fin(pErr || null, null, why);
             }
         });
