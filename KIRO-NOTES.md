@@ -115,11 +115,11 @@ Every suite exits 0 with 0 failures. No count is below the baseline.
 
 | suite | baseline | this branch | skipped | difference |
 |---|---|---|---|---|
-| waze-host | 651 | 763 | 6 (same as baseline: need real firmware) | +112: S1..S4, S6 node tests, S7/S8 C++ programs and cases |
-| waze-x86 (gcc 7.5, -Werror) | 381 | 386 | 0 | +5: S7/S8 C++ test programs |
+| waze-host | 651 | 793 | 6 (same as baseline: need real firmware) | +112: S1..S4, S6 node tests, S7/S8 C++ programs and cases |
+| waze-x86 (gcc 7.5, -Werror) | 381 | 401 | 0 | +5: S7/S8 C++ test programs |
 | waze-target | 1 | 1 | 0 | binary builds, import checks OK |
-| cr-host | 899 | 947 | 0 | +48: liveness gate, take-over allowlist, 4500 ceiling cases |
-| cr-x86 (gcc 7.5, -Werror) | 872 | 920 | 0 | +48, same cases as cr-host |
+| cr-host | 899 | 948 | 0 | +48: liveness gate, take-over allowlist, 4500 ceiling cases |
+| cr-x86 (gcc 7.5, -Werror) | 872 | 921 | 0 | +48, same cases as cr-host |
 | cr-target | 3 | 3 | 0 | 3 binaries, import checks OK |
 | app | 64 | 73 | 0 | +9: S10 confirm step, failed / busy texts, AA off |
 | release-check | 3 | 3 | 0 | cluster-render@0.3.12, waze-on-cluster@0.8.9, robertn_waze_cluster@0.5.8 reproducible |
