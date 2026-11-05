@@ -375,6 +375,22 @@ function remountRo(tries, cb) {
     });
 }
 
+/* The read-write remount failed (non-zero exit, killed by the timeout or by a
+ * signal): it may still have changed the mount before it failed, so / is put
+ * back read-only, bounded as everywhere, before the caller clears its writing
+ * mark and lets go of the lock. A failure of that is logged, never thrown;
+ * finish(err) then reports the remount that failed. */
+function rwFailed(mErr, finish) {
+    var done = false;
+    function end(roErr) {
+        if (done) return;
+        done = true;
+        if (roErr) log('after the failed read-write remount, / could not be put back read-only: ' + roErr.message);
+        finish(new Error('remount rw: ' + mErr.message));
+    }
+    try { remountRo(RO_TRIES, end); } catch (e) { end(e); }
+}
+
 /* What a restore of t.files[i] writes, or null when it has no backup of
  * ours: { out, want } (out null when the file holds it already; want, the
  * original's mode and owner, file_mode.js), { other } (another build or
@@ -422,7 +438,7 @@ function repairModes(t, waitMs, cb) {
         writing = true;
         function finish(err) { writing = false; lock.release(); cb(err, err ? 0 : list.length); }
         remount(true, function (mErr) {
-            if (mErr) { finish(new Error('remount rw: ' + mErr.message)); return; }
+            if (mErr) { rwFailed(mErr, finish); return; }
             var wErr = null;
             try {
                 list.forEach(function (x) {
@@ -484,7 +500,7 @@ function restoreTarget(t, onlyIfRunning, fails, cb, waitMs) {
         writing = true;
         function finish(err, outcome) { if (!released) { released = true; writing = false; lock.release(); } cb(err, outcome); }
         remount(true, function (mErr) {
-            if (mErr) { finish(new Error('remount rw: ' + mErr.message)); return; }
+            if (mErr) { rwFailed(mErr, finish); return; }
             var wErr = null;
             try {
                 if (writes.length && !lock.holds(t.running, t.target) && (!onlyIfRunning || lock.inUse(t.target))) {
