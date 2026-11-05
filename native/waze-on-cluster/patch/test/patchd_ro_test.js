@@ -340,6 +340,23 @@ async function main() {
     cp.execFileSync('rm', ['-rf', locked('hook1'), locked('hook1') + '.ro-failed']);
     r = await rePatch();   /* CarPlay patched again for the next check */
 
+    /* ---- review of fix3-p, F4: one-shot with aa_enabled=1 stops after the CarPlay step's roErr ---- */
+    fs.mkdirSync(path.join(dir, 'hook2'));
+    fs.writeFileSync(STUCK, '');
+    newMountCalls();
+    h = hook('hook2', 'deactivate', true);
+    mcalls = newMountCalls();
+    ok('F4 one-shot, aa_enabled=1, remount,ro never takes: CarPlay was reverted, / stays read-write, the lock and the guard are kept',
+        fs.readFileSync(TGT).equals(SRC) && !roNow() && fs.existsSync(locked('hook2')) && fs.existsSync(locked('hook2') + '.ro-failed'), h.out);
+    ok('F4 one-shot, aa_enabled=1: the removal reports Android Auto not undone because of the guard (exit 1), the AA step did not run',
+        h.code === 1 && h.result.aa && /ro-failed/.test(h.result.aa.status) && /not undone/.test(h.result.aa.status), JSON.stringify([h.code, h.result]) + h.out);
+    ok('F4 one-shot, aa_enabled=1: exactly one remount,rw (the CarPlay step), none for Android Auto',
+        mcalls.filter(function (c) { return /remount,rw/.test(c); }).length === 1, JSON.stringify(mcalls));
+    fs.unlinkSync(STUCK);
+    fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n');
+    cp.execFileSync('rm', ['-rf', locked('hook2'), locked('hook2') + '.ro-failed']);
+    r = await rePatch();
+
     /* ---- F-P1: the link cannot be made while a process runs the file: nothing is written ---- */
     d.child.kill('SIGKILL');
     var LONG = path.join(dir, 'usr', new Array(245).join('c'));   /* name + '.woc-running' is over NAME_MAX (255) */

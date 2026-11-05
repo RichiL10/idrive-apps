@@ -1700,6 +1700,18 @@ function oneShot(which) {
                 finish(0);
                 return;
             }
+            /* The map step could not put / back read-only (review of fix3-p, F4):
+             * the guard stands and the lock is kept, and nothing more is written
+             * (this step runs under the lock it already holds, which no
+             * tryAcquireWrite would recheck). */
+            var guardWhy = lock.roFailedReason();
+            if (guardWhy !== null) {
+                result.aa = { status: which === 'deactivate' ? 'Android Auto not undone: ' + roReason(guardWhy) + '; the tool stays to guard it'
+                    : 'Android Auto left as it is: ' + roReason(guardWhy) + '; nothing more is written until / is read-only again' };
+                log(which + ': ' + result.aa.status);
+                finish(which === 'deactivate' ? 1 : 0);
+                return;
+            }
             if (hookDeadline - Date.now() < AA_HOOK_MIN_MS) {
                 result.aa = { status: which === 'deactivate' ? 'Android Auto not undone: out of time; the tool stays to guard it'
                     : 'Android Auto left as it is: out of time; the next install or Android Auto\'s Patch button applies it' };
