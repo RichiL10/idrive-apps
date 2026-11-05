@@ -60,8 +60,9 @@
  * aapd.conf not readable by them, as a write
  * under umask 077 leaves them) its original's mode and owner, nothing
  * else. Each remount is bounded (STEP_MS); a boot step gives
- * up at BOOT_BOUND_MS whatever hangs and exits by BOOT_EXIT_MS, after one
- * bounded try to put / back read-only. It never kills, restarts or reboots
+ * up at BOOT_BOUND_MS whatever hangs and exits by BOOT_EXIT_MS, after a few
+ * bounded tries to put / back read-only (it exits 1 and keeps the remount lock
+ * with the ro-failed guard when / is still not verified read-only). It never kills, restarts or reboots
  * anything; the only start is `systemctl start` of the service after a
  * crash or a SIGKILL patchd did not send, never stop or restart, bounded by
  * START_DELAYS_MS per boot.
@@ -1134,9 +1135,10 @@ module.exports = {
 
 /* ---- run as the boot step or the watcher ---- */
 
-/* The boot step for one service (`recovery.js boot [carplay|aapd]`) always
- * exits 0, by BOOT_EXIT_MS at the latest, a restore cut short after a try
- * to put / back read-only: the service's start never waits on its failure. Nothing runs the service before it, so the restore links
+/* The boot step for one service (`recovery.js boot [carplay|aapd]`) exits by
+ * BOOT_EXIT_MS at the latest, a restore cut short after tries to put / back
+ * read-only: 0, or 1 while a ro-failed guard stands (/ not verified read-only).
+ * The unit runs it with ExecStart=-, so the service's start never waits on its failure. Nothing runs the service before it, so the restore links
  * the patched binary only if a process runs it. */
 function runBoot(name) {
     var t = TARGETS[name || 'carplay'];
