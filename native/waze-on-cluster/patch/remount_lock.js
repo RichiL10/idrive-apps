@@ -48,7 +48,8 @@ function tryAcquire() {
     var fd;
     try {
         fd = fs.openSync(LOCK, 'wx');
-        fs.writeSync(fd, process.pid + ' ' + new Date().toISOString() + '\n');
+        var id = startId(process.pid);   /* read once, here: a recycled pid is told from the holder by it (R3-2) */
+        fs.writeSync(fd, process.pid + ' ' + new Date().toISOString() + (id ? ' ' + id : '') + '\n');
         fs.closeSync(fd);
         return true;
     } catch (e) {
@@ -103,13 +104,33 @@ function breakDead(seen) {
     }
 }
 
-/* Whether the pid a lock file names is gone: true (no such process), false
+/* Whether the process a lock file names is gone: true (no such process, or the pid now belongs to another one), false
  * (it runs, or exists and is not ours to signal: EPERM), null (no pid in it,
  * e.g. a holder that has created the file and not written it yet). */
 function holderGone(text) {
-    var pid = parseInt((text || '').split(' ')[0], 10);
+    var f = (text || '').trim().split(' ');
+    var pid = parseInt(f[0], 10);
     if (!(pid > 0)) return null;
-    try { process.kill(pid, 0); return false; } catch (e) { return e.code === 'ESRCH'; }
+    try { process.kill(pid, 0); } catch (e) { return e.code === 'ESRCH'; }
+    /* The pid runs. A lock that carries the holder's start time (field 22 of /proc/<pid>/stat, written at
+     * acquire) names that process only while the start time still matches: another process on a recycled
+     * pid, or one whose start time cannot be read (other than this process), is not the holder (R3-2).
+     * A lock without it (older, or the start time was unreadable at acquire) is judged by the pid alone. */
+    var id = /^\d+$/.test(f[2] || '') ? f[2] : '';
+    if (id) {
+        var now = startId(pid);
+        if (now !== id && !(pid === process.pid && now === '')) return true;
+    }
+    return false;
+}
+
+/* Field 22 (starttime) of /proc/<pid>/stat; '' when it cannot be read. WOC_LOCK_PROC is read at each call (tests). */
+function startId(pid) {
+    try {
+        var s = fs.readFileSync(path.join(process.env.WOC_LOCK_PROC || '/proc', String(pid), 'stat'), 'utf8');
+        var rest = s.slice(s.lastIndexOf(')') + 2).split(' ');   /* rest[0] is field 3 (state) */
+        return /^\d+$/.test(rest[19]) ? rest[19] : '';
+    } catch (e) { return ''; }
 }
 
 /* acquire within timeoutMs, polling; cb(true) on success, cb(false) on timeout. */

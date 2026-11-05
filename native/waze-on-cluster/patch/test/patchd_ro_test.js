@@ -276,22 +276,22 @@ async function main() {
     r = await op(d, APPLY);
     ok('F-P3 cleared: with / read-only again the next change clears the guard and runs', r.state !== 'error' && roNow() && !fs.existsSync(d.guard) && !fs.existsSync(d.lock), JSON.stringify(r));
 
-    /* ---- G2-3 (review of fix4-p): patchd that keeps the lock with the guard retries the read-only remount itself ---- */
+    /* ---- R3-1 (review of fix5-p): patchd keeps the lock with the guard and does not retry the remount by itself ---- */
     var dr = startPatchd('retry', TGT, PROC, { WOC_RO_RETRY_MS: '300' });
     for (i = 0; i < 200 && !fs.existsSync(dr.sock); i++) await sleep(25);
     dummy = dummyCarplay();
     setUnit('ok', dummy.pid);
     fs.writeFileSync(STUCK, '');
     r = await op(dr, { cmd: 'revert' });
-    ok('G2-3 setup: the change leaves the guard and the lock with patchd', r.state === 'error' && !roNow() && fs.existsSync(dr.guard) && fs.readFileSync(dr.lock, 'utf8').split(' ')[0] === String(dr.child.pid), JSON.stringify(r));
+    ok('R3-1 setup: the change leaves the guard and the lock with patchd', r.state === 'error' && !roNow() && fs.existsSync(dr.guard) && fs.readFileSync(dr.lock, 'utf8').split(' ')[0] === String(dr.child.pid), JSON.stringify(r));
     fs.unlinkSync(STUCK);
-    for (i = 0; i < 100 && (fs.existsSync(dr.guard) || fs.existsSync(dr.lock)); i++) await sleep(50);
-    ok('G2-3 patchd retries the read-only remount itself: / read-only, guard and lock gone with no request', roNow() && !fs.existsSync(dr.guard) && !fs.existsSync(dr.lock),
+    await sleep(1500);
+    ok('R3-1 patchd does not retry the read-only remount by itself: / still writable, guard and lock stand', !roNow() && fs.existsSync(dr.guard) && fs.existsSync(dr.lock),
         JSON.stringify([roNow(), fs.existsSync(dr.guard), fs.existsSync(dr.lock)]));
     dummy = dummyCarplay();
     setUnit('ok', dummy.pid);
     r = await op(dr, APPLY);
-    ok('G2-3 patchd is patched again for the next section', r.state !== 'error' && roNow(), JSON.stringify(r));
+    ok('R3-1 the next request heals the guard and patchd goes on', r.state !== 'error' && roNow(), JSON.stringify(r));
     dr.child.kill('SIGKILL');
     await sleep(100);
     /* ---- review of fix3-p, F3: the ro-failed marker cannot be written (its path is a directory) ---- */
@@ -394,6 +394,48 @@ async function main() {
     mcalls = newMountCalls();
     ok('C an empty status: a plain apply is refused before anything is remounted', r.state === 'error' && /status unreadable/.test(r.reason || '') && mcalls.length === 0, JSON.stringify([r, mcalls]));
     d3.child.kill('SIGKILL');
+    /* ---- R3-4 (review of fix5-p): output cut after "known: yes", and a status read already in flight, do not pass the precheck ---- */
+    var FAKE = path.join(dir, 'fake-patcher.js'), FAKE_MODE = path.join(dir, 'fake-patcher-mode');
+    fs.writeFileSync(FAKE, 'var fs = require("fs"), cp = require("child_process"), a = process.argv.slice(2);\n' +
+        'var m = a[0] === "status" && fs.existsSync(' + JSON.stringify(FAKE_MODE) + ') ? fs.readFileSync(' + JSON.stringify(FAKE_MODE) + ', "utf8").trim() : "";\n' +
+        'if (m) setTimeout(function () { process.stdout.write("known: yes, pristine synthetic\\n"); }, m === "slow" ? 600 : 0);\n' +
+        'else process.exit(cp.spawnSync(process.execPath, [' + JSON.stringify(path.join(__dirname, '..', 'carplay_patch.js')) + '].concat(a), { stdio: "inherit" }).status);\n');
+    var d4 = startPatchd('c4', TGT, PROC, { WOC_TEST_PATCHER: FAKE });
+    for (i = 0; i < 200 && !fs.existsSync(d4.sock); i++) await sleep(25);
+    fs.writeFileSync(FAKE_MODE, 'cut');
+    newMountCalls();
+    r = await op(d4, { cmd: 'apply', panel: 'high', mode: 'avb' });
+    mcalls = newMountCalls();
+    ok('R3-4 output cut after known: yes: a plain apply is refused before anything is remounted', r.state === 'error' && /status unreadable/.test(r.reason || '') && mcalls.length === 0, JSON.stringify([r, mcalls]));
+    d4.child.kill('SIGKILL');
+    /* a patchd that has read nothing yet: its cache is the initial one, which would pass the precheck */
+    fs.writeFileSync(FAKE_MODE, 'slow');
+    d4 = startPatchd('c5', TGT, PROC, { WOC_TEST_PATCHER: FAKE });
+    for (i = 0; i < 200 && !fs.existsSync(d4.sock); i++) await sleep(25);
+    newMountCalls();
+    r = await new Promise(function (resolve, reject) {
+        var c = net.connect(d4.sock), buf = '', last = null;
+        var timer = setTimeout(function () { c.destroy(); resolve(last); }, 8000);
+        c.setEncoding('utf8');
+        c.on('error', reject);
+        c.on('connect', function () { c.write(JSON.stringify({ cmd: 'apply', panel: 'high', mode: 'avb' }) + '\n'); });   /* no wait for patchd's own status */
+        c.on('data', function (data) {
+            buf += data;
+            var k;
+            while ((k = buf.indexOf('\n')) >= 0) {
+                var m = JSON.parse(buf.slice(0, k));
+                buf = buf.slice(k + 1);
+                if (m.ev !== 'status') continue;
+                last = m;
+                if (m.state === 'error') { clearTimeout(timer); c.destroy(); resolve(m); return; }
+            }
+        });
+    });
+    mcalls = newMountCalls();
+    ok('R3-4 an apply sent while a status read runs waits for a fresh one (not the initial cache): refused, nothing remounted',
+        r && r.state === 'error' && /status unreadable/.test(r.reason || '') && mcalls.length === 0, JSON.stringify([r, mcalls]));
+    fs.unlinkSync(FAKE_MODE);
+    d4.child.kill('SIGKILL');
     /* ---- F-P1: the link cannot be made while a process runs the file: nothing is written ---- */
     d.child.kill('SIGKILL');
     var LONG = path.join(dir, 'usr', new Array(245).join('c'));   /* name + '.woc-running' is over NAME_MAX (255) */
