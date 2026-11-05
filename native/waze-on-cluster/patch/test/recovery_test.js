@@ -1145,6 +1145,42 @@ test('F-P3: while the guard stands no writer passes, and the watcher retries it 
     } finally { fs.writeFileSync(mount, body); fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n'); await healGuard('watcher'); }
 });
 
+/* ---- review of fix3-p, F2: a fresh watcher that imports an on-disk guard keeps retrying it ---- */
+
+test('F2: a fresh watcher with only a guard on disk (nothing in its own memory) retries it every probe interval until / is read-only', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'original');
+    const mount = path.join(ROOT, 'mount'), body = fs.readFileSync(mount, 'utf8');
+    const lock = require('../remount_lock.js');
+    try {
+        /* the guard is another process's: a file only, this process holds neither the lock nor the reason */
+        fs.writeFileSync(GUARD, '4242 2026-01-01T00:00:00.000Z / is read-write after a restore\n');
+        fs.writeFileSync(MOUNTS, '/dev/root / ext4 rw 0 0\n');
+        fs.writeFileSync(mount, '#!/bin/sh\necho "$*" >> "' + MOUNT_LOG + '"\n');   /* remount,ro does nothing */
+        fs.writeFileSync(MOUNT_LOG, '');
+        assert.strictEqual(lock.roFailedReason() !== null, true, 'the on-disk guard is seen');
+        const rec = w.recovery('carplay', 'B');
+        let r = await tick(rec);
+        assert.strictEqual(r.action, 'ro-retry', 'the first tick retries the imported guard');
+        assert(mountCalls().some((c) => /remount,ro/.test(c)), 'remount,ro was tried: ' + mountCalls());
+        assert(fs.existsSync(GUARD), 'still standing: / is read-write');
+        assertLockFree();
+        /* within the probe interval: no new try */
+        fs.writeFileSync(MOUNT_LOG, '');
+        r = await tick(rec);
+        assert.notStrictEqual(r.action, 'ro-retry');
+        assert.strictEqual(mountCalls().length, 0);
+        /* the next interval, the mount works: the retry clears the guard */
+        fs.writeFileSync(mount, '#!/bin/sh\necho "$*" >> "' + MOUNT_LOG + '"\necho "/dev/root / ext4 ro 0 0" > "' + MOUNTS + '"\n');
+        rec._roTry = -Infinity;
+        r = await tick(rec);
+        assert.strictEqual(r.action, 'ro-retry');
+        assert(ro());
+        assert(!fs.existsSync(GUARD), 'guard cleared');
+        assertLockFree();
+    } finally { fs.writeFileSync(mount, body); fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n'); try { fs.unlinkSync(GUARD); } catch (e) {} }
+});
+
 /* ---- review of fix3-p, F1: the boot step ends by verifying / read-only, not by finding no guard ---- */
 
 const RW_LINE = '/dev/root / ext4 rw 0 0\n';

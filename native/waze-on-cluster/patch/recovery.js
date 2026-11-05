@@ -970,8 +970,10 @@ Recovery.prototype.tick = function (cb) {
     var self = this;
     if (this._busy || this.restoring || off(this.target)) { cb({ action: 'skip' }); return; }
     var now = this._now();
-    /* A standing ro-failed guard is retried here, once per PROBE_MS. */
-    if (roFailed !== null && now - this._roTry >= PROBE_MS) {
+    /* A standing ro-failed guard is retried here, once per PROBE_MS: the
+     * process's own, or one on disk that another process (or an earlier run of
+     * this one) set, which the start-up roGuard could not clear (review of fix3-p, F2). */
+    if (roStanding() !== null && now - this._roTry >= PROBE_MS) {
         this._roTry = now;
         this._busy = true;
         roGuard(function () { self._busy = false; cb({ action: 'ro-retry' }); });
