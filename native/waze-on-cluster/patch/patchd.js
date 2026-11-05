@@ -678,23 +678,8 @@ function holdRoFailed(message) {
     var marked = lock.markRoFailed(message);
     log('ERROR: ro-failed: ' + message + '; the remount lock is kept and nothing writes / until it is read-only again');
     if (!marked) log('ERROR: the ro-failed marker could not be written; the guard stands in this process only, and the next writer verifies / read-only itself before it writes');
-    scheduleRoRetry();
 }
-/* While patchd keeps the lock with the guard, the watcher cannot heal it (the lock is a live
- * process's), so patchd retries the read-only remount itself every RO_RETRY_MS until / is
- * verified read-only (G2-3 of the review of fix4-p). Not while an operation runs. */
-var RO_RETRY_MS = parseInt(process.env.WOC_RO_RETRY_MS, 10) || 5000;
-var roRetryTimer = null;
-function scheduleRoRetry() {
-    if (roRetryTimer) return;
-    roRetryTimer = setTimeout(function () {
-        roRetryTimer = null;
-        if (lock.roFailedReason() === null) return;
-        if (busy) { scheduleRoRetry(); return; }
-        roHeal(function (standing) { if (standing !== null) scheduleRoRetry(); else log('/ is read-only again: the ro-failed guard is cleared'); });
-    }, RO_RETRY_MS);
-    if (roRetryTimer.unref) roRetryTimer.unref();
-}
+/* patchd does not retry a failed read-only remount by itself (an asynchronous retry could run beside an operation's heal and release the lock the operation took, review of fix5-p, R3-1). The guard is healed by the next change (acquireOp, roHeal under the lock), a status read once / is read-only again (roStanding), the recovery watcher once patchd is gone, or a reboot. */
 /* What a writer verifies under the lock before it remounts / read-write (lock.acquireWrite). */
 var RO = { isRo: rootIsReadOnly, remountRo: function (done) { remountRo(3, done); } };
 
