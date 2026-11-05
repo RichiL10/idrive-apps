@@ -172,9 +172,9 @@ function patchdEnv(name, tgt, proc, extra) {
             WOC_AA_ENABLED: '0',
     }, extra || {});
 }
-function startPatchd(name, tgt, proc) {
+function startPatchd(name, tgt, proc, extra) {
     var sockDir = path.join(dir, name), sock = path.join(sockDir, 'patch.sock');
-    var child = cp.spawn(process.execPath, [PATCHD], { env: patchdEnv(name, tgt, proc), stdio: ['ignore', 'ignore', 'inherit'] });
+    var child = cp.spawn(process.execPath, [PATCHD], { env: patchdEnv(name, tgt, proc, extra), stdio: ['ignore', 'ignore', 'inherit'] });
     children.push(child);
     return { child: child, sock: sock, lock: path.join(sockDir, 'remount.lock'), guard: path.join(sockDir, 'remount.lock.ro-failed') };
 }
@@ -276,6 +276,24 @@ async function main() {
     r = await op(d, APPLY);
     ok('F-P3 cleared: with / read-only again the next change clears the guard and runs', r.state !== 'error' && roNow() && !fs.existsSync(d.guard) && !fs.existsSync(d.lock), JSON.stringify(r));
 
+    /* ---- G2-3 (review of fix4-p): patchd that keeps the lock with the guard retries the read-only remount itself ---- */
+    var dr = startPatchd('retry', TGT, PROC, { WOC_RO_RETRY_MS: '300' });
+    for (i = 0; i < 200 && !fs.existsSync(dr.sock); i++) await sleep(25);
+    dummy = dummyCarplay();
+    setUnit('ok', dummy.pid);
+    fs.writeFileSync(STUCK, '');
+    r = await op(dr, { cmd: 'revert' });
+    ok('G2-3 setup: the change leaves the guard and the lock with patchd', r.state === 'error' && !roNow() && fs.existsSync(dr.guard) && fs.readFileSync(dr.lock, 'utf8').split(' ')[0] === String(dr.child.pid), JSON.stringify(r));
+    fs.unlinkSync(STUCK);
+    for (i = 0; i < 100 && (fs.existsSync(dr.guard) || fs.existsSync(dr.lock)); i++) await sleep(50);
+    ok('G2-3 patchd retries the read-only remount itself: / read-only, guard and lock gone with no request', roNow() && !fs.existsSync(dr.guard) && !fs.existsSync(dr.lock),
+        JSON.stringify([roNow(), fs.existsSync(dr.guard), fs.existsSync(dr.lock)]));
+    dummy = dummyCarplay();
+    setUnit('ok', dummy.pid);
+    r = await op(dr, APPLY);
+    ok('G2-3 patchd is patched again for the next section', r.state !== 'error' && roNow(), JSON.stringify(r));
+    dr.child.kill('SIGKILL');
+    await sleep(100);
     /* ---- review of fix3-p, F3: the ro-failed marker cannot be written (its path is a directory) ---- */
     fs.mkdirSync(d.guard);
     dummy = dummyCarplay();
@@ -357,6 +375,25 @@ async function main() {
     cp.execFileSync('rm', ['-rf', locked('hook2'), locked('hook2') + '.ro-failed']);
     r = await rePatch();
 
+    /* ---- G2-4 (review of fix4-p): an old link that cannot be removed leaves no verified link: nothing is written ---- */
+    noProc();
+    try { fs.unlinkSync(RUNNING); } catch (e) {}
+    fs.mkdirSync(RUNNING);   /* unlink fails (EISDIR/EPERM) and no process runs it */
+    var beforeG24 = fs.readFileSync(TGT);
+    newMountCalls();
+    r = await op(d, APPLY);
+    ok('G2-4 an old link that cannot be removed: refused with the reason, nothing written',
+        r.state === 'error' && /cannot be removed/.test(r.reason || '') && /nothing written/.test(r.reason || '') && fs.readFileSync(TGT).equals(beforeG24), JSON.stringify(r));
+    ok('G2-4 an old link that cannot be removed: / read-only (verified), lock released, no guard', roNow() && !fs.existsSync(d.lock) && !fs.existsSync(d.guard));
+    fs.rmdirSync(RUNNING);
+    /* ---- C (review of fix4-p): an empty status is not a known build: a plain apply is refused before the remount ---- */
+    var d3 = startPatchd('c3', path.join(dir, 'usr', 'missing'), PROC);
+    for (i = 0; i < 200 && !fs.existsSync(d3.sock); i++) await sleep(25);
+    newMountCalls();
+    r = await op(d3, { cmd: 'apply', panel: 'high', mode: 'avb' });
+    mcalls = newMountCalls();
+    ok('C an empty status: a plain apply is refused before anything is remounted', r.state === 'error' && /status unreadable/.test(r.reason || '') && mcalls.length === 0, JSON.stringify([r, mcalls]));
+    d3.child.kill('SIGKILL');
     /* ---- F-P1: the link cannot be made while a process runs the file: nothing is written ---- */
     d.child.kill('SIGKILL');
     var LONG = path.join(dir, 'usr', new Array(245).join('c'));   /* name + '.woc-running' is over NAME_MAX (255) */

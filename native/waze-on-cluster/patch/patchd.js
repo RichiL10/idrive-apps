@@ -394,6 +394,8 @@ function readState(cb) {
         var safeMatch = /res:\s+PATCHED \(IC_HIGH advertises [^,\n]*, safe (\d+x\d+) at (\d+),(\d+)\)/.exec(text);
         var resOriginal = /res:\s+ORIGINAL/.test(text);
         var known = /known:\s+NO/.test(text) ? false : true;
+        /* No known: line (empty or unparsable output): nothing is known about the build, so a plain apply is refused before the remount. */
+        var statusOk = /known:\s+(yes|NO)/.test(text);
         var unknownWhy = /known:\s+NO — (.*)/.exec(text);
         var pristine = /known:\s+yes, pristine/.test(text);
         var proven = !/proven:\s+no/.test(text);
@@ -457,6 +459,7 @@ function readState(cb) {
                         /* the first edit of this build needs the user's confirmation (S3);
                          * a modified build is refused by the patcher anyway (a conflict) */
                         unproven: known && !hasBackup && pristine && !proven,
+                        unreadable: !statusOk,
                         /* boot recovery marked the patch failed (S4): crashing, no backup
                          * restores it. Reported only while the binary is not the original:
                          * restored by hand, the mark is stale and clears at the next boot
@@ -675,6 +678,22 @@ function holdRoFailed(message) {
     var marked = lock.markRoFailed(message);
     log('ERROR: ro-failed: ' + message + '; the remount lock is kept and nothing writes / until it is read-only again');
     if (!marked) log('ERROR: the ro-failed marker could not be written; the guard stands in this process only, and the next writer verifies / read-only itself before it writes');
+    scheduleRoRetry();
+}
+/* While patchd keeps the lock with the guard, the watcher cannot heal it (the lock is a live
+ * process's), so patchd retries the read-only remount itself every RO_RETRY_MS until / is
+ * verified read-only (G2-3 of the review of fix4-p). Not while an operation runs. */
+var RO_RETRY_MS = parseInt(process.env.WOC_RO_RETRY_MS, 10) || 5000;
+var roRetryTimer = null;
+function scheduleRoRetry() {
+    if (roRetryTimer) return;
+    roRetryTimer = setTimeout(function () {
+        roRetryTimer = null;
+        if (lock.roFailedReason() === null) return;
+        if (busy) { scheduleRoRetry(); return; }
+        roHeal(function (standing) { if (standing !== null) scheduleRoRetry(); else log('/ is read-only again: the ro-failed guard is cleared'); });
+    }, RO_RETRY_MS);
+    if (roRetryTimer.unref) roRetryTimer.unref();
 }
 /* What a writer verifies under the lock before it remounts / read-write (lock.acquireWrite). */
 var RO = { isRo: rootIsReadOnly, remountRo: function (done) { remountRo(3, done); } };
@@ -1071,7 +1090,14 @@ function patchWith(t, args, action, blocked, done, run) {
     function fin(err, activation, why) { finalizeRo(t, err, function (e, r) { done(e, r, activation, why); }, restartable); }
     remount(true, function (mErr) {
         if (mErr) { fin(new Error('remount rw: ' + mErr.message), null); return; }
-        if (!needed(t)) unlinkQuiet(t.running);
+        var held = needed(t), staleErr = null;
+        if (!held) { try { fs.unlinkSync(t.running); } catch (e) { if (e.code !== 'ENOENT') staleErr = e; } }
+        /* A link that cannot be removed leaves no verified link: nothing is written (G2-4 of the review of fix4-p). */
+        if (staleErr) {
+            log('removing the old ' + t.running + ' failed: ' + staleErr.message);
+            fin(new Error(t.name + ' not changed: keeping it linked as ' + t.running + ' failed (the old link cannot be removed: ' + staleErr.message + '); nothing written'), null);
+            return;
+        }
         /* The old inode stays linked (t.running) before EVERY replacement while
          * a process runs it, whether or not the service is restarted after:
          * a restart can fail (systemctl, the SIGKILL, the wait for the PID),
@@ -1081,7 +1107,7 @@ function patchWith(t, args, action, blocked, done, run) {
          * process is seen to run the file: a process can start between a look
          * at /proc and the patcher's rename (review of fix3-p, F5). It goes
          * after the write when nothing runs the old inode (needed). */
-        if (fs.existsSync(t.running)) {
+        if (held) {
             /* What is left here is a link a process runs (needed above) and it
              * is not the target's own file: no name is left for the target's. */
             if (lock.inUse(t.target)) { fin(new Error(t.name + ' not changed: processes run both ' + t.target + ' and ' + t.running + '; nothing written, try after the next head-unit start'), null); return; }
@@ -1406,10 +1432,11 @@ function handle(line, sock) {
              * stays as the second line, for a state that changed meanwhile. */
             busy = 'carplay';   /* held while the state is read: no second command meanwhile */
             readState(function (st) {
-                if (st && st.unproven) {
+                if (st && (st.unproven || st.unreadable)) {
+                    var why = st.unproven ? UNPROVEN_REASON : 'carplay status unreadable; nothing changed';
                     busy = null;
-                    log('apply refused: ' + UNPROVEN_REASON + ' (checked before the remount)');
-                    status({ state: 'error', reason: UNPROVEN_REASON });
+                    log('apply refused: ' + why + ' (checked before the remount)');
+                    status({ state: 'error', reason: why });
                     quitWhenIdle();
                     return;
                 }
