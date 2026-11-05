@@ -418,7 +418,9 @@ int main()
             expect(r.pictures == std::vector<uint8_t>({1}) && r.dec.device_failures() == 1 && !r.dec.decoding(),
                    "counted at the first failure, waiting for an SPS");
             r.sequence(kCarPlay, 2, 10);
-            expect(r.dec.device_failures() == 1 && r.dec.decoding() && count("session") == 2, "the next SPS starts a new session");
+            expect(r.dec.device_failures() == 1, "the next SPS: still one failure counted");
+            expect(r.dec.decoding(), "the next SPS: decoding again");
+            expect(count("session gpucopy 1") == 2, "the next SPS: in a new session");
         });
         isolated("a hang or a lost device in the wait for VPP with GPU copy closes the session at once", [status] {
             any_fault({"vpp-sync", status, 1, 1});
