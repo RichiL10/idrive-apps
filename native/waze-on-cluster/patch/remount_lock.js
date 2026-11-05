@@ -212,7 +212,13 @@ function acquireWrite(timeoutMs, cb, ro) {
  * process holds is not taken: cb(why). */
 function healRo(why, isRo, remountRo, cb) {
     var mine = ownsLock();
-    function cleared() { clearRoFailed(); release(); cb(null); }
+    function cleared() {
+        clearRoFailed();
+        release();
+        /* the lock a dead writer kept with the guard goes with it (breakDead re-checks that it is dead) */
+        if (!mine) { try { var seen = fs.readFileSync(LOCK, 'utf8'); if (holderGone(seen) === true) breakDead(seen); } catch (e) {} }
+        cb(null);
+    }
     if (isRo()) { cleared(); return; }
     if (!mine && !tryAcquire()) { cb(why); return; }
     remountRo(function () {

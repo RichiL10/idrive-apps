@@ -405,20 +405,38 @@ function holdRoFailed(why) {
      * with RO), and puts / back or refuses. */
     if (!marked) log('ERROR: the ro-failed marker could not be written; the guard stands in this process only, and the next writer verifies / read-only itself before it writes');
 }
-/* True when no guard stands; one whose / is read-only now is cleared. */
+/* True only when / is read-only per /proc/mounts, now (review of fix3-p, F1:
+ * no guard standing is no proof of it); a guard that stands is cleared then. */
 function roSettled() {
-    var why = roFailed !== null ? roFailed : lock.roFailedReason();
-    if (why === null) return true;
     if (!rootIsReadOnly()) return false;
-    roFailed = null;
-    writing = false;
-    lock.clearRoFailed();
-    lock.release();
+    if (roStanding() !== null) {
+        roFailed = null;
+        writing = false;
+        lock.clearRoFailed();
+        lock.release();
+    }
     return true;
+}
+/* The boot step's last word, cb(true) once / is verified read-only (roSettled),
+ * after it was put back if it was not: a standing guard is retried (roGuard);
+ * with / read-write and no guard (a writer that died with it writable, or one
+ * in its window) the lock is waited for, and under it / is verified and
+ * put back (acquireWrite with RO), else the guard is set and the lock kept.
+ * cb(false) when it could not. */
+function settleRo(cb) {
+    if (roSettled()) { cb(true); return; }
+    if (roStanding() !== null) { roGuard(function () { cb(roSettled()); }); return; }
+    log('/ is read-write and no ro-failed guard stands: taking the remount lock to verify and put it back read-only');
+    lock.acquireWrite(BOOT_LOCK_WAIT_MS, function (got, rf) {
+        if (got) { lock.release(); cb(roSettled()); return; }
+        if (rf !== null) { if (lock.ownsLock()) holdRoFailed(rf); }
+        else log('the remount lock is held by another process for ' + BOOT_LOCK_WAIT_MS + ' ms: / is not verified read-only');
+        cb(false);
+    }, RO);
 }
 /* cb(null) with no guard (synchronously) or once it is cleared, else cb(why). */
 function roGuard(cb) {
-    var why = roFailed !== null ? roFailed : lock.roFailedReason();
+    var why = roStanding();
     if (why === null) { cb(null); return; }
     lock.healRo(why, rootIsReadOnly, function (done) { remountRo(RO_TRIES, done); }, function (left) {
         if (!left) {
@@ -1158,17 +1176,25 @@ function runBoot(name) {
      * writable; the lock and <lock>.ro-failed are kept, see holdRoFailed).
      * The service's unit runs this with ExecStart=-, so the status changes
      * no ordering; it is the terminal failure the journal shows. */
-    function leave() {
-        if (roSettled()) process.exit(0);
-        log('ERROR: ' + t.name + ' boot check failed: / is not verified read-only (ro-failed: ' + (roFailed !== null ? roFailed : lock.roFailedReason()) +
-            '); the remount lock is kept and nothing writes / until it is read-only again; exiting 1');
+    function exitWith(settled) {
+        if (settled) process.exit(0);
+        var why = roStanding();
+        log('ERROR: ' + t.name + ' boot check failed: / is not verified read-only (' + (why !== null ? 'ro-failed: ' + why : 'read-write, or the remount lock is held by another process') +
+            '); any guard and lock are kept and nothing writes / until it is read-only again; exiting 1');
         process.exit(1);
+    }
+    /* The step ends by verifying / read-only (F1 of fix3-p): never by the mere absence of a guard. */
+    var leaving = false;
+    function leave() {
+        if (leaving) return;
+        leaving = true;
+        settleRo(exitWith);
     }
     setTimeout(function () {
         log(t.name + ' boot check: out of time after ' + BOOT_BOUND_MS + ' ms; ' + t.name + ' starts as it is');
         setTimeout(function () {
             if (writing && roFailed === null) holdRoFailed('the boot step ran out of time and its remount,ro did not return');
-            leave();
+            exitWith(roSettled());   /* the hard deadline: no more waiting */
         }, BOOT_EXIT_MS - BOOT_BOUND_MS).unref();
         abandonRestore(leave);
     }, BOOT_BOUND_MS).unref();
