@@ -1145,6 +1145,98 @@ test('F-P3: while the guard stands no writer passes, and the watcher retries it 
     } finally { fs.writeFileSync(mount, body); fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n'); await healGuard('watcher'); }
 });
 
+/* ---- review of fix3-p, F3: the ro-failed marker cannot be written ---- */
+
+test('F3: the marker cannot be written (its path is a directory): the restore still keeps the lock and fails the step (exit 1); the next run takes the dead holder\'s lock, verifies / itself, writes nothing; a working mount clears it', () => {
+    const w = makeWorld();
+    w.install('carplay', 'unproven');
+    fs.writeFileSync(w.T.carplay.state, JSON.stringify({ fails: 1, unknown: 0, arm: null }));
+    const m = brokenRoMount(w, false);
+    const guard = m.lockFile + '.ro-failed';
+    fs.mkdirSync(guard);   /* markRoFailed's writeFileSync fails with EISDIR */
+    const r = runBootStep(w, 'carplay', 'B', Object.assign({ WOC_RECOVERY_STEP_MS: '2000' }, m.env));
+    assert.strictEqual(r.status, 1, r.stdout + r.stderr);
+    assert(/ro-failed marker could not be written/.test(r.stdout), 'the failure is distinct in the log: ' + r.stdout);
+    assert(/\brw\b/.test(fs.readFileSync(m.mounts, 'utf8')), '/ is still read-write');
+    assert(fs.statSync(guard).isDirectory(), 'no marker could be written');
+    assert(fs.existsSync(m.lockFile), 'the lock file is left (its holder is gone, so it can be broken: the next writer must not trust it)');
+    /* The next run: no marker, a dead holder's lock, / read-write. It must not write: it takes the lock, sees / read-write,
+     * tries remount,ro only, and fails the step with the guard. */
+    fs.writeFileSync(m.log, '');
+    w.install('carplay', 'unproven');   /* the first restore wrote the original before / stayed writable: a patch again to restore */
+    fs.writeFileSync(w.T.carplay.state, JSON.stringify({ fails: 1, unknown: 0, arm: null }));
+    const r2 = runBootStep(w, 'carplay', 'B', Object.assign({ WOC_RECOVERY_STEP_MS: '2000' }, m.env));
+    assert.strictEqual(r2.status, 1, r2.stdout + r2.stderr);
+    const calls = fs.readFileSync(m.log, 'utf8').split('\n').filter(Boolean);
+    assert(calls.length > 0 && calls.every((c) => /remount,ro/.test(c)), 'only remount,ro tried, never remount,rw: ' + calls);
+    assert.strictEqual(w.holds('carplay'), 'patched', 'nothing written');
+    workingMount(w, m);
+    const r3 = runBootStep(w, 'carplay', 'B', Object.assign({ WOC_RECOVERY_STEP_MS: '2000' }, m.env));
+    assert.strictEqual(r3.status, 0, r3.stdout + r3.stderr);
+    assert.strictEqual(w.holds('carplay'), 'original', 'the restore went on once / was read-only');
+    assert(/\bro\b/.test(fs.readFileSync(m.mounts, 'utf8')) && !fs.existsSync(m.lockFile), '/ read-only, lock released');
+});
+
+test('F3: the marker cannot be written in this process: the guard still stands here (writers refused, lock kept), and clears when / is read-only', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'unproven');
+    const lock = require('../remount_lock.js');
+    fs.mkdirSync(GUARD);
+    const mount = path.join(ROOT, 'mount'), body = fs.readFileSync(mount, 'utf8');
+    fs.writeFileSync(mount, '#!/bin/sh\necho "$*" >> "' + MOUNT_LOG + '"\ncase "$*" in *remount,rw*) echo "/dev/root / ext4 rw 0 0" > "' + MOUNTS + '";; esac\n');
+    fs.writeFileSync(MOUNT_LOG, '');
+    try {
+        let err = null;
+        await new Promise((res) => recovery.restoreTarget(w.T.carplay, true, 1, (e) => { err = e; res(); }));
+        assert(err && err.roFailed, String(err));
+        assert(fs.statSync(GUARD).isDirectory(), 'no marker file');
+        assert(lock.roFailedReason() !== null, 'the guard stands in memory');
+        assert.strictEqual(lock.tryAcquire(), false, 'the lock is kept');
+        assert.strictEqual(lock.tryAcquireWrite(), false, 'no writer passes');
+        fs.writeFileSync(MOUNT_LOG, '');
+        w.install('carplay', 'unproven');   /* the first restore wrote the original: a patch again for the next writer */
+        let e2 = null;
+        await new Promise((res) => recovery.restoreTarget(w.T.carplay, true, 1, (e) => { e2 = e; res(); }, 300));
+        assert(e2 && e2.roFailed, 'the next writer is refused: ' + e2);
+        assert(mountCalls().every((c) => /remount,ro/.test(c)), 'no remount,rw: ' + mountCalls());
+    } finally {
+        fs.writeFileSync(mount, body); fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n');
+        fs.rmdirSync(GUARD);
+        await healGuard('marker unwritable');
+    }
+});
+
+test('F3: a lock taken from a dead holder with / read-write and no marker: the writer puts / back read-only first (remount,ro, then the write); if it cannot, it writes nothing', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'unproven');
+    fs.writeFileSync(path.join(ROOT, 'remount.lock'), '999999 2020-01-01T00:00:00.000Z\n');   /* a holder that is gone */
+    fs.writeFileSync(MOUNTS, '/dev/root / ext4 rw 0 0\n');
+    fs.writeFileSync(MOUNT_LOG, '');
+    let err = null;
+    await new Promise((res) => recovery.restoreTarget(w.T.carplay, true, 1, (e) => { err = e; res(); }));
+    assert.ifError(err);
+    assert.strictEqual(w.holds('carplay'), 'original');
+    const calls = mountCalls();
+    assert(/remount,ro/.test(calls[0]), 'verified and healed before anything else: ' + calls);
+    assert(ro());
+    assertLockFree();
+    /* now one that cannot be healed */
+    w.install('carplay', 'unproven');
+    fs.writeFileSync(path.join(ROOT, 'remount.lock'), '999999 2020-01-01T00:00:00.000Z\n');
+    fs.writeFileSync(MOUNTS, '/dev/root / ext4 rw 0 0\n');
+    const mount = path.join(ROOT, 'mount'), body = fs.readFileSync(mount, 'utf8');
+    fs.writeFileSync(mount, '#!/bin/sh\necho "$*" >> "' + MOUNT_LOG + '"\n');
+    fs.writeFileSync(MOUNT_LOG, '');
+    try {
+        err = null;
+        await new Promise((res) => recovery.restoreTarget(w.T.carplay, true, 1, (e) => { err = e; res(); }));
+        assert(err && err.roFailed, String(err));
+        assert(mountCalls().length > 0 && mountCalls().every((c) => /remount,ro/.test(c)), 'never remount,rw: ' + mountCalls());
+        assert.strictEqual(w.holds('carplay'), 'patched', 'nothing written');
+        assertGuardStands('unhealable');
+    } finally { fs.writeFileSync(mount, body); fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n'); await healGuard('unhealable'); }
+});
+
 test('the boot step restores a patch at once when it cannot save the boot\'s record; the original it leaves alone', async () => {
     for (const kind of ['unproven', 'original']) {
         const w = makeWorld();

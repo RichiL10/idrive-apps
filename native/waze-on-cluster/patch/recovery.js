@@ -384,6 +384,10 @@ function remountRo(tries, cb) {
  * a write and once per PROBE_MS in the watcher: the guard goes when / is
  * verified read-only. The boot step exits 1 while it stands. */
 var roFailed = null;
+/* What a writer needs to verify / read-only under the lock, or put it back (remount_lock.js verifyRo). */
+var RO = { isRo: rootIsReadOnly, remountRo: function (done) { remountRo(RO_TRIES, done); } };
+/* The standing guard's reason: this process's, else the marker's (or the lock module's, set in this process); null when none. */
+function roStanding() { return roFailed !== null ? roFailed : lock.roFailedReason(); }
 function roFailedError(why) {
     var e = new Error('ro-failed: ' + why + '; / may be writable, nothing is written until it is read-only again (mount -o remount,ro /)');
     e.roFailed = true;
@@ -392,9 +396,14 @@ function roFailedError(why) {
 function holdRoFailed(why) {
     roFailed = why;
     writing = true;
-    lock.markRoFailed(why);
+    var marked = lock.markRoFailed(why);
     log('ERROR: ro-failed: ' + why + '. / may still be writable: the remount lock is kept and no restore or patch writes until / is read-only again ' +
         '(mount -o remount,ro /; the next run clears the guard)');
+    /* A marker that cannot be written (F3 of fix3-p) is a distinct failure: the guard stands in this
+     * process only, and once it exits the next writer does not find it. It finds the lock gone (the
+     * holder is dead), takes it and verifies / read-only itself before it writes (lock.acquireWrite
+     * with RO), and puts / back or refuses. */
+    if (!marked) log('ERROR: the ro-failed marker could not be written; the guard stands in this process only, and the next writer verifies / read-only itself before it writes');
 }
 /* True when no guard stands; one whose / is read-only now is cleared. */
 function roSettled() {
@@ -438,14 +447,14 @@ function endWindow(err, roErr) {
 function takeLock(waitMs, cb) {
     roGuard(function (standing) {
         if (standing) { cb(roFailedError(standing)); return; }
-        if (waitMs) {
-            lock.acquireWrite(waitMs, function (got, rf) {
-                cb(got ? null : rf !== null ? roFailedError(rf) : new Error('remount lock held for ' + waitMs + ' ms; deferring'));
-            });
-            return;
-        }
-        if (!lock.tryAcquireWrite()) { var rf = lock.roFailedReason(); cb(rf !== null ? roFailedError(rf) : new Error('remount lock held; deferring')); return; }
-        cb(null);
+        /* Under the lock, / is verified read-only before anything remounts it read-write; if it is
+         * not and cannot be put back, the lock is kept with the guard set (acquireWrite). */
+        lock.acquireWrite(waitMs || 0, function (got, rf) {
+            if (got) { cb(null); return; }
+            if (rf === null) { cb(new Error(waitMs ? 'remount lock held for ' + waitMs + ' ms; deferring' : 'remount lock held; deferring')); return; }
+            if (lock.ownsLock()) holdRoFailed(rf);   /* the verification failed here: this process keeps the lock */
+            cb(roFailedError(rf));
+        }, RO);
     });
 }
 

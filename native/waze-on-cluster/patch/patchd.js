@@ -663,9 +663,21 @@ function roHeal(cb) {
 /* The end of a write window: the lock goes only once / is read-only; else it
  * is kept with the guard set. */
 function endWindow(roErr) {
-    if (roErr) { lock.markRoFailed(roErr.message); log('ERROR: ro-failed: ' + roErr.message + '; the remount lock is kept and nothing writes / until it is read-only again'); }
+    if (roErr) holdRoFailed(roErr.message);
     else lock.release();
 }
+/* Sets the guard (remount_lock.js markRoFailed) and says so. A marker that cannot be
+ * written (F3 of fix3-p) is a distinct failure: the guard stands in this process only (the
+ * lock module keeps the reason, so this process's writers and its one-shot exit keep the
+ * lock), and once it exits the next writer takes the dead holder's lock and verifies /
+ * read-only itself before it writes (acquireWrite with RO), putting it back or refusing. */
+function holdRoFailed(message) {
+    var marked = lock.markRoFailed(message);
+    log('ERROR: ro-failed: ' + message + '; the remount lock is kept and nothing writes / until it is read-only again');
+    if (!marked) log('ERROR: the ro-failed marker could not be written; the guard stands in this process only, and the next writer verifies / read-only itself before it writes');
+}
+/* What a writer verifies under the lock before it remounts / read-write (lock.acquireWrite). */
+var RO = { isRo: rootIsReadOnly, remountRo: function (done) { remountRo(3, done); } };
 
 /* Restarting carplay or aapd is safe only while nothing takes its SIGKILL
  * for a failure: recmgr loaded its entry this boot (recmgr_list.js), and,
@@ -1031,7 +1043,7 @@ function dropUnusedRunning(cb) {
                 cb();
             });
         });
-    });
+    }, RO);
 }
 
 function sameFile(a, b) {
@@ -1285,7 +1297,7 @@ function rebootCmd(sock) {
 function acquireOp(cb) {
     roHeal(function (standing) {
         if (standing !== null) { cb(false, roReason(standing)); return; }
-        lock.acquireWrite(OP_LOCK_WAIT_MS, function (got, roWhy) { cb(got, got ? null : roWhy !== null ? roReason(roWhy) : LOCK_BUSY_REASON); });
+        lock.acquireWrite(OP_LOCK_WAIT_MS, function (got, roWhy) { cb(got, got ? null : roWhy !== null ? roReason(roWhy) : LOCK_BUSY_REASON); }, RO);
     });
 }
 
@@ -1586,7 +1598,7 @@ function hookStep(which, t, read, run, done) {
         run(p.op, function (pErr, roErr, activation, refused, aaRun) {
             var written = files.map(sha).join() !== before;
             if (roErr) {
-                lock.markRoFailed(roErr.message);
+                holdRoFailed(roErr.message);
                 log('WARNING: ' + roErr.message + ' — the next head-unit start mounts / read-only again; until then no writer takes the remount lock (ro-failed)');
             }
             if (written && pErr) writePending(t, p.op, aaRun);
@@ -1659,9 +1671,11 @@ function oneShot(which) {
           finish(1);
           return;
       }
-      lock.acquireWrite(20000, function (got) {
+      lock.acquireWrite(20000, function (got, roWhy) {
         if (!got) {
-            result.status = 'the remount lock stayed held (a boot-recovery restore may be running); nothing changed, try again in two minutes';
+            /* roWhy: the guard stands, or / was found read-write under the lock and could not be put back (the lock is then kept, the guard set). */
+            result.status = roWhy !== null ? roReason(roWhy)
+                : 'the remount lock stayed held (a boot-recovery restore may be running); nothing changed, try again in two minutes';
             log(which + ': ' + result.status);
             finish(1);
             return;
@@ -1700,7 +1714,7 @@ function oneShot(which) {
                 finish(which === 'deactivate' ? aaCode : 0);
             });
         });
-      });
+      }, RO);
     });
 }
 

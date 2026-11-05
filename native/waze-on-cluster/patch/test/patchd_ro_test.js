@@ -145,10 +145,9 @@ function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 function roNow() { return /\bro\b/.test(fs.readFileSync(MOUNTS, 'utf8')); }
 function ino(f) { try { return fs.statSync(f).ino; } catch (e) { return null; } }
 
-function startPatchd(name, tgt, proc) {
+function patchdEnv(name, tgt, proc, extra) {
     var sockDir = path.join(dir, name), sock = path.join(sockDir, 'patch.sock');
-    var child = cp.spawn(process.execPath, [PATCHD], {
-        env: Object.assign({}, process.env, {
+    return Object.assign({}, process.env, {
             PATH: BIN + path.delimiter + process.env.PATH,
             WOC_PATCH_SOCK: sock,
             WOC_CARPLAY: tgt,
@@ -171,9 +170,11 @@ function startPatchd(name, tgt, proc) {
             WOC_RECOVERY_STATE: path.join(dir, 'boot-recovery-' + name + '.json'),
             WOC_TEST: '1',
             WOC_AA_ENABLED: '0',
-        }),
-        stdio: ['ignore', 'ignore', 'inherit'],
-    });
+    }, extra || {});
+}
+function startPatchd(name, tgt, proc) {
+    var sockDir = path.join(dir, name), sock = path.join(sockDir, 'patch.sock');
+    var child = cp.spawn(process.execPath, [PATCHD], { env: patchdEnv(name, tgt, proc), stdio: ['ignore', 'ignore', 'inherit'] });
     children.push(child);
     return { child: child, sock: sock, lock: path.join(sockDir, 'remount.lock'), guard: path.join(sockDir, 'remount.lock.ro-failed') };
 }
@@ -274,6 +275,70 @@ async function main() {
     setUnit('ok', dummy.pid);
     r = await op(d, APPLY);
     ok('F-P3 cleared: with / read-only again the next change clears the guard and runs', r.state !== 'error' && roNow() && !fs.existsSync(d.guard) && !fs.existsSync(d.lock), JSON.stringify(r));
+
+    /* ---- review of fix3-p, F3: the ro-failed marker cannot be written (its path is a directory) ---- */
+    fs.mkdirSync(d.guard);
+    dummy = dummyCarplay();
+    setUnit('ok', dummy.pid);
+    fs.writeFileSync(STUCK, '');
+    newMountCalls();
+    r = await op(d, { cmd: 'revert' });
+    mcalls = newMountCalls();
+    ok('F3 daemon, marker unwritable: the change reports the writable /', r.state === 'error' && /still read-write/.test(r.reason || ''), JSON.stringify(r));
+    ok('F3 daemon, marker unwritable: the lock is KEPT by patchd and no marker file exists', fs.existsSync(d.lock) && fs.readFileSync(d.lock, 'utf8').split(' ')[0] === String(d.child.pid) &&
+        fs.statSync(d.guard).isDirectory());
+    r = await status(d);
+    ok('F3 daemon, marker unwritable: status still reports the ro-failed error (the guard stands in patchd)', r.state === 'error' && /ro-failed/.test(r.reason || ''), JSON.stringify(r));
+    newMountCalls();
+    r = await op(d, APPLY);
+    mcalls = newMountCalls();
+    ok('F3 daemon, marker unwritable: the next change is refused, only remount,ro tried', r.state === 'error' && /ro-failed/.test(r.reason || '') &&
+        mcalls.length > 0 && mcalls.every(function (c) { return /remount,ro/.test(c); }), JSON.stringify([r, mcalls]));
+    fs.unlinkSync(STUCK);
+    fs.rmdirSync(d.guard);
+    dummy = dummyCarplay();
+    setUnit('ok', dummy.pid);
+    r = await op(d, APPLY);
+    ok('F3 daemon, marker unwritable: once / can be read-only again the guard clears and the change runs', r.state !== 'error' && roNow() && !fs.existsSync(d.lock), JSON.stringify(r));
+
+    /* One-shot activation (the deploy tool's hooks) on the synthetic build: exit status and the JSON result. */
+    function hook(name, which, aa, extra) {
+        var res = cp.spawnSync(process.execPath, [PATCHD, which], { env: patchdEnv(name, TGT, PROC, Object.assign({
+            WOC_AA_ENABLED: aa ? '1' : '0', WOC_AAPD: path.join(dir, 'no-aapd'), WOC_AAPD_CONF: path.join(dir, 'no-aapd.conf') }, extra || {})), encoding: 'utf8', timeout: 90000 });
+        var lines = (res.stdout || '').split('\n').filter(function (l) { return l.trim(); }), result = null;
+        try { result = JSON.parse(lines[lines.length - 1]); } catch (e) {}
+        return { code: res.status, result: result || {}, out: (res.stdout || '') + (res.stderr || '') };
+    }
+    /* CarPlay patched again from whatever a hook left: no stale link or process, a running dummy. */
+    async function rePatch() {
+        noProc();
+        try { fs.unlinkSync(RUNNING); } catch (e) {}
+        dummy = dummyCarplay();
+        setUnit('ok', dummy.pid);
+        runs(TGT);
+        return op(d, APPLY);
+    }
+    function locked(name) { return path.join(dir, name, 'remount.lock'); }
+
+    /* ---- F3, one-shot: the marker cannot be written; the process exits holding a lock whose owner is gone ---- */
+    fs.mkdirSync(path.join(dir, 'hook1'));
+    fs.mkdirSync(locked('hook1') + '.ro-failed');
+    fs.writeFileSync(STUCK, '');
+    newMountCalls();
+    var h = hook('hook1', 'deactivate', false);
+    mcalls = newMountCalls();
+    ok('F3 one-shot, marker unwritable: the removal reverted CarPlay and / stayed read-write (remount,ro never took)', h.code === 0 && fs.readFileSync(TGT).equals(SRC) && !roNow(), h.out);
+    ok('F3 one-shot, marker unwritable: the lock is NOT released on exit', fs.existsSync(locked('hook1')), h.out);
+    ok('F3 one-shot, marker unwritable: the log says the marker could not be written', /ro-failed marker could not be written/.test(h.out), h.out);
+    newMountCalls();
+    h = hook('hook1', 'deactivate', false);
+    mcalls = newMountCalls();
+    ok('F3 one-shot, marker unwritable: the next writer takes the dead holder\'s lock, verifies / itself and refuses; it never remounts read-write',
+        h.code === 1 && /ro-failed/.test(JSON.stringify(h.result)) && mcalls.length > 0 && mcalls.every(function (c) { return /remount,ro/.test(c); }), JSON.stringify([h.code, h.result, mcalls, h.out]));
+    fs.unlinkSync(STUCK);
+    fs.writeFileSync(MOUNTS, '/dev/root / ext4 ro 0 0\n');
+    cp.execFileSync('rm', ['-rf', locked('hook1'), locked('hook1') + '.ro-failed']);
+    r = await rePatch();   /* CarPlay patched again for the next check */
 
     /* ---- F-P1: the link cannot be made while a process runs the file: nothing is written ---- */
     d.child.kill('SIGKILL');

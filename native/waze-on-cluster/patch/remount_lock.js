@@ -136,20 +136,34 @@ function release() {
  * start) are not held back. The marker is in the socket directory (tmpfs,
  * cleared each boot) and clears when a run verifies / read-only: healRo
  * below, or by hand (`mount -o remount,ro /`, then any run of patchd or
- * recovery clears it, or delete the file). */
+ * recovery clears it, or delete the file).
+ * The marker is only a message to the other processes, never the only
+ * safeguard (review of fix3-p, F3): markRoFailed also keeps the reason in
+ * this process (memRoFailed), so a marker that cannot be written (tmpfs full,
+ * I/O error) still stops this process's writers and keeps its lock; and a
+ * writer that took the lock verifies / read-only itself before it remounts
+ * read-write (acquireWrite with `ro`, verifyRo), so a lock broken from a dead
+ * holder that left / writable, with or without a marker, is never written past. */
 var RO_FAILED = LOCK + '.ro-failed';
+var memRoFailed = null;
 function roFailedReason() {
+    if (memRoFailed !== null) return memRoFailed;
     try {
         var t = fs.readFileSync(RO_FAILED, 'utf8').trim().split(' ');
         return t.slice(2).join(' ') || 'ro-failed';
     } catch (e) { return null; }
 }
+/* The guard stands in this process whatever the marker write does. Returns
+ * whether the marker file was written; false is a distinct failure the caller
+ * logs (the other processes then rely on verifying / themselves). */
 function markRoFailed(reason) {
+    reason = String(reason || 'ro-failed').replace(/\s+/g, ' ');
+    memRoFailed = reason;
     try { ensureDir(path.dirname(LOCK)); } catch (e) {}
-    try { fs.writeFileSync(RO_FAILED, process.pid + ' ' + new Date().toISOString() + ' ' + String(reason || 'ro-failed').replace(/\s+/g, ' ') + '\n'); return true; }
+    try { fs.writeFileSync(RO_FAILED, process.pid + ' ' + new Date().toISOString() + ' ' + reason + '\n'); return true; }
     catch (e) { return false; }
 }
-function clearRoFailed() { try { fs.unlinkSync(RO_FAILED); } catch (e) {} }
+function clearRoFailed() { memRoFailed = null; try { fs.unlinkSync(RO_FAILED); } catch (e) {} }
 function ownsLock() {
     try { return (fs.readFileSync(LOCK, 'utf8').split(' ')[0] || '') === String(process.pid); } catch (e) { return false; }
 }
@@ -160,12 +174,31 @@ function tryAcquireWrite() {
     if (roFailedReason() !== null) { release(); return false; }
     return true;
 }
+/* With the lock held by this process: / is read-only per ro.isRo(), else
+ * ro.remountRo(done) is tried and checked again; cb(null) once it is, else the
+ * guard is set (markRoFailed) with the lock kept, and cb(why). */
+function verifyRo(ro, cb) {
+    if (ro.isRo()) { cb(null); return; }
+    ro.remountRo(function () {
+        if (ro.isRo()) { cb(null); return; }
+        var why = '/ is read-write when the remount lock was taken, and remount,ro did not take it back';
+        markRoFailed(why);
+        cb(why);
+    });
+}
 /* acquire for a writer: cb(true), or cb(false, why): why is the marker's
- * reason, null when the lock was only busy. */
-function acquireWrite(timeoutMs, cb) {
+ * reason, null when the lock was only busy. With ro ({ isRo, remountRo }) the
+ * writer has verified / read-only under the lock before cb(true); when it
+ * could not, cb(false, why) with the guard set and the lock KEPT (held by
+ * this process, see markRoFailed). */
+function acquireWrite(timeoutMs, cb, ro) {
     var deadline = Date.now() + timeoutMs;
     (function attempt() {
-        if (tryAcquireWrite()) { cb(true, null); return; }
+        if (tryAcquireWrite()) {
+            if (!ro) { cb(true, null); return; }
+            verifyRo(ro, function (why) { cb(why === null, why); });
+            return;
+        }
         var why = roFailedReason();
         if (why !== null || Date.now() >= deadline) { cb(false, why); return; }
         setTimeout(attempt, 100);
@@ -208,4 +241,4 @@ function holds(link, target) {
 }
 
 module.exports = { acquire, release, tryAcquire, breakDead, inUse, holds, roFailedReason, markRoFailed, clearRoFailed, ownsLock,
-    tryAcquireWrite, acquireWrite, healRo };
+    tryAcquireWrite, acquireWrite, healRo, verifyRo };
