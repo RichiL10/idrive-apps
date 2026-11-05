@@ -153,3 +153,15 @@ behaviour at the start limit (guess).
 One upstream test row was changed on purpose (app `test_control.js`: "another change to / is running" now expects
 the Busy text); `map_feed_test` and the cluster-render take-over fixtures now list their stock contents because
 take-over is allowlist-based (S9d). No upstream test was removed or weakened.
+
+
+## Third review (fix2-n), all four findings fixed with tests
+
+| finding | resolution |
+|---|---|
+| F-N1 exit watchdog armed only by the main loop | `DeviceGuard::set_exit_watchdog` arms the one-shot watchdog from the fatal publication itself (8 s, `VideoProducer` constructor); the main loop's call is then a no-op. Test with a blocking MFXClose and no polling loop, injected exit function |
+| F-N2 hang / lost device in GPU-copy setup treated as a copy fallback | `MFX_ERR_GPU_HANG` and `MFX_ERR_DEVICE_LOST` in SetHandle, the two QueryIOSurf, DECODE_Init and VPP_Init are announced (counted, watchdog) before any close and do not fall back; `MFX_ERR_DEVICE_FAILED` still falls back, not counted. Two existing fallback tests now use `MFX_ERR_DEVICE_FAILED` |
+| F-N3 idrive8 connect-retry poll: errors ignored, error revents exited 0 | `connect_wait.h` (pure function, `connect_wait_test`): EINTR/timeout retry, POLLIN stop (0), other errors and POLLERR/POLLHUP/POLLNVAL exit 1 |
+| F-N4 same-SSRC sequence restart left the access unit open | restart branch ends the access unit and forgets the timestamp, like the SSRC switch |
+
+Not covered: `MFXInitEx` failing with a hang / lost device in a GPU-copy session still falls back to a session without GPU copy (no session exists then to close; the fallback session decides). Nothing ran on a car.
