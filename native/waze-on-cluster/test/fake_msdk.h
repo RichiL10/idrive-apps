@@ -27,6 +27,7 @@
 #define WOC_FAKE_MSDK_H
 
 #include <stdint.h>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -47,7 +48,7 @@ extern GpuFault gpu_fault;
 
 /* A failure in any session, with or without GPU copy: call ("MFXInit",
  * "DecodeHeader", "DECODE_Init", "DecodeFrameAsync", "VPP_Run", "decode-sync",
- * "vpp-sync") returns status after succeeding `after` times, `times` times
+ * "vpp-sync", "SetHandle") returns status after succeeding `after` times, `times` times
  * (0: every time after). Unlike gpu_fault, a VPP run fails whatever its
  * output's alignment. Used for the device statuses (MFX_ERR_GPU_HANG,
  * MFX_ERR_DEVICE_LOST, MFX_ERR_DEVICE_FAILED) and for any other status. */
@@ -56,6 +57,10 @@ struct AnyFault {
     int status = 0, after = 0, times = 0;
 };
 extern AnyFault any_fault;
+
+/* Called by every MFXClose, before it returns; a test makes it slow or block
+ * (a hung GPU) or checks what was published by then. Empty: no effect. */
+extern std::function<void()> on_close;
 
 /* "WxH": every picture decoded at this size, whatever its SPS says. */
 extern std::string picture_size;

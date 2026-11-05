@@ -169,6 +169,16 @@ public:
      * until the output is copied on the CPU (State::note_vpp). */
     uint64_t device_failures() const;
 
+    /* Called, on the thread that feeds or inits the decoder, the moment a
+     * device failure is known and BEFORE anything that tears the session down
+     * (MFXClose and the closes before it can block for good on a hung GPU):
+     * for each session closed for it (counted in device_failures), and for an
+     * init() that fails on a device status (no session is counted then). what
+     * is the first error of the step, possibly empty. Kept across init() and
+     * shutdown(). Must not call back into the decoder. */
+    using DeviceFailureHook = std::function<void(const std::string &what)>;
+    void set_device_failure_hook(DeviceFailureHook hook);
+
     /* What comparing each picture with the one before and packing it took,
      * in microseconds. */
     crk::Spread pack_us() const;
@@ -179,6 +189,7 @@ public:
 
 private:
     struct State;
+    DeviceFailureHook hook_;   /* before s_: outlives the state that points at it */
     std::unique_ptr<State> s_;
 };
 

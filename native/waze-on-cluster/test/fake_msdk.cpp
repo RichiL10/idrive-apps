@@ -15,6 +15,7 @@ std::vector<std::string> calls;
 GpuFault gpu_fault;
 AnyFault any_fault;
 std::string picture_size;
+std::function<void()> on_close;
 
 namespace {
 
@@ -150,8 +151,18 @@ mfxStatus MFXInitEx(mfxInitParam par, mfxSession *session)
     *session = reinterpret_cast<mfxSession>(&g);
     return MFX_ERR_NONE;
 }
-mfxStatus MFXClose(mfxSession) { return MFX_ERR_NONE; }
-mfxStatus MFXVideoCORE_SetHandle(mfxSession, mfxHandleType, mfxHDL) { return fault("SetHandle", g.gpu_copy); }
+mfxStatus MFXClose(mfxSession)
+{
+    if (on_close)
+        on_close();
+    return MFX_ERR_NONE;
+}
+mfxStatus MFXVideoCORE_SetHandle(mfxSession, mfxHandleType, mfxHDL)
+{
+    if (const mfxStatus sts = any("SetHandle"))
+        return sts;
+    return fault("SetHandle", g.gpu_copy);
+}
 
 mfxStatus MFXVideoCORE_SyncOperation(mfxSession, mfxSyncPoint s, mfxU32)
 {

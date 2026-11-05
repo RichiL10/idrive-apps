@@ -59,7 +59,7 @@
 #include "freeze_watch.h"
 #include "frame_clock.h"
 #include "framing_probe.h"
-#include "device_watch.h"
+#include "device_guard.h"
 #include "gap_settler.h"
 #include "h264_source.h"
 #include "keyframe_wait.h"
@@ -131,7 +131,7 @@ public:
     /* The GPU decoder failed DeviceWatch::kLimit sessions in a row
      * (device_watch.h): the service should exit non-zero for systemd to
      * restart it. Any thread. */
-    bool device_fatal() const { return device_fatal_.load(); }
+    bool device_fatal() const { return device_.fatal(); }
     /* Readable once a frame waits to be taken. */
     int ready_fd() const { return ready_[0]; }
     size_t frame_bytes() const { return atlas_bytes_; }
@@ -196,8 +196,7 @@ private:
     bool decoding_ = false;          /* the decoder held a sequence after the last feed */
     const PacketQueue::Packet *packet_ = nullptr;   /* the datagram being depacketised */
     GapSettler gaps_;
-    DeviceWatch device_;             /* GPU session failures in a row (decode_mutex_) */
-    std::atomic<bool> device_fatal_{false};
+    DeviceGuard device_;             /* GPU session failures in a row (decode_mutex_); after decoder_ */
     int64_t raw_retry_ms_ = 0;       /* a raw feed's next decoder start attempt */
     int64_t source_retry_ms_ = 0;    /* retry_sources' next attempt */
 

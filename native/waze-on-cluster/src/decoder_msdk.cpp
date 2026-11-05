@@ -193,6 +193,8 @@ struct Decoder::State {
      * when it has been counted. */
     bool device_failed = false;
     uint64_t device_failures = 0;    /* sessions closed for that, since init */
+    const DeviceFailureHook *hook = nullptr;   /* the Decoder's (set_device_failure_hook) */
+    bool announced = false;          /* the hook has been told of the failure in hand */
 
     /* The current sequence; valid while `running`. */
     bool running = false;
@@ -249,13 +251,26 @@ struct Decoder::State {
         else if (sts == MFX_ERR_GPU_HANG || sts == MFX_ERR_DEVICE_LOST)
             note(sts);   /* a hung or lost device is not how a failing copy shows */
     }
-    /* The session is beyond use: close it now and count it. */
+    /* Tell the hook of the device failure in hand, once, before anything
+     * that can block on a hung GPU. */
+    void announce(const std::string &what)
+    {
+        if (announced)
+            return;
+        announced = true;
+        if (hook && *hook)
+            (*hook)(what);
+    }
+    /* The session is beyond use: close it now and count it. The failure is
+     * published (announce) before the close, which may block for good. */
     void device_lost()
     {
         device_failed = false;
         failed = 0;
-        stop();
         device_failures++;
+        announce(error);
+        announced = false;
+        stop();
     }
     void cpu_copy(const std::string &why)
     {
@@ -327,10 +342,14 @@ bool Decoder::State::session_up(bool gpu, std::string *why)
      * vaInitialize and MFXVideoCORE_SetHandle for the same purpose). */
     sts = MFXVideoCORE_SetHandle(session, MFX_HANDLE_VA_DISPLAY, va);
     if (sts < MFX_ERR_NONE) {
-        MFXClose(session);
-        session = nullptr;
         note(sts);
         *why = mfx_error("MFXVideoCORE_SetHandle", sts);
+        /* With no session without GPU copy to follow, this is the final
+         * failure: publish it before MFXClose, which a hung GPU may block. */
+        if (!gpu && device_failed)
+            announce(*why);
+        MFXClose(session);
+        session = nullptr;
         return false;
     }
     session_gpu_copy = gpu;
@@ -811,6 +830,7 @@ bool Decoder::init(const char *dev, uint32_t out_w, uint32_t out_h, unsigned lev
         return false;
     }
     std::unique_ptr<State> s(new State);
+    s->hook = &hook_;
     s->out_w = out_w;
     s->out_h = out_h;
     s->level_bits = level_bits;
@@ -838,6 +858,11 @@ bool Decoder::init(const char *dev, uint32_t out_w, uint32_t out_h, unsigned lev
      * sequence uses it. */
     if (!s->open_session()) {
         *err = s->error;
+        /* A session that cannot even be made on a lost or hung device is a
+         * device failure too; the discarded state's classification would
+         * otherwise be lost. */
+        if (s->device_failed)
+            s->announce(*err);
         return false;
     }
     s_ = std::move(s);
@@ -876,6 +901,8 @@ void Decoder::flush(const FrameSink &cb)
 }
 
 void Decoder::shutdown() { s_.reset(); }
+
+void Decoder::set_device_failure_hook(DeviceFailureHook hook) { hook_ = std::move(hook); }
 
 bool Decoder::decoding() const { return s_ && s_->running; }
 
