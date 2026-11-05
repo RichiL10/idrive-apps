@@ -8,6 +8,31 @@ Requires=waze-on-cluster.socket
 # connection.
 Wants=cluster-render.socket
 After=local-fs.target waze-on-cluster.socket cluster-render.socket
+# The AVB bridge joins BMW's media bus once it is up: ufipc_daemon holds the
+# UFIPC channel (IASMediaBus) the bridge opens, avbstreamhandler sets up the
+# bus streams, stream 15 among them. Both are Type=forking and fork only
+# once that is done, so "after" means ready. Ordering only, never a
+# requirement: where either unit is missing or fails, this still starts.
+# BMW's boot already orders the two first (both are before early.target,
+# systemd-udev-trigger.service after it, sysinit.target and basic.target
+# after that); this line keeps it so without relying on that chain. No
+# head-unit unit is ordered after this service, so none starts any later.
+After=ufipc_daemon.service avbstreamhandler.service
+# Restart=on-failure below restarts the render after a failure exit (poll()
+# error, the GPU decoder beyond recovery, RAMSES or DCSM not up at boot).
+# With RestartSec=5 systemd's default start limit (5 starts in 10 s) is never
+# reached, so a fault that never clears would restart it forever. 30 starts
+# in 10 minutes still covers a slow boot (about 150 s of failed starts) and
+# then leaves the unit failed instead of looping; the next head-unit start
+# or `systemctl reset-failed` clears it. Kiro test change, not yet run on the
+# car. Once the limit is hit systemd probably also fails
+# waze-on-cluster.socket (a guess, not run on a car), so the map stays down
+# until `systemctl reset-failed` or the next head-unit start. The keys need
+# systemd 230 or later; the unit runs systemd 237 (the
+# mgu-deploy tool this installs through checks for 237 and works around its
+# start-limit behaviour), so they apply there.
+StartLimitIntervalSec=600
+StartLimitBurst=30
 
 [Service]
 # hmi_5000 is in the video group, so this process can open
@@ -19,20 +44,20 @@ Group=hmi_5000
 # on the car: root could join media_transport.avb_streaming.15, hmi_5000
 # could not). tm_oap_app opens the cluster renderer's socket.
 SupplementaryGroups=mgu_ufipc tm_oap_app
-# Lets the receive threads, which only copy each packet of the phone's
-# stream into the decode queue, run at nice -5, the HMI's own level, so a
-# busy unit does not delay them; the decode thread stays at nice 0. The
-# stock media units grant LimitNICE or LimitRTPRIO the same way.
-LimitNICE=-5
 RuntimeDirectory=waze-on-cluster
 # World-traversable so the carplay uid can reach the FIFO (file group-restricted)
 # and the diagnostics uid can read status.json; the files set their own modes.
 RuntimeDirectoryMode=0755
-# The log file's directory (log_file), on /var/opt so it outlives reboots,
-# made as root ("+"); a failure ("-") only leaves the service without the
-# file.
-ExecStartPre=-+/bin/sh -c 'mkdir -p /var/opt/waze-on-cluster/log && chown hmi_5000:hmi_5000 /var/opt/waze-on-cluster/log'
-ExecStart=/var/opt/waze-on-cluster/current/waze-on-cluster -c /var/opt/waze-on-cluster/current/waze-on-cluster.conf
+# The log file's directory (log_file) and the app's choices' (state_file),
+# on /var/opt so they outlive reboots, made as root ("+"); a failure ("-")
+# only leaves the service without the file, or the choices kept until it
+# stops.
+ExecStartPre=-+/bin/sh -c 'mkdir -p /var/opt/waze-on-cluster/log /var/opt/waze-on-cluster/state && chown hmi_5000:hmi_5000 /var/opt/waze-on-cluster/log /var/opt/waze-on-cluster/state'
+# With Android Auto's turn card hidden, patchd writes the crop that goes
+# with its geometry here, a line WOC_SRC_CROP=-s src_crop=<crop>, which
+# overrides the conf's. Read at each start.
+EnvironmentFile=-/var/opt/waze-on-cluster/aa-crop.env
+ExecStart=/var/opt/waze-on-cluster/current/waze-on-cluster -c /var/opt/waze-on-cluster/current/waze-on-cluster.conf $WOC_SRC_CROP
 Restart=on-failure
 # At boot RAMSES or DCSM may not be up yet; 5 s keeps the retries clear of
 # systemd's start limit (5 starts in 10 s), which would also stop the socket.

@@ -59,6 +59,10 @@ public:
     /* A frame's atlas, frame_bytes() long; its levels are rounded on the
      * way in. Replaces a frame not yet written. */
     void offer(const uint8_t *atlas, int64_t now_ms);
+    /* A frame that is the last one offered again, byte for byte: staged,
+     * counted and kept live as that frame would be, with nothing to copy and
+     * no plan to make unless tiles are due to settle. */
+    void repeat(int64_t now_ms);
 
     bool ready(int64_t now_ms) const override;
     bool attach(Graph *g, int64_t now_ms, std::string *err) override;
@@ -115,6 +119,9 @@ private:
      * outlives the scene so the next one starts from it. */
     std::vector<uint8_t> front_, shown_, rect_scratch_;
     bool front_pending_ = false;
+    /* repeated_: front_ waits as a repeat of the picture last staged.
+     * front_stale_: a whole write swapped the newest frame into shown_. */
+    bool repeated_ = false, front_stale_ = false;
     int64_t front_ms_ = -1, shown_ms_ = -1, last_frame_ms_ = -1;
     bool have_ = false;
 

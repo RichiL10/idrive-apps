@@ -16,8 +16,7 @@ var fs = require('fs');
 
 var RECMGR_CONF = process.env.WOC_RECMGR_CONF || '/etc/recmgr-restartlist.conf';
 var RECMGR_AT_BOOT = process.env.WOC_RECMGR_AT_BOOT || '/var/opt/mgu-deploy/recmgr-at-boot.json';
-var PROC_STAT = process.env.WOC_PROC_STAT || '/proc/stat';
-var BOOT_ID = process.env.WOC_BOOT_ID || '/proc/sys/kernel/random/boot_id';
+var boot = require('./boot_id.js');
 
 function recmgrHas(text, name) {
     var has = { Whitelist: false, WhitelistExitSuccess: false }, section = '';
@@ -37,11 +36,11 @@ function recmgrLoaded(name) {
     if (cur === null || !recmgrHas(cur, name)) return false;
     var at = null;
     try { at = JSON.parse(readText(RECMGR_AT_BOOT)); } catch (e) {}
-    var boot = (readText(BOOT_ID) || '').trim();
-    if (at && at.boot && at.boot === boot) return recmgrHas(at.text || '', name);
-    var btime = /^btime (\d+)$/m.exec(readText(PROC_STAT) || '');
-    if (!btime) return false;
-    try { return fs.statSync(RECMGR_CONF).mtime.getTime() < parseInt(btime[1], 10) * 1000; } catch (e) { return false; }
+    var id = boot.bootId();
+    if (at && at.boot && at.boot === id) return recmgrHas(at.text || '', name);
+    var btime = boot.bootTime();
+    if (btime === null) return false;
+    try { return fs.statSync(RECMGR_CONF).mtime.getTime() < btime; } catch (e) { return false; }
 }
 
 module.exports = { recmgrHas: recmgrHas, recmgrLoaded: recmgrLoaded };

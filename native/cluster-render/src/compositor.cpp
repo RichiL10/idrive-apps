@@ -535,11 +535,12 @@ void Compositor::arrange(int64_t now_ms)
             it.exclusive = l.params.exclusive;
             it.prewarm = l.params.prewarm;
             it.contend = l.params.contend;
+            it.guide_hold = l.params.guide_hold;
             items.push_back(it);
         }
         t.arr = crs::arrange(items);
         fade((int)ti, t, now_ms);
-        slots_->want((int)ti, t.arr.wanted, t.arr.contend);
+        slots_->want((int)ti, t.arr.wanted, t.arr.contend, t.arr.guide_hold);
         if (!t.graph)
             continue;
         for (size_t pos = 0; pos < t.arr.order.size(); pos++) {
@@ -592,11 +593,13 @@ void Compositor::fade(int ti, Target &t, int64_t now_ms)
             t.arr.drawn = held;
             t.arr.wanted = true;
             t.arr.contend = t.last_contend;
+            t.arr.guide_hold = t.last_guide_hold;
         }
     }
     if (t.arr.wanted && !t.fading_out) {
         t.last_drawn = t.arr.drawn;
         t.last_contend = t.arr.contend;
+        t.last_guide_hold = t.arr.guide_hold;
     }
     /* The layers get it by steps, each in the target's next flush; 0 and 1
      * go at once. */

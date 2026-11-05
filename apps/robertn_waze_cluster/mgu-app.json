@@ -1,14 +1,20 @@
 {
   "schema": 1,
   "id": "robertn_waze_cluster",
-  "version": "0.4.1",
-  "tree": "robertn_waze_cluster@0.4.1",
+  "version": "0.5.8",
+  "tree": "robertn_waze_cluster@0.5.8",
   "modules": [
     "src/robertn_waze_cluster.js",
-    "src/waze_cluster_control.js"
+    "src/i18n.js",
+    "src/locales.js",
+    "src/waze_cluster_control.js",
+    "src/logs_control.js",
+    "src/qr.js",
+    "src/qrcodegen.js"
   ],
   "sdk": [
     "oap-sdk/src/core/OnlineApp.js",
-    "oap-sdk/src/logging/logging"
+    "oap-sdk/src/logging/logging",
+    "oap-sdk/src/someip/someipBuilders"
   ]
 }

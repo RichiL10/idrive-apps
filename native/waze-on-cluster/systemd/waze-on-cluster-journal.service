@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Robert Nisipeanu
+[Unit]
+Description=waze-on-cluster journal keeper: the tools' journal lines kept on /var/opt
+# Started by waze-on-cluster-journal.timer 90 s after boot; no unit waits
+# for it and it is ordered against no head-unit unit, only after the
+# /var/opt mount it writes to.
+RequiresMountsFor=/var/opt
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+# Unprivileged: a dynamic user in systemd-journal, the group that reads the
+# journal and owns the folder, written only there (journal_keep.js). Only
+# making the folder runs as root ("+"), in node.
+DynamicUser=yes
+User=woc-journal
+SupplementaryGroups=systemd-journal
+NoNewPrivileges=yes
+UMask=0007
+ExecStartPre=-+/usr/bin/node /var/opt/waze-on-cluster/current/journal_keep.js prepare
+ReadWritePaths=-/var/opt/waze-on-cluster/journal
+ExecStart=/usr/bin/node /var/opt/waze-on-cluster/current/journal_keep.js
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+Nice=19
+IOSchedulingClass=idle
+CPUShares=64
+CPUQuota=20%
+MemoryLimit=96M
+TasksMax=16
+# No core dump goes to the crash handler (LimitCORE=1, for the service and
+# journalctl), so a crash restarts this service and never the head unit. The
+# root command gets no limits from systemd; it is node, which the crash
+# handler's list names.
+LimitCORE=1
+StandardOutput=journal
+StandardError=journal

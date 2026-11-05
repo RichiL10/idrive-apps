@@ -14,7 +14,12 @@
  * repository's Waze chain is
  * declared: the app (for iDrive 7) requires waze-on-cluster, which requires
  * cluster-render and a deploy tool that runs install hooks, and has both
- * hooks; the app, the tool and the renderer are removable.
+ * hooks; the app, the tool and the renderer are removable. Titles and
+ * descriptions in other languages: release/texts/<code>.json by id into
+ * each entry's `texts`, as mgu-store's updater reads them, in any key
+ * order; a file naming an id that is not a component, or anything but a
+ * title and a description, is refused; a
+ * published entry carried over takes its component's texts.
  *
  *   node release/test/release_test.js
  */
@@ -25,7 +30,7 @@ const path = require('path');
 const zlib = require('zlib');
 const cp = require('child_process');
 const { buildArtifact } = require('../tool_artifact.js');
-const { components, catalogEntry, exportHead } = require('../release.js');
+const { components, catalogEntry, catalogTexts, retext, exportHead } = require('../release.js');
 const catalog = require('../catalog.js');
 
 /* The members of a tgz the packer wrote (ustar), by name. */
@@ -156,7 +161,7 @@ test('the Waze chain: app -> waze-on-cluster -> cluster-render and a hook-runnin
     assert.ok(catalog.compareVersions(tool.version, app.requires['waze-on-cluster']) >= 0,
         'the tool meets the app\'s requirement');
     assert.deepStrictEqual(Object.keys(tool.requires), ['mgu-deploy', 'cluster-render'], 'the deploy tool installs first');
-    assert.strictEqual(tool.requires['mgu-deploy'], '0.7.0');
+    assert.strictEqual(tool.requires['mgu-deploy'], '0.7.11', 'hooks, and recmgr and crashNames names on the lists');
     assert.ok(catalog.compareVersions(renderer.version, tool.requires['cluster-render']) >= 0,
         'the renderer released beside it meets the tool\'s minimum');
     assert.deepStrictEqual(renderer.requires, { 'mgu-deploy': '0.4.0' });
@@ -184,6 +189,74 @@ test('the Waze chain: app -> waze-on-cluster -> cluster-render and a hook-runnin
     assert.strictEqual(app.uninstallable, true);
     assert.strictEqual(tool.uninstallable, true);
     assert.strictEqual(renderer.uninstallable, true);
+});
+
+function fixtureTexts(files) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mgu-rel-test-'));
+    fs.mkdirSync(path.join(root, 'apps'));
+    fixtureTool(root, FIXTURE);
+    fs.mkdirSync(path.join(root, 'release', 'texts'), { recursive: true });
+    Object.keys(files).forEach((n) => fs.writeFileSync(path.join(root, 'release', 'texts', n), JSON.stringify(files[n])));
+    return root;
+}
+
+test('texts: release/texts/<code>.json by id into the catalog entry, which the catalog check accepts', () => {
+    const root = fixtureTexts({
+        'de.json': { 'fixture-tool': { title: 'Vorrichtung', description: 'Eine Vorrichtung' } },
+        'zh-TW.json': { 'fixture-tool': { title: '夾具' } },
+        'fr.json': { 'fixture-tool': { description: 'Un outil', title: 'Outil' } },
+        'pt-BR.json': {}
+    });
+    const c = components(root).find((x) => x.id === 'fixture-tool');
+    const want = { de: { title: 'Vorrichtung', description: 'Eine Vorrichtung' }, fr: { title: 'Outil', description: 'Un outil' },
+        'zh-TW': { title: '夾具' } };
+    assert.deepStrictEqual(c.texts, want);
+    const entry = catalogEntry(c, buildArtifact(path.join(root, 'native', 'fixture-tool'), path.join(root, 'out')));
+    assert.deepStrictEqual(entry.texts, want);
+    assert.deepStrictEqual(catalog.textsOf(entry.texts), want, 'as the updater reads it');
+    assert.deepStrictEqual(catalog.parse(JSON.stringify({ schema: 2, components: [entry] })).components[0].texts, want);
+    // without release/texts: no texts
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'mgu-rel-test-'));
+    fs.mkdirSync(path.join(bare, 'apps'));
+    fixtureTool(bare, FIXTURE);
+    const plain = components(bare).find((x) => x.id === 'fixture-tool');
+    assert.strictEqual(plain.texts, undefined);
+    assert.strictEqual(catalogEntry(plain, buildArtifact(path.join(bare, 'native', 'fixture-tool'), path.join(bare, 'out'))).texts,
+        undefined, 'no texts field');
+});
+
+test('texts: a file naming an id that is not a component, a bad code or anything but a title and a description is refused', () => {
+    [['de.json', { 'no-such-tool': { title: 'X' } }],
+        ['de.json', { 'fixture-tool': { title: '' } }],
+        ['de.json', { 'fixture-tool': { title: 'X', subtitle: 'Y' } }],
+        ['de.json', { 'fixture-tool': { title: '  X  ' } }],
+        ['de.json', { 'fixture-tool': { title: 7 } }],
+        ['de.json', { 'fixture-tool': 'X' }],
+        ['de.json', { 'fixture-tool': { title: 'x'.repeat(81) } }],
+        ['German.json', { 'fixture-tool': { title: 'X' } }],
+        ['de-DE-x.json', { 'fixture-tool': { title: 'X' } }]].forEach(([n, o]) => {
+        const root = fixtureTexts({ [n]: o });
+        assert.throws(() => catalogTexts(['fixture-tool'], root), new RegExp(`release/texts/${n.replace(/\./g, '\\.')}`), `${n} ${JSON.stringify(o)}`);
+    });
+});
+
+test('texts: a published entry carried over takes its component\'s texts, and loses them with the file', () => {
+    const de = { de: { title: 'Vorrichtung' } };
+    const entries = [{ id: 'a', version: '1.0.0' }, { id: 'b', version: '1.0.0', texts: de }, { id: 'c', version: '1.0.0', texts: de },
+        { id: 'd', version: '1.0.0', texts: de }];
+    const all = [{ id: 'a', texts: de }, { id: 'b', texts: de }, { id: 'c', texts: { de: { title: 'Neu' } } }, { id: 'd' }];
+    const changed = retext(entries, all);
+    assert.deepStrictEqual(changed.map((e) => e.id), ['a', 'c', 'd'], 'added, changed, removed; the same texts left alone');
+    assert.deepStrictEqual(entries.map((e) => e.texts), [de, de, { de: { title: 'Neu' } }, undefined]);
+    assert.ok(!Object.prototype.hasOwnProperty.call(entries[3], 'texts'), 'no texts field left behind');
+    assert.deepStrictEqual(retext(entries, all), [], 'once listed: nothing to change');
+});
+
+test('this repository\'s release/texts name its components, every language each', () => {
+    const all = components();
+    const codes = fs.readdirSync(path.join(__dirname, '..', 'texts')).filter((n) => /\.json$/.test(n)).map((n) => n.slice(0, -5)).sort();
+    assert.ok(codes.length > 0, 'release/texts has languages');
+    all.forEach((c) => assert.deepStrictEqual(Object.keys(c.texts || {}).sort(), codes, c.id));
 });
 
 let failed = 0;

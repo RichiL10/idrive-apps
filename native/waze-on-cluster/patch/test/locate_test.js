@@ -14,6 +14,8 @@
  */
 'use strict';
 
+require('./head_unit_env.js');   /* a HIGH head unit for every patcher and patchd this runs */
+
 var fs = require('fs');
 var os = require('os');
 var path = require('path');
@@ -151,6 +153,16 @@ try {
         b.readUInt32LE(at.slot) === at.mid, r.out);
     r = run(['revert', '--target', tgt, '--yes']);
     ok('revert: byte-exact original', r.code === 0 && fs.readFileSync(tgt).equals(orig), r.out);
+
+    /* revert gives the target the original's mode recorded with the backup,
+     * whatever mode the target has: carplay runs as a non-root user, which
+     * needs group and other execute. */
+    run(['apply', '--target', tgt, '--panel', 'high', '--unproven', '--yes']);
+    fs.chmodSync(tgt, 0o700);
+    r = run(['revert', '--target', tgt, '--yes']);
+    ok('revert: restores the recorded 0755, not the target\'s 0700',
+        r.code === 0 && fs.readFileSync(tgt).equals(orig) && (fs.statSync(tgt).mode & 0o777) === 0o755,
+        r.out + ' mode=' + (fs.statSync(tgt).mode & 0o777).toString(8));
 
     /* A build without a GNU build-id: the same build is the same size and at
      * most a few hundred bytes apart from the backup. */

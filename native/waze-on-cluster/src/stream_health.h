@@ -34,7 +34,19 @@ public:
 
     struct Minute {
         uint32_t losses = 0, lost = 0, corrupted = 0;
+        uint32_t overflows = 0;   /* buffers dropped at their size cap */
+        /* The RTP layer's drops (rtp_h264.h Stats): late or duplicate packets,
+         * isolated stray packets, SSRC changes, and resets after silence. */
+        uint32_t late = 0, stray = 0, streams = 0, idle_resets = 0;
     };
+
+    /* Late or duplicate packets dropped, stray packets, SSRC changes and idle
+     * resets since the last call (all counted in the minute). The line to log,
+     * or empty when all are 0 or past this kind's own few lines a minute (kept
+     * apart from the loss lines, so a run of late packets cannot crowd them
+     * out). */
+    static const unsigned kRtpLinesPerMinute = 3;
+    std::string rtp_events(int64_t now_ms, uint32_t late, uint32_t stray, uint32_t streams, uint32_t idle_resets);
 
     /* A sequence gap at now_ms (monotonic) and wall_ms (since the epoch):
      * the packet expected, the one that came, the sequence numbers between,
@@ -52,6 +64,10 @@ public:
     /* The decoder gave up its sequence (on) or started a new one. The line
      * to log for a new one after a wait, or empty. */
     std::string waiting(int64_t now_ms, int64_t wall_ms, bool on);
+    /* `count` buffers of `what` (the RTP fragment buffer, the decoder's
+     * framing) dropped at their size cap; the stream resynchronises at the
+     * next start. Counted in the minute; the line to log, or empty. */
+    std::string overflow(int64_t now_ms, const char *what, uint32_t count);
 
     /* The keyframe wait (keyframe_wait.h) as sampled at wall_ms: from
      * kLostMs the stream is lost, since wall_ms - keyframe_wait_ms. */
@@ -79,6 +95,8 @@ private:
     Minute minute_;
     int64_t lines_since_ms_ = -1;
     unsigned lines_ = 0;
+    int64_t rtp_lines_since_ms_ = -1;
+    unsigned rtp_lines_ = 0;
 };
 
 }  // namespace woc

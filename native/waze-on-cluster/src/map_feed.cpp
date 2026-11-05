@@ -11,7 +11,7 @@
 
 namespace woc {
 
-const char *const MapFeed::kWaiting = "Waiting for the phone's map — start navigation";
+const char *const MapFeed::kWaiting = "Waiting for the phone's map";
 
 namespace {
 
@@ -85,16 +85,23 @@ void MapFeed::make_layer()
     }
     /* The map area: all of the map slot's scene, the centred 1088x480 of a
      * whole-panel one, a fitted centre on the HUD. */
-    const crk::QuadRect q = crk::map_quad(tw, th, cfg_.video.w, cfg_.video.h);
+    crk::QuadRect q = crk::map_quad(tw, th, cfg_.video.w, cfg_.video.h);
+    if (cfg_.rect.set() && cfg_.rect.fits(tw, th))
+        q = crk::QuadRect{cfg_.rect.x, cfg_.rect.y, cfg_.rect.w, cfg_.rect.h};
+    else if (cfg_.rect.set())
+        log_warn("render: map_rect %u,%u,%u,%u is outside %s (%ux%u); the map area instead", cfg_.rect.x,
+                 cfg_.rect.y, cfg_.rect.w, cfg_.rect.h, cfg_.target.c_str(), tw, th);
     lo_ = cr::LayerOptions();
     lo_.target = cfg_.target;
     lo_.klass = "content";
     lo_.contend = true;   /* the map takes the slot back from the stock map */
+    lo_.guide_hold = cfg_.guide_hold;
     lo_.x = (int)q.x;
     lo_.y = (int)q.y;
     lo_.w = q.w;
     lo_.h = q.h;
     lo_.visible = live_ && !frozen_ && picture_ == Picture::Shown;
+    show_due_ = false;
     refused_.clear();
     layer_state_ = "stalled";
     layer_reason_.clear();
@@ -112,6 +119,8 @@ bool MapFeed::set_target(const std::string &name)
         return false;
     if (t == cfg_.target && layer_)
         return true;
+    if (layer_ && !held_new_)
+        held_new_ = client_.latest(layer_, &held_);
     if (layer_)
         client_.drop(layer_);
     layer_ = 0;
@@ -119,6 +128,15 @@ bool MapFeed::set_target(const std::string &name)
     if (client_.connected())
         make_layer();
     return true;
+}
+
+void MapFeed::set_guide_hold(bool hold)
+{
+    cfg_.guide_hold = hold;
+    if (layer_ && lo_.guide_hold != hold) {
+        lo_.guide_hold = hold;
+        client_.set(layer_, lo_);
+    }
 }
 
 void MapFeed::poll(int64_t now_ms)
@@ -138,6 +156,7 @@ void MapFeed::poll(int64_t now_ms)
     if (client_.connected() && down_long_) {
         down_long_ = false;
     }
+    show_when_sent();
     count_second(now_ms);
 }
 
@@ -151,11 +170,48 @@ void MapFeed::count_second(int64_t now_ms)
     second_ms_ = now_ms;
 }
 
+bool MapFeed::sending() const
+{
+    return layer_ && client_.connected() && (lo_.visible || show_due_);
+}
+
+/* Counted as the frames the client would send, whether or not they go. */
 void MapFeed::offer(std::vector<uint8_t> *atlas, uint64_t id, int64_t now_ms)
 {
-    if (layer_ && client_.frame(layer_, atlas, id))
+    id_ = id;
+    if (layer_ && client_.connected())
         frames_++;
+    held_new_ = !sending() || !client_.frame(layer_, atlas, id);
+    if (held_new_)
+        held_.swap(*atlas);
     count_second(now_ms);
+}
+
+void MapFeed::repeat(uint64_t id, int64_t now_ms)
+{
+    id_ = id;
+    if (layer_ && client_.connected())
+        frames_++;
+    if (sending())
+        send_newest();
+    count_second(now_ms);
+}
+
+void MapFeed::send_newest()
+{
+    if (held_new_)
+        held_new_ = !client_.frame(layer_, &held_, id_);
+    else
+        client_.repeat(layer_, id_);
+}
+
+void MapFeed::show_when_sent()
+{
+    if (!show_due_ || !layer_ || client_.frame_waiting(layer_))
+        return;
+    show_due_ = false;
+    lo_.visible = true;
+    client_.set(layer_, lo_);
 }
 
 void MapFeed::set_stream(bool live, bool frozen, Picture picture)
@@ -174,8 +230,15 @@ void MapFeed::set_stream(bool live, bool frozen, Picture picture)
     frozen_ = frozen;
     picture_ = picture;
     const bool visible = live && !frozen && picture == Picture::Shown;
-    if (layer_ && lo_.visible != visible) {
-        lo_.visible = visible;
+    if (!layer_ || (lo_.visible || show_due_) == visible)
+        return;
+    show_due_ = visible;
+    if (visible) {
+        if (client_.connected())
+            send_newest();
+        show_when_sent();
+    } else if (lo_.visible) {
+        lo_.visible = false;
         client_.set(layer_, lo_);
     }
 }
@@ -213,6 +276,9 @@ FeedStatus MapFeed::status(const std::string &decode, const std::string &stream)
     s.target = cfg_.target;
     s.upload_cap_kb = cap_kb_;
     s.upload_reason = budget_reason_;
+    s.guide_hold = cfg_.guide_hold;
+    auto g = client_.guide_disabled.find(cfg_.target);
+    s.guide_disabled = client_.connected() && g != client_.guide_disabled.end() && g->second;
     char cap[96] = "";
     if (cap_kb_ && cap_kb_ < max_kb_)
         std::snprintf(cap, sizeof cap, ", upload cap %u KB/s", cap_kb_);

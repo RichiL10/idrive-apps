@@ -39,10 +39,14 @@
 #include "alt_screen.h"
 #include "config.h"
 #include "control.h"
+#include "exit_watchdog.h"
+#include "guide_setting.h"
+#include "head_unit.h"
 #include "log.h"
 #include "block_pack.h"
 #include "map_feed.h"
 #include "map_geometry.h"
+#include "refused.h"
 #include "video_producer.h"
 #include "yuv_atlas.h"
 
@@ -76,26 +80,33 @@ std::string status_line(const FeedStatus &s)
     return "{\"ev\":\"status\",\"state\":" + json_escape(s.state) + ",\"target\":" + json_escape(s.target) +
            ",\"page\":" + json_escape(s.page) + ",\"reason\":" + json_escape(s.reason) +
            ",\"upload_cap_kb_per_s\":" + std::to_string(s.upload_cap_kb) +
-           ",\"upload_reason\":" + json_escape(s.upload_reason) + "}";
+           ",\"upload_reason\":" + json_escape(s.upload_reason) +
+           ",\"hide_bmw_guidance\":" + (s.guide_hold ? "1" : "0") +
+           ",\"guide_disabled\":" + (s.guide_disabled ? "1" : "0") + "}";
 }
 
 class Server : public Control::Handler {
 public:
-    explicit Server(MapFeed *feed) : feed_(feed) {}
+    Server(MapFeed *feed, GuideSetting *guide) : feed_(feed), guide_(guide) {}
     void set_control(Control *c) { control_ = c; }
 
     /* start picks the target the map goes to (`run`); the map itself comes
-     * and goes with the stream. */
+     * and goes with the stream. guide is the app's switch for BMW's turn
+     * box (guide_setting.h). */
     void on_command(const std::map<std::string, std::string> &msg) override
     {
         const std::string &cmd = msg.at("cmd");
         auto it = msg.find("target");
+        auto hide = msg.find("hide");
         if (cmd == "start" && it != msg.end()) {
             log_info("start %s", it->second.c_str());
             if (!feed_->set_target(it->second))
                 log_warn("start: the cluster renderer has no target %s", it->second.c_str());
+        } else if (cmd == "guide" && hide != msg.end() && guide_->set(hide->second)) {
+            log_info("guide: BMW's turn box %s while the map shows", guide_->hide() ? "hidden" : "shown");
+            feed_->set_guide_hold(guide_->hide());
         } else {
-            log_warn("control: unknown command %s", cmd.c_str());
+            log_warn("control: unknown or malformed command %s", cmd.c_str());
         }
     }
     void on_owner_connected() override
@@ -123,32 +134,11 @@ public:
 
 private:
     MapFeed *feed_;
+    GuideSetting *guide_;
     Control *control_ = nullptr;
     uint64_t log_seq_ = 0;
     std::string last_;
 };
-
-/* Files next to the FIFO, in the render's own RuntimeDirectory, which it can
- * write: status.json and probe.txt, for the remote diagnostics, read
- * without taking the control socket's owner slot. 0644, world-readable. */
-void write_sibling_file(const std::string &fifo_path, const char *name, const std::string &content)
-{
-    std::string::size_type slash = fifo_path.find_last_of('/');
-    if (slash == std::string::npos)
-        return;
-    std::string path = fifo_path.substr(0, slash) + "/" + name;
-    std::string tmp = path + ".tmp";
-    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-        return;
-    std::string line = content + "\n";
-    ssize_t n = write(fd, line.data(), line.size());
-    close(fd);
-    if (n == (ssize_t)line.size())
-        rename(tmp.c_str(), path.c_str());
-    else
-        unlink(tmp.c_str());
-}
 
 int serve(const Config &cfg)
 {
@@ -168,6 +158,8 @@ int serve(const Config &cfg)
         log_error("tex_size %ux%u: %s", vc.tex_width, vc.tex_height, e);
         return 1;
     }
+    if (const char *why = parse_source_crop(cfg.str("src_crop"), &vc.src_crop))
+        log_warn("src_crop = %s is ignored: %s; the whole picture is the map", cfg.str("src_crop").c_str(), why);
     for (const char *key : kIgnoredKeys)
         if (cfg.has(key))
             log_warn("%s = %s is ignored: the upload budget is the cluster renderer's "
@@ -177,13 +169,14 @@ int serve(const Config &cfg)
         {"target_fps", 0, 60},      {"pan_blocks", 0, 1},            {"stall_ms", 1000, 600000},
         {"freeze_ms", 0, 600000},   {"freeze_min_fps", 1, 60},       {"alt_screen_port", 0, 65535},
         {"idle_ms", 1000, 600000},  {"blank_ms", 1000, 600000},
-        {"alt_screen_uid", 0, 4294967294L}};
+        {"alt_screen_uid", 0, 4294967294L}, {"gpu_copy", 0, 1}};
     for (const Range &r : ranges)
         if (cfg.num(r.key) < r.lo || cfg.num(r.key) > r.hi) {
             log_error("%s must be from %ld to %ld", r.key, r.lo, r.hi);
             return 1;
         }
     vc.tex_level_bits = (uint32_t)cfg.num("tex_level_bits");
+    vc.gpu_copy = cfg.num("gpu_copy") == 1;
     vc.stall_ms = (int)cfg.num("stall_ms");
     vc.freeze.ms = (unsigned)cfg.num("freeze_ms");
     vc.freeze.min_fps = (unsigned)cfg.num("freeze_min_fps");
@@ -192,10 +185,12 @@ int serve(const Config &cfg)
     FeedConfig fc;
     fc.socket = cfg.str("render_socket");
     fc.target = cfg.str("target");
+    if (const char *why = parse_map_rect(cfg.str("map_rect"), &fc.rect))
+        log_warn("map_rect = %s is ignored: %s; the map area instead", cfg.str("map_rect").c_str(), why);
     fc.video.w = vc.tex_width;
     fc.video.h = vc.tex_height;
     fc.video.fps = (unsigned)cfg.num("target_fps");
-    fc.video.level_bits = 0;   /* rounded on the decoder thread (video_producer.h) */
+    fc.video.level_bits = 0;   /* rounded in the decoder's packing (video_producer.h) */
     fc.video.dirty_threshold = (unsigned)cfg.num("dirty_threshold");
     fc.video.settle_ms = (unsigned)cfg.num("dirty_settle_ms");
     fc.video.pan_blocks = cfg.num("pan_blocks") == 1 && vc.tex_height % 4 == 0;
@@ -211,10 +206,13 @@ int serve(const Config &cfg)
     int sig_fd = signalfd(-1, &sigs, SFD_CLOEXEC);
     if (sig_fd < 0) { log_error("signalfd: %s", strerror(errno)); return 1; }
 
+    GuideSetting guide(cfg.str("hide_bmw_guidance"), cfg.str("state_file"));
+    fc.guide_hold = guide.hide();
+
     std::string err;
     VideoProducer producer(vc);
     MapFeed feed(fc);
-    Server server(&feed);
+    Server server(&feed, &guide);
     Control control(&server);
     server.set_control(&control);
     if (!control.listen(cfg.str("socket_path"), (unsigned)std::strtoul(cfg.str("socket_mode").c_str(), nullptr, 8),
@@ -233,6 +231,7 @@ int serve(const Config &cfg)
     std::string last_detail;
     AltScreen::State alt_state = AltScreen::Unknown;
     int64_t alt_read_ms = 0;
+    int exit_code = 0;
     for (;;) {
         struct pollfd p[5] = {{sig_fd, POLLIN, 0}, {control.listen_fd(), POLLIN, 0}, {control.owner_fd(), POLLIN, 0},
                               {feed.fd(), (short)(POLLIN | (feed.wants_write() ? POLLOUT : 0)), 0},
@@ -242,18 +241,38 @@ int serve(const Config &cfg)
          * retries its connection, a source that is down is retried and the
          * status files stay current. */
         int n = poll(p, 5, 250);
-        if (n < 0 && errno != EINTR)
+        if (n < 0 && errno != EINTR) {
+            /* Not a stop: a failure, so systemd restarts the service
+             * (Restart=on-failure). */
+            log_error("poll: %s; exiting", strerror(errno));
+            exit_code = 1;
             break;
+        }
         if (p[0].revents & POLLIN)
             break;
+        if (producer.device_fatal()) {
+            exit_code = 1;   /* logged by the producer; systemd restarts the service */
+            /* A hung GPU can make the teardown (MFXClose) block for good: end the
+             * process with the same code after a few seconds whatever happens.
+             * The producer's DeviceGuard armed it already when it published the
+             * failure (a main loop blocked elsewhere never gets here); this is
+             * then a no-op (exit_watchdog.h). */
+            arm_exit_watchdog(kExitWatchdogMs, 1);
+            break;
+        }
         if (control.owner_fd() >= 0 && (p[2].revents & (POLLIN | POLLHUP | POLLERR)))
             control.on_owner_readable();
         if (p[1].revents & POLLIN)
             control.on_listen_readable();
         const int64_t now = now_ms();
         uint64_t id = 0;
-        if (producer.take(&frame, &id))
-            feed.offer(&frame, id, now);
+        bool same = false;
+        if (producer.take(&frame, &id, &same)) {
+            if (same)
+                feed.repeat(id, now);
+            else
+                feed.offer(&frame, id, now);
+        }
         if (now - alt_read_ms >= 1000) {
             const AltScreen::State s = cfg.num("alt_screen_port") ? alt.read() : AltScreen::Unknown;
             if (s != alt_state)
@@ -283,9 +302,11 @@ int serve(const Config &cfg)
             if (producer.minute(now, &m, &sm, &bm, &overflows))
                 log_info("waze: %u frames decoded in the last minute, %u without a picture to catch up, %u changed, "
                          "%u corrupted; the last picture is %s; %u losses (%u packets), %llu dropped by the receive "
-                         "queue; packets waited %.1f ms on average, %lld ms at most",
+                         "queue, %u buffers dropped at their size cap; RTP: %u late or duplicate, %u stray, %u new "
+                         "streams, %u resets after silence; packets waited %.1f ms on average, %lld ms at most",
                          m.frames + bm.skipped, bm.skipped, m.changed, sm.corrupted, m.blank ? "blank" : "not blank",
-                         sm.losses, sm.lost, (unsigned long long)overflows, bm.wait_us.mean() / 1000.0,
+                         sm.losses, sm.lost, (unsigned long long)overflows, sm.overflows, sm.late, sm.stray,
+                         sm.streams, sm.idle_resets, bm.wait_us.mean() / 1000.0,
                          (long long)(bm.wait_us.max / 1000));
             producer.track_keyframe_wait(now);
             const std::string detail = producer.stream_detail();
@@ -310,8 +331,8 @@ int serve(const Config &cfg)
             last_status_write = now;
         }
     }
-    log_info("stopped");
-    return 0;
+    log_info("%s", exit_code ? "stopped on a failure" : "stopped");
+    return exit_code;
 }
 
 int run(const Config &cfg, const char *target)
@@ -417,6 +438,8 @@ void define_keys(Config *cfg)
     cfg->define("avb_stream", "media_transport.avb_streaming.15");
     cfg->define("drm_device", "/dev/dri/renderD128");
     cfg->define("tex_size", "1088x480");
+    cfg->define("src_crop", "");
+    cfg->define("map_rect", "");
     cfg->define("dirty_threshold", "8");
     cfg->define("dirty_settle_ms", "1000");
     cfg->define("stall_ms", "6000");
@@ -429,12 +452,19 @@ void define_keys(Config *cfg)
     cfg->define("target_fps", "30");
     cfg->define("pan_blocks", "1");
     cfg->define("tex_level_bits", "2");
+    cfg->define("gpu_copy", "1");
     cfg->define("target", "map");
+    cfg->define("hide_bmw_guidance", "1");
+    cfg->define("state_file", "/var/opt/waze-on-cluster/state/waze-on-cluster.state.conf");
     cfg->define("render_socket", "/dev/shm/cluster-render/render.sock");
     cfg->define("log_file", "/var/opt/waze-on-cluster/log/waze-on-cluster.log");
     cfg->define("log_file_kb", "512");
     for (const char *key : kIgnoredKeys)
         cfg->define(key, "");
+    /* Android Auto opt-in (patch/aa_enabled.js reads it for patchd and the boot
+     * recovery). The render does not use it; it is defined only so that a
+     * local_conf that sets it still starts the service. */
+    cfg->define("aa_enabled", "0");
 }
 
 int main(int argc, char **argv)
@@ -458,8 +488,11 @@ int main(int argc, char **argv)
     log_verbose = (int)cfg.num("verbose");
     signal(SIGPIPE, SIG_IGN);
 
-    if (i == argc)
-        return serve(cfg);
+    if (i == argc) {
+        /* Before any source, decoder or renderer connection. */
+        const std::string why = head_unit_refused();
+        return why.empty() ? serve(cfg) : serve_refused(cfg, why);
+    }
     if (i + 2 == argc && !std::strcmp(argv[i], "run"))
         return run(cfg, argv[i + 1]);
     if (i + 2 == argc && !std::strcmp(argv[i], "bench-pack"))

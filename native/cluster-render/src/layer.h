@@ -35,6 +35,7 @@ struct LayerParams {
     Klass klass = Klass::Content;
     int z = 0;
     bool visible = true, exclusive = false, prewarm = false, contend = false;
+    bool guide_hold = true;   /* false: no guide hold for its target while it wants it (slots.h) */
     Rect rect;
     float opacity = 1.0f;
     /* A quad turned (degrees clockwise) and scaled about its pivot: px, py

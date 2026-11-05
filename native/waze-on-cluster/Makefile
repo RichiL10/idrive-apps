@@ -2,11 +2,13 @@
 # Copyright (C) 2026 Robert Nisipeanu
 # waze-on-cluster. See README.md.
 #
-#   make test                 host build + NAL, RTP, receive queue and catch-up, backlog, stream health,
-#                             keyframe wait, the map feed
+#   make test                 host build + NAL, RTP, the decoder against a fake MSDK, receive queue and
+#                             catch-up, backlog, stream health,
+#                             keyframe wait, the turn-box setting, the map feed
 #                             against the shared renderer, the kit's tests, patcher,
-#                             patchd patch/install activation/DLT, capture and
-#                             boot-recovery tests
+#                             patchd patch/install activation/DLT/restart, capture,
+#                             boot-recovery, journal keeper, logs page and its
+#                             firewall rule, and unit tests
 #   make test-x86             the C++ host tests built and run with the unit's toolchain
 #                             in Docker (x86-64: the SSE2 paths against their scalar twins)
 #   make test-firmware ROOTFS=<dir>
@@ -45,19 +47,25 @@ VERSION := $(shell sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' component.json)
 
 # The capture, decode and map feed (own files), the kit's atlas, packing and
 # geometry, and the shared renderer's client.
-WOC_SRC = src/main.cpp src/video_producer.cpp src/freeze_watch.cpp src/alt_screen.cpp src/map_feed.cpp src/control.cpp src/h264_source.cpp \
+WOC_SRC = src/main.cpp src/refused.cpp src/video_producer.cpp src/freeze_watch.cpp src/alt_screen.cpp src/map_feed.cpp src/control.cpp src/h264_source.cpp \
+          src/guide_setting.cpp \
           src/udp_source.cpp src/avb_source.cpp src/framing_probe.cpp src/rtp_h264.cpp \
           src/decoder_msdk.cpp src/nal_reader.cpp src/stream_health.cpp $(KIT)/map_geometry.cpp $(KIT)/yuv_atlas.cpp \
           $(KIT)/block_pack.cpp
 CR_SRC  = $(CR)/client/client.cpp $(CR)/client/protocol.cpp
-SRC     = $(WOC_SRC) $(CR_SRC) $(CR)/src/config.cpp $(CR)/src/log.cpp
+SRC     = $(WOC_SRC) $(CR_SRC) $(CR)/src/config.cpp $(CR)/src/log.cpp $(CR)/src/head_unit.cpp
 
 .PHONY: all test test-bin test-cpp test-node test-x86 test-x86-in-docker test-firmware target target-in-docker clean
 
 CPP_TESTS = $(BUILD)/host/nal_reader_test $(BUILD)/host/rtp_h264_test $(BUILD)/host/udp_probe_test \
 		$(BUILD)/host/map_feed_test $(BUILD)/host/keyframe_wait_test $(BUILD)/host/freeze_watch_test \
 		$(BUILD)/host/alt_screen_test $(BUILD)/host/packet_queue_test $(BUILD)/host/backlog_test \
-		$(BUILD)/host/stream_health_test
+		$(BUILD)/host/stream_health_test $(BUILD)/host/source_crop_test \
+		$(BUILD)/host/map_rect_test $(BUILD)/host/guide_setting_test $(BUILD)/host/decoder_test \
+		$(BUILD)/host/device_watch_test $(BUILD)/host/device_guard_test
+# The control socket is Linux's (accept4): built and run on Linux only (make test-x86).
+LINUX_TESTS = $(if $(filter Linux,$(shell uname -s)),$(BUILD)/host/refused_test)
+CPP_TESTS += $(LINUX_TESTS)
 
 all: test
 
@@ -70,16 +78,32 @@ test:
 test-bin: $(CPP_TESTS)
 	$(MAKE) -C $(CR) test-kit-bin BUILD=$(abspath $(BUILD))/kit
 
+# The patchers, patchd and boot recovery under the umask an installer may
+# set (077): every file they replace keeps the mode its service needs.
 test-node:
-	$(NODE) patch/test/locate_test.js
-	$(NODE) patch/test/mutation_test.js
-	$(NODE) patch/test/undo_test.js
-	$(NODE) patch/test/patch_test.js
-	$(NODE) patch/test/patchd_patch_test.js
-	$(NODE) patch/test/patchd_activate_test.js
-	$(NODE) patch/test/patchd_dlt_test.js
-	$(NODE) patch/test/dlt_capture_test.js
-	$(NODE) patch/test/recovery_test.js
+	umask 077 && $(NODE) patch/test/locate_test.js
+	umask 077 && $(NODE) patch/test/permissions_test.js
+	umask 077 && $(NODE) patch/test/file_mode_test.js
+	umask 077 && $(NODE) patch/test/mutation_test.js
+	umask 077 && $(NODE) patch/test/undo_test.js
+	umask 077 && $(NODE) patch/test/patch_test.js
+	umask 077 && $(NODE) patch/test/patchd_patch_test.js
+	umask 077 && $(NODE) patch/test/patchd_activate_test.js
+	umask 077 && $(NODE) patch/test/patchd_dlt_test.js
+	umask 077 && $(NODE) patch/test/patchd_reboot_test.js
+	umask 077 && $(NODE) patch/test/dlt_capture_test.js
+	umask 077 && $(NODE) patch/test/recovery_test.js
+	umask 077 && $(NODE) patch/test/journal_keep_test.js
+	umask 077 && $(NODE) patch/test/logs_test.js
+	umask 077 && $(NODE) patch/test/logs_fw_test.js
+	umask 077 && $(NODE) patch/test/units_test.js
+	umask 077 && $(NODE) patch/test/aapd_test.js
+	umask 077 && $(NODE) patch/test/head_unit_test.js
+	umask 077 && $(NODE) patch/test/atomic_write_test.js
+	umask 077 && $(NODE) patch/test/patchd_unproven_test.js
+	umask 077 && $(NODE) patch/test/patchd_aa_off_test.js
+	umask 077 && $(NODE) patch/test/patchd_ro_test.js
+	umask 077 && $(NODE) patch/test/remount_lock_test.js
 
 test-cpp: $(CPP_TESTS)
 	$(BUILD)/host/nal_reader_test
@@ -92,6 +116,13 @@ test-cpp: $(CPP_TESTS)
 	$(BUILD)/host/packet_queue_test
 	$(BUILD)/host/backlog_test
 	$(BUILD)/host/stream_health_test
+	$(BUILD)/host/source_crop_test
+	$(BUILD)/host/map_rect_test
+	$(BUILD)/host/guide_setting_test
+	$(BUILD)/host/decoder_test
+	$(BUILD)/host/device_watch_test
+	$(BUILD)/host/device_guard_test
+	$(if $(LINUX_TESTS),$(LINUX_TESTS),@echo 'refused_test: Linux only (make test-x86)')
 	$(MAKE) -C $(CR) test-kit BUILD=$(abspath $(BUILD))/kit
 
 test-x86:
@@ -106,6 +137,29 @@ test-x86-in-docker:
 test-firmware:
 	@test -n "$(ROOTFS)" || { echo "set ROOTFS (a copy of the unit's root file system)"; exit 2; }
 	sh patch/test/firmware/run.sh "$(ROOTFS)"
+
+$(BUILD)/host/source_crop_test: test/source_crop_test.cpp src/source_crop.h
+	mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/source_crop_test.cpp
+
+# The decoder against a fake MSDK and libva.
+DEC_SRC = test/decoder_test.cpp test/fake_msdk.cpp src/decoder_msdk.cpp src/nal_reader.cpp $(KIT)/yuv_atlas.cpp $(CR)/src/log.cpp
+$(BUILD)/host/decoder_test: $(DEC_SRC) test/fake_msdk.h src/decoder_msdk.h src/source_crop.h src/nal_reader.h $(KIT)/yuv_atlas.h
+	mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -Isrc -I$(KIT) -I$(CR)/src -Iabi/include -o $@ $(DEC_SRC) -lpthread
+
+DG_SRC = test/device_guard_test.cpp test/fake_msdk.cpp src/decoder_msdk.cpp src/nal_reader.cpp $(KIT)/yuv_atlas.cpp $(CR)/src/log.cpp
+$(BUILD)/host/device_guard_test: $(DG_SRC) test/fake_msdk.h src/decoder_msdk.h src/device_guard.h src/device_watch.h src/exit_watchdog.h src/source_crop.h src/nal_reader.h $(KIT)/yuv_atlas.h
+	mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -Isrc -I$(KIT) -I$(CR)/src -Iabi/include -o $@ $(DG_SRC) -lpthread
+
+$(BUILD)/host/device_watch_test: test/device_watch_test.cpp src/device_watch.h src/exit_watchdog.h
+	mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/device_watch_test.cpp -lpthread
+
+$(BUILD)/host/map_rect_test: test/map_rect_test.cpp src/map_rect.h
+	mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/map_rect_test.cpp
 
 $(BUILD)/host/nal_reader_test: test/nal_reader_test.cpp src/nal_reader.cpp src/nal_reader.h
 	mkdir -p $(@D)
@@ -124,7 +178,7 @@ $(BUILD)/host/udp_probe_test: test/udp_probe_test.cpp src/udp_source.cpp src/udp
 # backends, over its socket, with the freeze watch driving it: every service
 # source but the units' backends, the starter and its main.
 CR_CORE = $(filter-out $(addprefix $(CR)/src/,main.cpp graph_ramses19.cpp dcsm2_link.cpp config.cpp log.cpp \
-                         unit_idrive7.cpp unit_idrive8.cpp graph_ramses27.cpp launch.cpp generation.cpp), \
+                         unit_idrive7.cpp unit_idrive8.cpp graph_ramses27.cpp launch.cpp generation.cpp refused.cpp head_unit.cpp), \
           $(wildcard $(CR)/src/*.cpp)) $(wildcard $(KIT)/*.cpp)
 # Each of its sources compiles once, with its header dependencies.
 MF       = $(BUILD)/host/map_feed
@@ -160,7 +214,7 @@ $(BUILD)/host/alt_screen_test: test/alt_screen_test.cpp src/alt_screen.cpp src/a
 	mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/alt_screen_test.cpp src/alt_screen.cpp
 
-$(BUILD)/host/packet_queue_test: test/packet_queue_test.cpp src/packet_queue.h
+$(BUILD)/host/packet_queue_test: test/packet_queue_test.cpp src/packet_queue.h src/arrival_time.h
 	mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/packet_queue_test.cpp -lpthread
 
@@ -171,6 +225,16 @@ $(BUILD)/host/backlog_test: test/backlog_test.cpp src/backlog.h $(KIT)/frame_clo
 $(BUILD)/host/stream_health_test: test/stream_health_test.cpp src/stream_health.cpp src/stream_health.h $(CR)/src/log.cpp
 	mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -Isrc -I$(CR)/src -o $@ test/stream_health_test.cpp src/stream_health.cpp $(CR)/src/log.cpp -lpthread
+
+$(BUILD)/host/refused_test: test/refused_test.cpp src/refused.cpp src/refused.h src/control.cpp src/control.h \
+		$(CR)/src/config.cpp $(CR)/src/log.cpp
+	mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -Isrc -I$(CR)/src -o $@ test/refused_test.cpp src/refused.cpp src/control.cpp $(CR)/src/config.cpp \
+		$(CR)/src/log.cpp -lpthread
+
+$(BUILD)/host/guide_setting_test: test/guide_setting_test.cpp src/guide_setting.cpp src/guide_setting.h $(CR)/src/log.cpp
+	mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -Isrc -I$(CR)/src -o $@ test/guide_setting_test.cpp src/guide_setting.cpp $(CR)/src/log.cpp -lpthread
 
 # ---- target binary (in Docker) --------------------------------------------
 target:

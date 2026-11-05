@@ -11,11 +11,19 @@
  * FakeRender speaks the render control protocol: on connect a status and the
  * log backlog. Like the render, it maps on its own: stream(true) -> starting,
  * then showing the "Waze map" page at 30 updates/s; stream(false) -> idle. The map
- * stays when the connection closes.
+ * stays when the connection closes. guide -> the status with the new
+ * hide_bmw_guidance (none with `hide` null, as a tool before the switch).
  *
  * FakePatch speaks the patch daemon protocol: on connect the log backlog and
  * the current state; apply -> busy, then patched with the asked panel;
- * revert -> busy, then original; status -> the current state.
+ * revert -> busy, then original; an Android Auto change -> busy, then
+ * done after STEP_MS, or with `holdAa` set when the test calls
+ * releaseAa(failure); status -> the current state; a command
+ * while one runs -> refused, to its asker; reboot -> restarting, or with
+ * `rebootFails` set, failed with that code.
+ *
+ * FakeLogs speaks the logs socket: on connect its state; save -> saving,
+ * then the new archive first in the list (or `failWith` as the error).
  *
  * Every command received is kept in `received`.
  */
@@ -110,6 +118,8 @@ class FakeRender extends LineServer {
         this.target = null;
         this.page = null;
         this.reason = null;
+        this.hide = 1;
+        this.guideDisabled = 0;
         this._showTimer = null;
     }
 
@@ -129,7 +139,12 @@ class FakeRender extends LineServer {
     }
 
     _status() {
-        return { ev: 'status', state: this.state, target: this.target, page: this.page, reason: this.reason };
+        const s = { ev: 'status', state: this.state, target: this.target, page: this.page, reason: this.reason };
+        if (this.hide !== null) {
+            s.hide_bmw_guidance = this.hide;
+            s.guide_disabled = this.guideDisabled;
+        }
+        return s;
     }
 
     _set(state, target, page, reason) {
@@ -153,6 +168,10 @@ class FakeRender extends LineServer {
         this.received.push(msg);
         this.emit('command', msg);
         this.log(`control: ${JSON.stringify(msg)}`);
+        if (msg.cmd === 'guide' && this.hide !== null && (msg.hide === 0 || msg.hide === 1)) {
+            this.hide = msg.hide;
+            this._broadcast(this._status());
+        }
     }
 }
 
@@ -166,9 +185,18 @@ class FakePatch extends LineServer {
         this.carplay = null;  /* 'deferred' once a patch is written but not active */
         this.pending = null;  /* 'apply' | 'revert': the change waiting for a head-unit start */
         this.conflict = null; /* why the install left carplay as it was */
+        this.recovered = null; /* boot recovery removed the patch after that many failed starts */
+        this.unproven = false; /* a carplay build outside the proven list, not patched yet */
+        this.failed = null;    /* boot recovery marked the patch failed: its reason */
         this.busy = false;
         this.reason = null;
+        this.aa = { state: 'original', density: 180, densities: [150, 400, 10] };   /* Android Auto's patch */
         this.reboots = 0;     /* reboot commands honoured */
+        this.restart = { state: 'idle' };
+        this.rebootFails = null;   /* 'refused' | 'stayed' | 'error': the restart fails so */
+        this.mute = false;         /* commands received and not answered */
+        this.holdAa = false;       /* an Android Auto change stays busy until releaseAa(failure) */
+        this.releaseAa = null;
         this._rebooting = false;
         this._timer = null;
     }
@@ -182,9 +210,18 @@ class FakePatch extends LineServer {
     }
 
     _status() {
-        return { ev: 'status', state: this.busy ? 'busy' : this.state, panel: this.panel,
+        const s = { ev: 'status', state: this.busy ? 'busy' : this.state, panel: this.panel,
             res: this.res, safe: this.safe, carplay: this.carplay, reason: this.reason,
-            pending: this.pending, conflict: this.conflict };
+            pending: this.pending, conflict: this.conflict, recovered: this.recovered, aa: this.aa,
+            busy: this.busy ? 'carplay' : this.aa.state === 'busy' ? 'aa' : this._rebooting ? 'restart' : null,
+            restart: this.restart };
+        if (this.unproven) {
+            s.unproven = true;
+        }
+        if (this.failed) {
+            s.failed = this.failed;
+        }
+        return s;
     }
 
     _onConnect(socket) {
@@ -199,26 +236,60 @@ class FakePatch extends LineServer {
     _onCommand(msg, socket) {
         this.received.push(msg);
         this.emit('command', msg);
+        if (this.mute) {
+            return;
+        }
         if (msg.cmd === 'status') {
             this._broadcast(this._status());
             return;
         }
         if (msg.cmd === 'reboot') {
             const deny = this._rebooting ? 'a restart is already in progress'
-                : this.carplay !== 'deferred' ? 'no restart is pending' : null;
+                : this.carplay !== 'deferred' && !this.aa.pending ? 'no restart is pending' : null;
             if (deny) { this._send(socket, { ev: 'reboot-reply', ok: false, reason: deny }); return; }
             this._rebooting = true;
             this.reboots++;
+            this.restart = { state: 'restarting' };
             this._send(socket, { ev: 'reboot-reply', ok: true });
-            this._broadcast({ ev: 'status', state: 'busy', reason: 'restarting the head unit' });
+            this._broadcast(this._status());
+            if (this.rebootFails) {
+                this._rebooting = false;
+                this.restart = { state: 'failed', code: this.rebootFails };
+                if (this.rebootFails === 'stayed') this.restart.possibleAt = Date.now() + 10 * 60000;
+                this._send(socket, { ev: 'reboot-reply', ok: false, reason: this.rebootFails });
+                this._broadcast(this._status());
+            }
             return;
         }
-        if (this.busy) {
-            this._broadcast({ ev: 'status', state: 'busy', reason: 'another operation is running' });
+        if (this.busy || this.aa.state === 'busy' || this._rebooting) {
+            this._send(socket, { ev: 'refused', cmd: msg.cmd, reason: 'another operation is running' });
+            return;
+        }
+        if (msg.cmd === 'apply' && this.unproven && msg.unproven !== true) {
+            /* patchd: a build outside the proven list needs the confirmation */
+            this._broadcast(Object.assign(this._status(), { state: 'error',
+                reason: 'untested carplay build: Enable map needs your confirmation; nothing changed' }));
             return;
         }
         clearTimeout(this._timer);
-        if (msg.cmd === 'apply') {
+        if (/^aa-/.test(msg.cmd)) {
+            const density = msg.cmd === 'aa-density' ? msg.value : this.aa.density;
+            const card = msg.cmd === 'aa-card' ? msg.value : this.aa.card || 'shown';
+            const after = msg.cmd === 'aa-revert' ? { state: 'original' } : { state: 'patched', dpi: density, diskCard: card };
+            const before = this.aa;
+            this.aa = Object.assign({}, this.aa, { state: 'busy', reason: msg.cmd === 'aa-revert' ? 'reverting' : 'applying' });
+            this._broadcast(this._status());
+            /* failure: the change failed so, the values on disk as they were */
+            const finish = (failure) => {
+                this.aa = failure ? Object.assign({}, before, { state: 'error', reason: failure, error: failure })
+                    : { state: after.state, dpi: after.dpi, diskCard: after.diskCard, density, card, densities: this.aa.densities, aapd: 'restarted' };
+                this.log(msg.cmd + ' done');
+                this._broadcast(this._status());
+            };
+            if (this.holdAa) this.releaseAa = finish;
+            else this._timer = setTimeout(finish, STEP_MS);
+        } else if (msg.cmd === 'apply') {
+            this.unproven = false;   /* patched: our backup exists */
             this.busy = true;
             this.reason = 'applying IC_' + String(msg.panel).toUpperCase();
             this.log(this.reason);
@@ -254,7 +325,56 @@ class FakePatch extends LineServer {
     }
 }
 
-module.exports = { FakeRender, FakePatch, RENDER_PAGE, RENDER_FPS };
+class FakeLogs extends LineServer {
+    constructor(path) {
+        super(path);
+        this.url = 'http://172.16.222.97:8475/0123456789abcdef0123456789abcdef/';
+        this.archives = [];
+        this.saving = false;
+        this.error = null;
+        this.saved = null;
+        this.failWith = null;
+    }
+
+    state() {
+        return { ev: 'state', url: this.url, saving: this.saving, error: this.error, saved: this.saved,
+            archives: this.archives };
+    }
+
+    announce() {
+        this._broadcast(this.state());
+    }
+
+    _onConnect(socket) {
+        this._send(socket, this.state());
+    }
+
+    _onClose(socket) {
+        this._clients.delete(socket);
+    }
+
+    _onCommand(msg) {
+        this.received.push(msg);
+        this.emit('command', msg);
+        if (msg.cmd !== 'save' || this.saving) {
+            return;
+        }
+        this.saving = true;
+        this.error = null;
+        this.announce();
+        setTimeout(() => {
+            this.saving = false;
+            this.error = this.failWith;
+            if (!this.failWith) {
+                this.saved = `woc-logs-20261103T07${String(this.archives.length).padStart(2, '0')}00Z.tar.gz`;
+                this.archives = [{ name: this.saved, size: 412 * 1024, mtime: Date.now() }].concat(this.archives).slice(0, 5);
+            }
+            this.announce();
+        }, STEP_MS);
+    }
+}
+
+module.exports = { FakeRender, FakePatch, FakeLogs, RENDER_PAGE, RENDER_FPS };
 
 if (require.main === module) {
     const render = new FakeRender(process.argv[2] || '/tmp/woc-render.sock');

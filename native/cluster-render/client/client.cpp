@@ -102,11 +102,21 @@ void Client::disconnect(int64_t now_ms)
     fd_ = -1;
     ready_ = false;
     in_.clear();
+    /* The newest frame each video layer was given stays its last: the one
+     * on its way, then any still waiting. */
+    if (!cur_px_.empty())
+        keep_last(last_frame_ref_, &cur_px_);
+    for (auto &f : frames_)
+        keep_last(f.first, &f.second.px);
+    for (auto &kv : layers_)
+        kv.second.sent = false;
+    repeats_ = false;
     cur_.clear();
     cur_px_.clear();
     cur_off_ = 0;
     ctl_.clear();
     frames_.clear();
+    repeats_due_.clear();
     retry_ms_ = now_ms + kBackoff[backoff_ < 3 ? backoff_ : 3];
     if (backoff_ < 3)
         backoff_++;
@@ -116,7 +126,7 @@ bool Client::wants_write() const
 {
     if (fd_ < 0)
         return false;
-    if (!cur_.empty() || !ctl_.empty() || !frames_.empty())
+    if (!cur_.empty() || !ctl_.empty() || !frames_.empty() || !repeats_due_.empty())
         return true;
     for (const auto &kv : layers_)
         if ((kv.second.kind == "image" || kv.second.kind == "asset") && (kv.second.whole || !kv.second.dirty.empty()))
@@ -172,16 +182,26 @@ void Client::read_events()
         if (ev == "hello") {
             backend = j["backend"];
             targets = j["targets"];
+            repeats_ = j["repeat"] == "1";
             ready_ = true;
             backoff_ = 0;
             if (on_ready)
                 on_ready();
         } else if (ev == "layer" && on_layer) {
             on_layer((uint32_t)std::strtoul(j["ref"].c_str(), nullptr, 10), j["state"], j["reason"]);
-        } else if (ev == "target" && on_target) {
-            on_target(j["target"], j["state"], j["holder"], j["reason"]);
-        } else if (ev == "error" && on_error) {
-            on_error(j["op"], (uint32_t)std::strtoul(j["ref"].c_str(), nullptr, 10), j["reason"]);
+        } else if (ev == "target") {
+            guide_disabled[j["target"]] = j["guide_disabled"] == "1";
+            if (on_target)
+                on_target(j["target"], j["state"], j["holder"], j["reason"]);
+        } else if (ev == "error") {
+            const uint32_t ref = (uint32_t)std::strtoul(j["ref"].c_str(), nullptr, 10);
+            /* A layer the service refused or lost: its next frame goes whole,
+             * which the service answers at most once. */
+            auto l = layers_.find(ref);
+            if (l != layers_.end())
+                l->second.sent = false;
+            if (on_error)
+                on_error(j["op"], ref, j["reason"]);
         } else if (ev == "budget" && on_budget) {
             on_budget((unsigned)std::strtoul(j["cap_kb_per_s"].c_str(), nullptr, 10),
                       (unsigned)std::strtoul(j["max_kb_per_s"].c_str(), nullptr, 10), j["reason"]);
@@ -201,12 +221,15 @@ void Client::write_out()
             cur_.clear();
             cur_off_ = 0;
             if (!cur_px_.empty()) {
-                if (spare_.size() >= kMaxSpare)
-                    spare_.erase(spare_.begin());
-                spare_.push_back(std::move(cur_px_));
+                auto l = layers_.find(last_frame_ref_);
+                if (l != layers_.end())
+                    l->second.sent = true;
+                keep_last(last_frame_ref_, &cur_px_);
             }
-            cur_px_.clear();
-            if (!ctl_.empty()) {
+            if (!repeats_due_.empty()) {
+                cur_ = encode(kJson, json_object({{"op", json_quote("repeat")}, {"ref", num(*repeats_due_.begin())}}));
+                repeats_due_.erase(repeats_due_.begin());
+            } else if (!ctl_.empty()) {
                 cur_.swap(ctl_.front());
                 ctl_.pop_front();
             } else if (ready_ && next_image(&cur_)) {
@@ -297,7 +320,7 @@ std::vector<std::pair<std::string, std::string>> Client::fields(const char *op, 
         {"x", num(lo.x)},                {"y", num(lo.y)},
         {"visible", flag(lo.visible)},   {"exclusive", flag(lo.exclusive)},
         {"prewarm", flag(lo.prewarm)},   {"contend", flag(lo.contend)},
-        {"opacity", num(lo.opacity)}};
+        {"guide_hold", flag(lo.guide_hold)}, {"opacity", num(lo.opacity)}};
     if (lo.w && lo.h) {
         kv.push_back({"w", num(lo.w)});
         kv.push_back({"h", num(lo.h)});
@@ -634,6 +657,7 @@ void Client::drop(uint32_t ref)
     if (!sampled)
         layers_.erase(it);
     frames_.erase(ref);
+    repeats_due_.erase(ref);
     queue(json_object({{"op", json_quote("drop")}, {"ref", num(ref)}}));
     send_now();
 }
@@ -668,10 +692,24 @@ void Client::take_spare(std::vector<uint8_t> *v, size_t n)
     v->resize(n);
 }
 
+void Client::keep_last(uint32_t ref, std::vector<uint8_t> *px)
+{
+    auto l = layers_.find(ref);
+    if (l != layers_.end() && l->second.kind == "video")
+        px->swap(l->second.last);
+    if (!px->empty()) {
+        if (spare_.size() >= kMaxSpare)
+            spare_.erase(spare_.begin());
+        spare_.push_back(std::move(*px));
+    }
+    px->clear();
+}
+
 bool Client::frame(uint32_t ref, const uint8_t *atlas, size_t n, uint64_t id)
 {
     if (!video_frame_ok(ref, n))
         return false;
+    repeats_due_.erase(ref);
     Frame &f = frames_[ref];
     f.head = frame_head(ref, id, {}, n);
     if (f.px.size() != n)
@@ -686,12 +724,57 @@ bool Client::frame(uint32_t ref, std::vector<uint8_t> *atlas, uint64_t id)
     if (!atlas || !video_frame_ok(ref, atlas->size()))
         return false;
     const size_t n = atlas->size();
+    repeats_due_.erase(ref);
     Frame &f = frames_[ref];
     f.head = frame_head(ref, id, {}, n);
     f.px.swap(*atlas);
     if (atlas->size() != n)
         take_spare(atlas, n);   /* else it is the unsent frame this one replaces */
     write_out();
+    return true;
+}
+
+bool Client::repeat(uint32_t ref, uint64_t id)
+{
+    const size_t n = frame_bytes(ref);
+    if (!video_frame_ok(ref, n))
+        return false;
+    Layer &l = layers_[ref];
+    auto f = frames_.find(ref);
+    if (f != frames_.end()) {
+        f->second.head = frame_head(ref, id, {}, n);   /* the frame waiting is this picture */
+        return true;
+    }
+    const bool on_its_way = !cur_px_.empty() && last_frame_ref_ == ref;
+    if (repeats_ && (l.sent || on_its_way)) {
+        repeats_due_.insert(ref);
+        write_out();
+        return true;
+    }
+    if (on_its_way)
+        return true;
+    if (l.last.size() != n)
+        return false;
+    repeats_due_.erase(ref);
+    Frame &w = frames_[ref];
+    w.head = frame_head(ref, id, {}, n);
+    w.px.swap(l.last);
+    write_out();
+    return true;
+}
+
+bool Client::latest(uint32_t ref, std::vector<uint8_t> *out) const
+{
+    auto l = layers_.find(ref);
+    if (l == layers_.end() || l->second.kind != "video")
+        return false;
+    auto f = frames_.find(ref);
+    const std::vector<uint8_t> &px = f != frames_.end()                            ? f->second.px
+                                     : !cur_px_.empty() && last_frame_ref_ == ref ? cur_px_
+                                                                                   : l->second.last;
+    if (px.empty())
+        return false;
+    *out = px;
     return true;
 }
 

@@ -1,13 +1,13 @@
 {
   "id": "waze-on-cluster",
   "kind": "tool",
-  "version": "0.7.9",
+  "version": "0.8.9",
   "license": "GPL-3.0-or-later",
   "title": "Waze on cluster",
-  "description": "Shows the CarPlay map on the instrument cluster: a root helper applies the reversible carplay patch, and the capture, running from boot, decodes the map's H.264 and draws it through the cluster renderer whenever the stream flows",
+  "description": "Shows the CarPlay or Android Auto map on the instrument cluster: a root helper applies the reversible carplay and aapd patches where each is supported, and the capture, running from boot, decodes the map's H.264 and draws it through the cluster renderer whenever the stream flows",
   "requires": {
-    "mgu-deploy": "0.7.0",
-    "cluster-render": "0.3.3"
+    "mgu-deploy": "0.7.11",
+    "cluster-render": "0.3.12"
   },
   "uninstallable": true,
   "mguHmi": [
@@ -49,6 +49,21 @@
       "mode": "0644"
     },
     {
+      "path": "aapd_patch.js",
+      "from": "patch/aapd_patch.js",
+      "mode": "0644"
+    },
+    {
+      "path": "aapd_conf.js",
+      "from": "patch/aapd_conf.js",
+      "mode": "0644"
+    },
+    {
+      "path": "aa_enabled.js",
+      "from": "patch/aa_enabled.js",
+      "mode": "0644"
+    },
+    {
       "path": "patchd.js",
       "from": "patch/patchd.js",
       "mode": "0644"
@@ -59,6 +74,16 @@
       "mode": "0644"
     },
     {
+      "path": "patch_record.js",
+      "from": "patch/patch_record.js",
+      "mode": "0644"
+    },
+    {
+      "path": "file_mode.js",
+      "from": "patch/file_mode.js",
+      "mode": "0644"
+    },
+    {
       "path": "remount_lock.js",
       "from": "patch/remount_lock.js",
       "mode": "0644"
@@ -66,6 +91,16 @@
     {
       "path": "recmgr_list.js",
       "from": "patch/recmgr_list.js",
+      "mode": "0644"
+    },
+    {
+      "path": "head_unit.js",
+      "from": "patch/head_unit.js",
+      "mode": "0644"
+    },
+    {
+      "path": "boot_id.js",
+      "from": "patch/boot_id.js",
       "mode": "0644"
     },
     {
@@ -81,6 +116,26 @@
     {
       "path": "dlt_capture.js",
       "from": "patch/dlt_capture.js",
+      "mode": "0644"
+    },
+    {
+      "path": "journal_keep.js",
+      "from": "patch/journal_keep.js",
+      "mode": "0644"
+    },
+    {
+      "path": "logs.js",
+      "from": "patch/logs.js",
+      "mode": "0644"
+    },
+    {
+      "path": "logs_fw.js",
+      "from": "patch/logs_fw.js",
+      "mode": "0644"
+    },
+    {
+      "path": "group_dir.js",
+      "from": "patch/group_dir.js",
       "mode": "0644"
     },
     {
@@ -112,12 +167,36 @@
       "from": "systemd/waze-on-cluster-boot.service"
     },
     {
+      "name": "waze-on-cluster-aa-boot.service",
+      "from": "systemd/waze-on-cluster-aa-boot.service"
+    },
+    {
       "name": "waze-on-cluster-recovery.service",
       "from": "systemd/waze-on-cluster-recovery.service"
     },
     {
       "name": "waze-on-cluster-capture.service",
       "from": "systemd/waze-on-cluster-capture.service"
+    },
+    {
+      "name": "waze-on-cluster-journal.service",
+      "from": "systemd/waze-on-cluster-journal.service"
+    },
+    {
+      "name": "waze-on-cluster-journal.timer",
+      "from": "systemd/waze-on-cluster-journal.timer"
+    },
+    {
+      "name": "waze-on-cluster-logs.socket",
+      "from": "systemd/waze-on-cluster-logs.socket"
+    },
+    {
+      "name": "waze-on-cluster-logs.service",
+      "from": "systemd/waze-on-cluster-logs.service"
+    },
+    {
+      "name": "waze-on-cluster-logs-fw.service",
+      "from": "systemd/waze-on-cluster-logs-fw.service"
     }
   ],
   "enable": [
@@ -144,6 +223,14 @@
     {
       "unit": "waze-on-cluster-capture.service",
       "target": "multi-user.target"
+    },
+    {
+      "unit": "waze-on-cluster-journal.timer",
+      "target": "timers.target"
+    },
+    {
+      "unit": "waze-on-cluster-logs.socket",
+      "target": "sockets.target"
     }
   ],
   "dropins": [
@@ -160,16 +247,25 @@
   ],
   "recmgr": [
     "carplay",
+    "aapd",
     "waze-on-cluster",
     "waze-on-cluster-patchd",
     "waze-on-cluster-boot",
+    "waze-on-cluster-aa-boot",
     "waze-on-cluster-recovery",
-    "waze-on-cluster-capture"
+    "waze-on-cluster-capture",
+    "waze-on-cluster-journal",
+    "waze-on-cluster-logs",
+    "waze-on-cluster-logs-fw"
+  ],
+  "crashNames": [
+    "aapd"
   ],
   "restart": [
     "waze-on-cluster.service",
     "waze-on-cluster-patchd.service",
     "waze-on-cluster-recovery.service",
-    "waze-on-cluster-capture.service"
+    "waze-on-cluster-capture.service",
+    "waze-on-cluster-journal.service"
   ]
 }

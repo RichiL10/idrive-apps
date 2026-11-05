@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Robert Nisipeanu
+[Unit]
+Description=waze-on-cluster logs firewall rule, while the logs page runs
+RequiresMountsFor=/var/opt
+# Runs exactly as long as the logs service: started by it, stopped with it.
+BindsTo=waze-on-cluster-logs.service
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+# Root: it makes the archives' folder before the logs service starts (that
+# waits for this unit's start), keeps the rule that lets the hotspot
+# reach the page (checked every 30 s, put back after a ruleset load) and
+# removes it at stop; ExecStopPost removes it however the watch ended
+# (logs_fw.js). Its children (nft) run with its limits.
+ExecStartPre=-/usr/bin/node /var/opt/waze-on-cluster/current/logs_fw.js prepare
+ExecStart=/usr/bin/node /var/opt/waze-on-cluster/current/logs_fw.js watch
+ExecStopPost=/usr/bin/node /var/opt/waze-on-cluster/current/logs_fw.js close
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+Nice=10
+CPUQuota=50%
+MemoryLimit=64M
+TasksMax=8
+# No core dump goes to the crash handler, so a crash restarts this service
+# and never the head unit.
+LimitCORE=1
+StandardOutput=journal
+StandardError=journal

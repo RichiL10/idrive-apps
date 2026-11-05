@@ -1,0 +1,205 @@
+# Changelog
+
+## 0.5.8
+
+Kiro test build (not an upstream release; see KIRO-NOTES.md). Upstream 0.5.7
+plus the app side of the Kiro safeguards S3, S4, S6 and S2:
+
+- On a CarPlay build outside the patcher's proven list, the Patch button
+  first asks to be confirmed: the button reads `Confirm` and the Status row
+  `Untested version, press Confirm to patch`, for 15 s. Only the confirming
+  press sends `unproven:true`; a confirming press less than 1 s after the
+  first is ignored. The question lapses with its time, a status that no
+  longer calls the build untested, and closing the page.
+- When boot recovery marked the patch failed, Status reads `Failed, CarPlay
+  keeps crashing: restore it by hand`.
+- When a change could not take the shared remount lock, Status reads `Busy,
+  try again in two minutes` (nothing was changed).
+- With Android Auto off (`aa_enabled = 0`, the default), the Android Auto
+  section is greyed out and reads `Off`.
+
+Requires waze-on-cluster 0.8.9.
+
+## 0.5.7
+
+The map's capture starts at boot after the head unit's media bus is up,
+ordered after BMW's own media services and never holding any of them up.
+Requires waze-on-cluster 0.8.6.
+
+## 0.5.6
+
+When boot recovery removed a patch because the head unit kept restarting
+with it, its Status row reads `Removed — head unit kept restarting`, in the
+display language, also with part of the patch left, until its Patch button
+applies the patch again. On a head unit that refuses the tool, `Not
+supported on this car` comes first. Requires waze-on-cluster 0.8.5.
+
+## 0.5.5
+
+On a HIGH F car where waze-on-cluster 0.8.2 removed the patch at boot, the
+update puts it back by itself: the app shows `Status: Patched after
+restart`, and the map returns at the next head-unit start or drive.
+Requires waze-on-cluster 0.8.4.
+
+## 0.5.4
+
+HIGH F head units are supported again, as every variant is; only a head
+unit whose variant cannot be read shows `Not supported on this car`.
+Requires waze-on-cluster 0.8.3.
+
+## 0.5.3
+
+Every word on both pages, and the tile's name, in the head unit's display
+language: each language the iDrive 7 HMI offers, English where a language
+has no translation. A change of the display language shows at once. Values
+from the tools (reasons, addresses, numbers) are shown as they are.
+
+## 0.5.2
+
+On a head unit that refuses the tool (HIGH F, or a variant it cannot
+read), CarPlay and Android Auto both read `Status: Not supported on this
+car`, also while a patch from before is on disk or an apply of it waits
+for the next start, which boot recovery turns into a restore; Restart head
+unit stays offered while one is needed. Neither Patch button, Zoom out,
+Zoom in nor the turn card checkbox is offered there; Remove patch stays.
+`Cluster map: Unavailable` while the tool reports itself unsupported, and
+the Hide BMW's turn box row is greyed. Requires waze-on-cluster 0.8.2.
+
+## 0.5.1
+
+The main page in three sections under header rows. CarPlay and Android Auto
+have the same rows with the same words: `Status: …`, Patch and Remove
+patch; Android Auto adds Zoom (`Zoom: 170 dpi`), Zoom out, Zoom in and the
+Hide phone's turn card checkbox. General: `Cluster map: …` (the map the
+shared render draws for either phone), the Hide BMW's turn box checkbox,
+Logs, and Restart head unit with its `Restart: …` row. Info rows read
+`Name: Value`; on/off settings are `Hide …` checkboxes; `(after restart)`
+marks a value that waits for the next head-unit start. Both Status rows
+use one set of words (`Patched`, `Not patched`, `Patching…`, `Patched after
+restart`, `Failed`, `Not supported on this car`, …). Rows stay in place and
+are greyed when they cannot act; while any change runs, every change in
+both sections is greyed. Restart head unit, the last row, shows only while
+a change waits for a restart; its row says when it failed, why, and when
+the 10-minute limit allows the next. The log lines and the setup line are
+off the main page; Start capture is on the Logs page. Restart head unit
+asks the Node State Manager for a normal restart. Requires
+waze-on-cluster 0.8.1.
+
+## 0.5.0
+
+Android Auto next to CarPlay: a line with its state (patched and its
+density, off, pending, not supported on this car, untested aapd build),
+Enable Android Auto, Disable Android Auto, Zoom out and Zoom in for the
+density, and Hide turn card / Show turn card. Restart head unit also
+activates a pending Android Auto change. Requires waze-on-cluster 0.8.0.
+
+## 0.4.4
+
+Hide BMW turn box: a checkbox on the main page. Ticked (the default), BMW's
+own CarPlay turn-by-turn box on the cluster stays hidden while the Waze map
+shows; unticked, it shows. The choice takes effect at once and is kept
+across restarts and updates. While the cluster renderer keeps the box shown
+(its mapping guard), the checkbox is greyed and labelled unavailable.
+Requires waze-on-cluster 0.7.13.
+
+## 0.4.3
+
+A Logs page: Save logs saves an archive of the tools' logs, the journal
+lines they keep and their status, and a phone on the car's Wi-Fi hotspot
+downloads the saved archives from the address the page shows, as text and as
+a QR code. Requires waze-on-cluster 0.7.11.
+
+## 0.4.1
+
+While CarPlay's stream is live but shows no map, the status says why, from
+waze-on-cluster 0.7.2 on: "Stream lost — reconnect CarPlay", or "Stream
+lost — restarting CarPlay" where the tool restarts CarPlay itself.
+
+## 0.4.0
+
+The page says to set Instrument cluster > Central display area to Map view:
+the Waze map replaces the stock map while CarPlay streams it, and the stock
+map is back when the stream ends or freezes. A frozen stream shows "Map
+frozen — reconnect CarPlay". Requires waze-on-cluster 0.6.0.
+
+## 0.3.1
+
+The page says to set Instrument cluster > Central display area to Off: with
+Map view, Route preview or Assisted Driving View there, the cluster shows its
+own content in the centre instead of the map.
+
+## 0.3.0
+
+Installing the app from the Store installs the Waze tool and the cluster
+renderer too. The tool writes the CarPlay patch as it installs, without
+restarting CarPlay; until the next head-unit start the app shows "Patch
+pending — reboot to activate". Enable map appears only when the patch is
+off, unknown or out of date, Disable map only when it is on. When the install
+leaves CarPlay unpatched (an unknown CarPlay build, or another tool starting
+CarPlay), the app says why and offers Enable map. The Store can remove the
+app and then the Waze tool, which restores CarPlay.
+
+## 0.2.11
+
+When a patch change waits for the next head-unit start, the app says so and
+offers a Restart head unit button. A boot recovery service restores the
+original CarPlay binary after repeated failed starts with the patch.
+
+## 0.2.10
+
+The map appears on the cluster by itself when CarPlay streams it and goes
+away when the stream stops; there is no Show or Stop button. Disable map
+turns the feature off.
+
+## 0.2.9
+
+Enable map sets the area where the phone places its guidance, so Waze's
+next-turn banner stays visible between the gauges. Units patched with a
+full-frame area are prompted to update.
+
+## 0.2.8
+
+The map is drawn in the cluster's native map area (1088x480), under the
+gauges. Units patched at another size are prompted to Enable map again.
+
+## 0.2.7
+
+Enable map applies a single patch configuration, including the size the
+phone renders the map at. Units on another panel setting are prompted to
+update.
+
+## 0.2.6
+
+Enable map uses a single capture path; the capture mode row is removed.
+Capture logs has its own button.
+
+## 0.2.5
+
+The status line reads "Patch state unknown — enable the map" until the patch
+daemon reports, so the page opens cleanly.
+
+## 0.2.4
+
+After Enable map, the cluster stream starts with the CarPlay session. A patch
+waiting for the next head-unit start reads "Patch pending — …".
+
+## 0.2.3
+
+The diagnostic capture window is up to 5 minutes.
+
+## 0.2.2
+
+Capture mode offers a UDP stream sink.
+
+## 0.2.1
+
+Capture logs: a bounded DLT capture, with its status and an early stop.
+
+## 0.2.0
+
+A capture mode choice for Enable map.
+
+## 0.1.0
+
+First release: a page to apply and revert the CarPlay patch, show and stop
+the map on the cluster, and read both tools' logs.

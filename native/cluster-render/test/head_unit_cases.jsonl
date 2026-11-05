@@ -1,0 +1,15 @@
+{"name":"HIGH (the owner's car)","cmdline":"console=ttyS0 hwvariant=HIGH hwrevision=D1 quiet\n","refused":""}
+{"name":"MID","cmdline":"hwvariant=MID hwrevision=D1\n","refused":""}
+{"name":"HIGH, MGU21","cmdline":"hwtype=MGU hwgen=21 hwvariant=HIGH\n","refused":""}
+{"name":"HIGH, quoted","cmdline":"hwvariant=\"HIGH\"\n","refused":""}
+{"name":"HIGH twice","cmdline":"hwvariant=HIGH quiet hwvariant=high\n","refused":""}
+{"name":"HIGH F","cmdline":"console=ttyS0 hwvariant=HIGHF quiet\n","refused":""}
+{"name":"HIGH F, lower case","cmdline":"hwvariant=highf\n","refused":""}
+{"name":"HIGH F, quoted","cmdline":"hwvariant=\"HIGHF\"\n","refused":""}
+{"name":"HIGH, then HIGH F","cmdline":"hwvariant=HIGH hwvariant=HIGHF\n","refused":"head unit: unknown variant is not supported (the kernel command line says hwvariant=HIGH and hwvariant=HIGHF)"}
+{"name":"HIGH and MID","cmdline":"hwvariant=HIGH hwvariant=MID\n","refused":"head unit: unknown variant is not supported (the kernel command line says hwvariant=HIGH and hwvariant=MID)"}
+{"name":"HIGH and an empty hwvariant=","cmdline":"hwvariant= hwvariant=HIGH\n","refused":"head unit: unknown variant is not supported (the kernel command line says hwvariant= and hwvariant=HIGH)"}
+{"name":"no hwvariant=","cmdline":"console=ttyS0 xhwvariant=HIGH quiet\n","refused":"head unit: unknown variant is not supported (no hwvariant= on the kernel command line)"}
+{"name":"an empty hwvariant=","cmdline":"hwvariant= quiet\n","refused":"head unit: unknown variant is not supported (no hwvariant= on the kernel command line)"}
+{"name":"an empty kernel command line","cmdline":"","refused":"head unit: unknown variant is not supported (no hwvariant= on the kernel command line)"}
+{"name":"the kernel command line unreadable","refused":"head unit: unknown variant is not supported (kernel command line unreadable)"}

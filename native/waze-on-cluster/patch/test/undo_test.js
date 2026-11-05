@@ -13,6 +13,8 @@
  */
 'use strict';
 
+require('./head_unit_env.js');   /* a HIGH head unit for every patcher and patchd this runs */
+
 var fs = require('fs');
 var os = require('os');
 var path = require('path');

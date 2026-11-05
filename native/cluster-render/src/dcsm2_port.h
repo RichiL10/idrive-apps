@@ -18,8 +18,8 @@
  *
  * Seen from the slot manager (slots.h):
  * - a refused fetch or map, or FETCH FAILED, is a refusal: PRIOTOOLOW and
- *   ALREADYMAPPED say the slot is busy, an unknown slot, scene or client is
- *   the configuration, FETCH FAILED is its own, the rest (no valid reply,
+ *   ALREADYMAPPED say the slot is busy, an unknown slot is its own, an
+ *   unknown scene or client is the configuration, FETCH FAILED is its own, the rest (no valid reply,
  *   the fetch removed before it showed) is transient;
  * - a mapped scene the KOMBI maps invisible is parked; parked, then shown,
  *   is shown;

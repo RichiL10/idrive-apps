@@ -43,9 +43,10 @@ Refusal classify(bool ok, uint32_t status)
     case dcsm::E_DCSM_PRIOTOOLOW:
     case dcsm::E_DCSM_CONTENT_ALREADYMAPPED:
         return Refusal::Busy;
+    case dcsm::E_DCSM_SLOTID_UNKNOWN:
+        return Refusal::NoSlot;
     case dcsm::E_DCSM_HANDLE_UNKNOWN:
     case dcsm::E_DCSM_CONTENTID_UNKNOWN:
-    case dcsm::E_DCSM_SLOTID_UNKNOWN:
     case dcsm::E_DCSM_CLIENT_ALREADYREGISTERED:
         return Refusal::Config;
     default:

@@ -1,27 +1,28 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Robert Nisipeanu
 [Unit]
-Description=waze-on-cluster boot recovery: watch carplay and restore the original if the map patch makes it crash
+Description=waze-on-cluster boot recovery: watch carplay and aapd and restore the original if a patch makes it crash
 RequiresMountsFor=/var/opt
-After=local-fs.target waze-on-cluster-boot.service
+After=local-fs.target waze-on-cluster-boot.service waze-on-cluster-aa-boot.service
 
 [Service]
-# Root, like patchd: it remounts / read-write only to run the vetted,
-# reversible carplay_patch.js revert (verified backup, SHA gate), then
-# read-only again. Long-running: it records each carplay crash the moment it
-# sees it, and restores a patch at once when it cannot save that record. It
-# marks a healthy carplay. Where recmgr loaded carplay's entry this boot, it
-# also restores at the threshold, and runs `systemctl start carplay.service`
-# after a crash or a SIGKILL patchd did not send (bounded per boot). It never
-# stops, kills, restarts or reboots anything (PATCH.md "Boot recovery").
+# Root, like patchd: it remounts / read-write only to write a verified
+# original back, then read-only again. Long-running: it records each crash
+# of carplay and of aapd the moment it sees it, each in its own counter,
+# and restores a patch at once when it cannot save that record. It records
+# a service healthy once it has run 60 s. Where recmgr loaded a service's
+# entry this boot, it also restores at the threshold, and runs `systemctl
+# start` of it after a crash or a SIGKILL patchd did not send (bounded per
+# boot). It never stops, kills, restarts or reboots anything (PATCH.md
+# "Boot recovery").
 ExecStart=/usr/bin/node /var/opt/waze-on-cluster/current/recovery.js
 Restart=always
 RestartSec=5
-# On stop, signal only the daemon (not its mount/revert children); it exits
-# once an in-progress restore has finished, which takes at most 91 s
+# On stop, signal only the daemon (not its mount children); it exits once
+# an in-progress restore has finished, which takes at most 36 s
 # (recovery.js RESTORE_BOUND_MS), so / is never left writable.
 KillMode=mixed
-TimeoutStopSec=120
+TimeoutStopSec=60
 StandardOutput=journal
 StandardError=journal
 

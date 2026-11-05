@@ -7,12 +7,14 @@
  *
  *   node tools/build.js [--sdk <donor .tgz|.js>]      (or MGU_SDK_DONOR)
  *
- *  1. Packs the source package robertn_waze_cluster@<version>.src.tgz:
+ *  1. Writes src/locales.js and the RHMI text files from locales/
+ *     (tools/gen_locales.js).
+ *  2. Packs the source package robertn_waze_cluster@<version>.src.tgz:
  *     mgu-app.json, the modules (src/) and the staged tree
  *     (tools/oap_link.js). The catalog publishes it with "build": "unit";
  *     the head unit's deploy tool links it against the unit's own oap-sdk
  *     and takes the package's entry point from the unit's own packages.
- *  2. With a donor (a browserify bundle carrying oap-sdk, e.g. one from the
+ *  3. With a donor (a browserify bundle carrying oap-sdk, e.g. one from the
  *     unit: `mgu-deploy.sh sdk-donor`), also builds the OAP tgz
  *     robertn_waze_cluster@<version>.tgz as the unit would. The repository
  *     carries no oap-sdk.
@@ -37,6 +39,7 @@ function donorArg(argv) {
 
 function main() {
     const donor = donorArg(process.argv.slice(2));
+    require('./gen_locales.js').write();
     const m = link.readManifest(HERE);
     const src = path.join(HERE, `${m.id}@${m.version}.src.tgz`);
     const out = { source: path.basename(src), sourceMembers: link.packSource(HERE, src).length };

@@ -11,19 +11,67 @@
 
 namespace crk {
 
+namespace {
+
+#if defined(__SSE2__)
+/* round_levels() on 16 bytes, bits 1-3. */
+struct Round16 {
+    __m128i half, keep, top;
+    explicit Round16(unsigned bits)
+        : half(_mm_set1_epi8((char)(1u << (bits - 1)))), keep(_mm_set1_epi8((char)~((1u << bits) - 1u))),
+          top(_mm_set1_epi8((char)(256 - (1u << (bits - 1)))))
+    {
+    }
+    __m128i operator()(__m128i v) const
+    {
+        /* A byte of at least 256 - half rounds past 255: it is 255. */
+        const __m128i over = _mm_cmpeq_epi8(_mm_max_epu8(v, top), v);
+        return _mm_or_si128(_mm_and_si128(_mm_add_epi8(v, half), keep), over);
+    }
+};
+#endif
+
+uint8_t round_level(unsigned v, unsigned half, unsigned keep)
+{
+    v = (v + half) & keep;
+    return (uint8_t)(v > 255 ? 255 : v);
+}
+
+}  // namespace
+
 void pack_nv12_atlas(const uint8_t *y, size_t y_pitch, const uint8_t *uv, size_t uv_pitch, uint32_t w, uint32_t h,
-                     uint8_t *out)
+                     uint8_t *out, unsigned bits)
 {
     for (uint32_t r = 0; r < h; r++)
-        std::memcpy(out + (size_t)r * w, y + r * y_pitch, w);
+        round_levels(out + (size_t)r * w, y + r * y_pitch, w, bits);
+    const unsigned half = bits ? 1u << (bits - 1) : 0, keep = ~((1u << bits) - 1u);
     const uint32_t cw = w / 2;
     uint8_t *cu = out + (size_t)h * w;
+#if defined(__SSE2__)
+    const Round16 round(bits ? bits : 1);
+    const __m128i even = _mm_set1_epi16(0x00ff);
+#endif
     for (uint32_t r = 0; r < h / 2; r++) {
         const uint8_t *s = uv + r * uv_pitch;
         uint8_t *du = cu + (size_t)r * w, *dv = du + cw;
-        for (uint32_t x = 0; x < cw; x++) {
-            du[x] = s[2 * x];
-            dv[x] = s[2 * x + 1];
+        uint32_t x = 0;
+#if defined(__SSE2__)
+        for (; x + 16 <= cw; x += 16) {
+            const __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s + 2 * x));
+            const __m128i b = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s + 2 * x + 16));
+            __m128i u = _mm_packus_epi16(_mm_and_si128(a, even), _mm_and_si128(b, even));
+            __m128i v = _mm_packus_epi16(_mm_srli_epi16(a, 8), _mm_srli_epi16(b, 8));
+            if (bits) {
+                u = round(u);
+                v = round(v);
+            }
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(du + x), u);
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(dv + x), v);
+        }
+#endif
+        for (; x < cw; x++) {
+            du[x] = round_level(s[2 * x], half, keep);
+            dv[x] = round_level(s[2 * x + 1], half, keep);
         }
     }
 }
@@ -37,20 +85,13 @@ void round_levels(uint8_t *dst, const uint8_t *src, size_t n, unsigned bits)
     const unsigned half = 1u << (bits - 1), keep = ~((1u << bits) - 1u);
     size_t i = 0;
 #if defined(__SSE2__)
-    /* A byte of at least 256 - half rounds past 255: it is 255. */
-    const __m128i vh = _mm_set1_epi8((char)half), vk = _mm_set1_epi8((char)keep);
-    const __m128i top = _mm_set1_epi8((char)(256 - half));
-    for (; i + 16 <= n; i += 16) {
-        const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i));
-        const __m128i over = _mm_cmpeq_epi8(_mm_max_epu8(v, top), v);
+    const Round16 round(bits);
+    for (; i + 16 <= n; i += 16)
         _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + i),
-                         _mm_or_si128(_mm_and_si128(_mm_add_epi8(v, vh), vk), over));
-    }
+                         round(_mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i))));
 #endif
-    for (; i < n; i++) {
-        const unsigned v = ((unsigned)src[i] + half) & keep;
-        dst[i] = (uint8_t)(v > 255 ? 255 : v);
-    }
+    for (; i < n; i++)
+        dst[i] = round_level(src[i], half, keep);
 }
 
 /* Texel coordinates: luma pixel x's centre is x + 0.5. Chroma sample k sits

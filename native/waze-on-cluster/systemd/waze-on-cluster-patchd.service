@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Robert Nisipeanu
 [Unit]
-Description=waze-on-cluster patchd: applies/reverts the reversible carplay patch on the iDrive app's request
+Description=waze-on-cluster patchd: applies/reverts the reversible carplay and Android Auto patches on the iDrive app's request
 RequiresMountsFor=/var/opt
 After=local-fs.target
 
 [Service]
 # Root, like mgu-updater: the app (unprivileged, in tm_oap_app) asks over the
-# socket; this daemon runs the vetted, reversible carplay_patch.js with / briefly
-# remounted read-write, then activates the change per PATCH.md "Activation"
-# (SIGKILL+start only where recmgr allows it, otherwise at the next head-unit
-# start). It applies no patch on its own.
+# socket; this daemon runs the vetted, reversible carplay_patch.js or
+# aapd_patch.js with / briefly remounted read-write, then activates the
+# change per PATCH.md "Activation" (SIGKILL+start only where recmgr allows
+# it, otherwise at the next head-unit start). It applies no patch on its own.
 ExecStart=/usr/bin/node /var/opt/waze-on-cluster/current/patchd.js
 Restart=always
 RestartSec=5

@@ -42,11 +42,28 @@ void VideoLayer::offer(const uint8_t *atlas, int64_t now_ms)
 {
     if (front_pending_)
         superseded_++;   /* the newest frame replaces the unsent one: it skips ahead, never replays */
+    repeated_ = front_stale_ = false;
     front_.resize(atlas_bytes_);
     crk::round_levels(front_.data(), atlas, atlas_bytes_, p_.level_bits);
     front_pending_ = true;
     front_ms_ = last_frame_ms_ = now_ms;
     have_ = true;
+}
+
+void VideoLayer::repeat(int64_t now_ms)
+{
+    if (!have_)
+        return;
+    if (front_stale_) {
+        front_ = shown_;   /* once after each whole write */
+        front_stale_ = false;
+    }
+    if (front_pending_)
+        superseded_++;
+    else
+        repeated_ = true;
+    front_pending_ = true;
+    front_ms_ = last_frame_ms_ = now_ms;
 }
 
 bool VideoLayer::ready(int64_t now_ms) const
@@ -65,6 +82,7 @@ bool VideoLayer::attach(Graph *g, int64_t now_ms, std::string *err)
         front_.swap(shown_);
         front_ms_ = shown_ms_;
     }
+    repeated_ = front_stale_ = false;
     front_pending_ = front_.size() == atlas_bytes_ && front_ms_ >= 0;
     shown_.assign(atlas_bytes_, 0);
     shown_ms_ = -1;
@@ -201,6 +219,18 @@ Stage VideoLayer::stage(int64_t now_ms)
  * charged as debt. */
 Stage VideoLayer::stage_exact(int64_t now_ms, bool fresh)
 {
+    /* A repeat of the picture last staged: its plan would find what that
+     * picture's found, nothing to write, unless tiles are due to settle. */
+    const int64_t settle_ms = planner_.settle_due_ms();
+    if (fresh && repeated_ && (blocks_shown_ || (opaque_ && !buffer_stale_ && (settle_ms < 0 || now_ms < settle_ms)))) {
+        repeated_ = false;
+        ((blocks_shown_ ? motion_.quiet() : planner_.quiet()) ? quiet_ : same_)++;
+        if (!blocks_shown_)
+            shown_ms_ = front_ms_;
+        front_pending_ = false;
+        return Stage::Idle;
+    }
+    repeated_ = false;
     if (blocks_shown_ && fresh) {
         const UploadPlan m = motion_.plan(block_src_.data(), front_.data(), now_ms);
         if (m.rects.empty()) {
@@ -324,6 +354,7 @@ void VideoLayer::committed(bool ok, int64_t now_ms)
     if (s.kind == Kind::Blocks) {
         block_bank_ = s.next_bank;
         block_src_.assign(front_.begin(), front_.end());
+        motion_.reset();   /* the packed frame is front_: nothing of it is left quiet */
         refine_due_ms_ = now_ms + kRefineMs;
         packed_writes_++;
         front_pending_ = false;   /* buffer_stale_ stays: the atlas still needs a whole write */
@@ -336,6 +367,7 @@ void VideoLayer::committed(bool ok, int64_t now_ms)
      * are left (planner_.quiet()). */
     if (s.whole) {
         shown_.swap(front_);
+        front_stale_ = true;
         planner_.reset();
         whole_writes_++;
     } else {

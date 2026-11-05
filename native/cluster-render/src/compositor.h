@@ -175,7 +175,7 @@ private:
         int64_t fade_ms = 0, applied_ms = 0;
         bool fading_out = false;
         std::vector<uint32_t> last_drawn;
-        bool last_contend = false;
+        bool last_contend = false, last_guide_hold = true;
     };
 
     uint32_t admit(uint64_t owner, int target, size_t pixel_bytes, std::string *err);

@@ -1341,8 +1341,108 @@ static void fades()
                                                         opacity(mg, pvv.atlas_quad) == 1.0f);
 }
 
+/* A repeat is the frame it repeats: one layer given each frame whole and
+ * another given repeats for the frames that are the last one again draw
+ * the same, flush for flush, and count the same, with the budget to spare
+ * (unchanged, within the threshold, settled) and short of it (held,
+ * packed, back to exact). Returns the first layer's counts. */
+static std::string repeats_are_frames(uint64_t budget, const char *name)
+{
+    Rig ra(budget), rb(budget);
+    std::string err;
+    VideoParams vp;
+    VideoLayer *va = static_cast<VideoLayer *>(
+        ra.comp->layer(1, ra.comp->add_video(1, ra.map, params(Klass::Content, R(0, 0, W, H)), vp, ra.now, &err)));
+    VideoLayer *vb = static_cast<VideoLayer *>(
+        rb.comp->layer(1, rb.comp->add_video(1, rb.map, params(Klass::Content, R(0, 0, W, H)), vp, rb.now, &err)));
+    std::vector<uint8_t> last;
+    bool alike = true;
+    auto check = [&]() {
+        FakeGraph *ga = ra.g("map"), *gb = rb.g("map");
+        if (!ga || !gb) {
+            alike = alike && !ga && !gb;
+            return;
+        }
+        const VideoView a = video_view(ga), b = video_view(gb);
+        const bool same = va->stats() == vb->stats() && ga->flushes == gb->flushes && a.atlas && b.atlas &&
+                          a.atlas->px == b.atlas->px &&
+                          ga->shown.quads[a.atlas_quad].visible == gb->shown.quads[b.atlas_quad].visible &&
+                          ga->shown.quads[a.block_quad].visible == gb->shown.quads[b.block_quad].visible &&
+                          ga->shown.quads[a.block_quad].textures == gb->shown.quads[b.block_quad].textures;
+        if (!same && alike)
+            std::printf("     %s\n     %s\n", va->stats().c_str(), vb->stats().c_str());
+        alike = alike && same;
+    };
+    auto offer = [&](const std::vector<uint8_t> &f) {
+        last = f;
+        va->offer(f.data(), ra.now);
+        vb->offer(f.data(), rb.now);
+    };
+    auto run = [&](int64_t ms) {
+        for (int64_t t = 0; t < ms; t += 10) {
+            ra.step(10);
+            rb.step(10);
+            check();
+        }
+    };
+    /* the frame again every 30 ms for ms, the first at once */
+    auto again = [&](int64_t ms) {
+        for (int64_t t = 0; t < ms; t += 30) {
+            va->offer(last.data(), ra.now);
+            vb->repeat(rb.now);
+            run(30);
+        }
+    };
+    const std::vector<uint8_t> a = frame(1);
+    offer(a);
+    run(20);
+    ra.slots.on_shown(0x010004f0, ra.now);
+    rb.slots.on_shown(0x010004f0, rb.now);
+    run(50);
+    again(1000);
+    std::vector<uint8_t> b = a;
+    for (uint32_t y = 128; y < 192; y++)
+        for (uint32_t x = 256; x < 320; x++)
+            b[(size_t)y * W + x] += 40;
+    offer(b);
+    again(300);   /* the first while b waits */
+    std::vector<uint8_t> c = b;
+    for (size_t i = 0; i < (size_t)W * H; i += 3)
+        c[i] = (uint8_t)(c[i] + 4);
+    offer(c);
+    again(1500);
+    offer(frame(30));
+    again(900);
+    run(1500);
+    ok(name, alike);
+    return va->stats();
+}
+
+static bool counted(const std::string &stats, const char *what)
+{
+    unsigned long long n = 0;
+    const size_t at = stats.find(what);
+    if (at == std::string::npos)
+        return false;
+    size_t from = stats.rfind(", ", at);
+    from = from == std::string::npos ? 0 : from + 2;
+    return std::sscanf(stats.c_str() + from, "%llu", &n) == 1 && n > 0;
+}
+
+static void repeats()
+{
+    const std::string spare = repeats_are_frames(0, "repeats, the budget to spare: drawn and counted as the frames");
+    ok("  with frames unchanged, within the threshold and settled",
+       counted(spare, " unchanged") && counted(spare, " within threshold") && counted(spare, " settled") &&
+           counted(spare, " superseded"));
+    const std::string tight = repeats_are_frames(1000 * 1024, "repeats, short of budget: drawn and counted as the frames");
+    ok("  with frames held, packed and back to exact",
+       counted(tight, " budget holds") && counted(tight, " packed") && counted(tight, " back to exact"));
+}
+
 int main()
 {
+    repeats();
     video_basics();
     packed_motion();
     failure_hold();

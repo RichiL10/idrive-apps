@@ -12,13 +12,19 @@
  * frame clock, newest frame only) within the budget all its clients share,
  * and maps the slot from the first frame the visible layer has. The layer
  * is visible while CarPlay's cluster stream is live, not frozen and shows a
- * picture (set_stream, freeze_watch.h): hidden, the renderer keeps taking
- * its frames but lets the slot go, and the stock map comes back. stall_ms, which
- * releases the slot once the frames stop that long, is only a backstop,
- * since how often a static map sends a frame depends on the phone (one about
- * every ten seconds, another about 30 a second). Frames handed
- * over while the renderer is not reachable are dropped; the client
- * reconnects by itself and the next frame shows.
+ * picture (set_stream, freeze_watch.h): hidden, the renderer lets the slot
+ * go and the stock map comes back. stall_ms, which releases the slot once
+ * the frames stop that long, is only a backstop, since how often a static
+ * map sends a frame depends on the phone (one about every ten seconds,
+ * another about 30 a second).
+ *
+ * Only what the renderer needs goes: a frame whose picture is the last one
+ * again goes as a repeat (the client's), and nothing goes while the layer
+ * is hidden or the renderer is not reachable. The newest frame not sent is
+ * held, and goes with the next frame or repeat; when the layer shows again
+ * it goes (or a repeat of the last one sent) before the layer is made
+ * visible, so the renderer never draws an older picture first. A new
+ * layer (another target) starts from a copy of the old one's newest.
  *
  * The app's status line follows the stream, the layer and its target: idle
  * until the first frame or while the stream is not live, idle with kWaiting
@@ -37,6 +43,7 @@
 
 #include "cluster_render/client.h"
 #include "freeze_watch.h"
+#include "map_rect.h"
 
 namespace woc {
 
@@ -44,6 +51,8 @@ struct FeedConfig {
     std::string socket = "/dev/shm/cluster-render/render.sock";
     std::string target = "map";
     cr::VideoOptions video;   /* w and h are the decoded frame's */
+    MapRect rect;             /* where in the target; unset: the map area */
+    bool guide_hold = true;   /* the layer's guide_hold: BMW's turn box hidden while the map shows */
 };
 
 /* The status the Waze app shows (its render socket's "status" event), with
@@ -56,6 +65,8 @@ struct FeedStatus {
     bool stream_reason = false;   /* the reason is the stream's (MapFeed::status) */
     unsigned upload_cap_kb = 0;   /* 0 until the renderer reports it */
     std::string upload_reason;
+    bool guide_hold = true;
+    bool guide_disabled = false;   /* cluster-render's guard keeps the turn box's hold off */
 };
 
 /* Whether a status is worth a log line: its state, reason or target differs
@@ -87,16 +98,20 @@ public:
      * native central-map slot. False for a name the renderer has not got
      * (known once connected). */
     bool set_target(const std::string &name);
+    /* The layer's guide_hold from now on. */
+    void set_guide_hold(bool hold);
 
     int fd() const { return client_.fd(); }
     bool wants_write() const { return client_.wants_write(); }
     void poll(int64_t now_ms);
 
     /* The newest decoded frame (the whole atlas), taken without a copy;
-     * replaces one not yet sent. *atlas comes back as a buffer of the same
-     * size (undefined contents), or untouched while the renderer is not
-     * reachable. */
+     * replaces one not yet sent. *atlas comes back as a buffer to fill next
+     * (its size and contents undefined). */
     void offer(std::vector<uint8_t> *atlas, uint64_t id, int64_t now_ms);
+    /* The newest decoded frame, whose picture is the last one offered
+     * again. */
+    void repeat(uint64_t id, int64_t now_ms);
 
     /* Whether CarPlay's cluster stream is live, whether it is frozen and
      * what it has to show: the layer is visible only while it is live, not
@@ -114,11 +129,21 @@ public:
 private:
     void make_layer();
     void count_second(int64_t now_ms);
+    /* The layer is visible or about to be, on a connection. */
+    bool sending() const;
+    /* The newest picture to the layer: the held frame, else a repeat. */
+    void send_newest();
+    /* Makes the layer visible once the newest frame has gone. */
+    void show_when_sent();
 
     FeedConfig cfg_;
     cr::Client client_;
     uint32_t layer_ = 0;
     cr::LayerOptions lo_;   /* the layer's options as last sent */
+    bool show_due_ = false;   /* visible once the frame waiting has gone */
+    std::vector<uint8_t> held_;   /* the newest frame, while held_new_ */
+    bool held_new_ = false;       /* held_ is newer than anything the client has */
+    uint64_t id_ = 0;             /* the newest frame's */
     bool live_ = false, frozen_ = false;
     Picture picture_ = Picture::None;
     const char *stream_line_ = nullptr;   /* the stream's state as last logged */

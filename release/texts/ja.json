@@ -1,0 +1,14 @@
+{
+  "cluster-render": {
+    "title": "メーターレンダラー",
+    "description": "すべてのアプリのレイヤーをメーターとHUDに描画し、表示スロットと共通のアップロード枠を共有します"
+  },
+  "waze-on-cluster": {
+    "title": "Waze メーター表示",
+    "description": "CarPlayまたはAndroid Autoの地図をメーターに表示します。rootヘルパーが元に戻せるcarplayとaapdのパッチをそれぞれ対応する環境で適用し、起動時から動作するキャプチャが地図のH.264をデコードして、ストリームが流れている間はメーターレンダラーで描画します"
+  },
+  "robertn_waze_cluster": {
+    "title": "Waze メーター表示",
+    "description": "CarPlayのWazeマップをメーターに表示します。HMIからパッチを有効にすると、地図がCarPlayに連動します"
+  }
+}

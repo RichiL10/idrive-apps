@@ -17,7 +17,31 @@ extern "C" {
 
 typedef struct _mfxSession *mfxSession;
 
+enum {
+    MFX_GPUCOPY_DEFAULT = 0,
+    MFX_GPUCOPY_ON      = 1,
+    MFX_GPUCOPY_OFF     = 2
+};
+
+/* API 1.14. The unit's MFXInitEx copies 80 bytes of it and reads GPUCopy at
+ * offset 32, as this layout has them on x86-64. */
+typedef struct {
+    mfxIMPL     Implementation;
+    mfxVersion  Version;
+    mfxU16      ExternalThreads;
+    union {
+        struct {
+            mfxExtBuffer **ExtParam;
+            mfxU16  NumExtParam;
+        };
+        mfxU16  reserved2[5];
+    };
+    mfxU16      GPUCopy;
+    mfxU16      reserved[21];
+} mfxInitParam;
+
 mfxStatus MFXInit(mfxIMPL impl, mfxVersion *ver, mfxSession *session);
+mfxStatus MFXInitEx(mfxInitParam par, mfxSession *session);
 mfxStatus MFXClose(mfxSession session);
 mfxStatus MFXQueryIMPL(mfxSession session, mfxIMPL *impl);
 mfxStatus MFXQueryVersion(mfxSession session, mfxVersion *version);

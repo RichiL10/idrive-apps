@@ -30,7 +30,7 @@ const REPO = path.resolve(__dirname, '..');
 const OUT = path.join(__dirname, 'out');
 const PACKER = path.join('release', 'tool_artifact.js');
 const publishTarget = require('./publish');
-const { compareVersions, SEMVER } = require('./catalog.js');
+const { compareVersions, textsOf, SEMVER } = require('./catalog.js');
 
 function readJson(file) {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -187,6 +187,35 @@ function components(root = REPO) {
         const dir = `native/${id}`;
         tool(dir, id, [dir, `:(exclude,glob)${dir}/*.md`, `:(exclude)${dir}/test`]);
     });
+    const texts = catalogTexts(out.map((c) => c.id), root);
+    out.forEach((c) => {
+        if (texts[c.id]) {
+            c.texts = texts[c.id];
+        }
+    });
+    return out;
+}
+
+/* The components' titles and descriptions in other languages, from
+ * release/texts/<code>.json ({ "<id>": { "title", "description" } }): by id,
+ * the catalog entry's "texts" (the Store shows them in the head unit's
+ * language). */
+function catalogTexts(ids, root) {
+    const dir = path.join(root, 'release', 'texts');
+    const out = {};
+    (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((n) => /\.json$/.test(n)).sort().forEach((n) => {
+        const code = n.slice(0, -5);
+        const file = readJson(path.join(dir, n));
+        Object.keys(file).forEach((id) => {
+            const one = textsOf({ [code]: file[id] });
+            const given = file[id] && typeof file[id] === 'object' ? file[id] : {};
+            const same = one && Object.keys(given).every((k) => one[code][k] === given[k]);
+            if (ids.indexOf(id) < 0 || !same) {
+                throw new Error(`release/texts/${n}: "${id}" is not a component's { "title", "description" }`);
+            }
+            out[id] = Object.assign(out[id] || {}, one);
+        });
+    });
     return out;
 }
 
@@ -294,6 +323,24 @@ function buildIn(c, exportDir, env) {
     return artifact;
 }
 
+/* Sets each published entry's "texts" to its component's (none: removed);
+ * returns the entries that changed. */
+function retext(entries, all) {
+    return entries.filter((e) => {
+        const c = all.find((x) => x.id === e.id);
+        const want = (c && c.texts) || null;
+        if (JSON.stringify(want) === JSON.stringify(e.texts || null)) {
+            return false;
+        }
+        if (want) {
+            e.texts = want;
+        } else {
+            delete e.texts;
+        }
+        return true;
+    });
+}
+
 /* A catalog entry (schema 2): the artifact is always <id>@<version>.tgz;
  * "build": "unit" marks a source package. */
 function catalogEntry(c, file) {
@@ -316,6 +363,9 @@ function catalogEntry(c, file) {
     }
     if (c.uninstallable) {
         entry.uninstallable = true;
+    }
+    if (c.texts) {
+        entry.texts = c.texts;
     }
     return entry;
 }
@@ -533,6 +583,7 @@ function cmdPublish(ids, dryRun) {
     const skipped = [];
     const built = build(ids, staging, skipped);
     const uploads = [];
+    const all = components();
     built.forEach((e) => {
         const p = current.get(e.id);
         if (p && p.version === e.version && p.artifact.sha256 !== e.artifact.sha256) {
@@ -556,12 +607,15 @@ function cmdPublish(ids, dryRun) {
         e.artifact.url = url;
         return true;
     });
-    if (!uploads.length && !removed.length && !relisted.length) {
+    // the entries carried over list their titles and descriptions in other languages as release/texts has them
+    const retexted = retext([...current.values()].filter((e) => !uploads.some((x) => x.id === e.id)), all);
+    if (!uploads.length && !removed.length && !relisted.length && !retexted.length) {
         console.log('nothing new to publish');
         return;
     }
     removed.forEach((id) => console.log(`${dryRun ? 'would remove' : 'removing'} ${id}: not in the repository`));
     relisted.forEach((e) => console.log(`${dryRun ? 'would list' : 'listing'} ${e.id}@${e.version} at ${e.artifact.url}`));
+    retexted.forEach((e) => console.log(`${dryRun ? 'would list' : 'listing'} ${e.id}@${e.version} with its texts`));
     uploads.forEach((e) => console.log(`${dryRun ? 'would publish' : 'publishing'} ${e.id}@${e.version}`));
     if (dryRun) {
         return;
@@ -602,4 +656,4 @@ if (require.main === module) {
     }
 }
 
-module.exports = { components, compareVersions, catalogEntry, exportHead };
+module.exports = { components, catalogTexts, retext, compareVersions, catalogEntry, exportHead };

@@ -490,6 +490,60 @@ static void test_reset(const Stream &s)
     CHECK(datas(got) == expected(s));
 }
 
+/* The size caps: a NAL unit with no next start code within kMaxAuBytes (a
+ * FIFO carrying bytes that are not Annex-B) is dropped and the reader
+ * resynchronises at the next start code; an access unit of parameter sets
+ * or SEI that never gets a slice is dropped before it passes the cap. */
+static void test_size_caps(const Stream &s)
+{
+    const size_t cap = NalReader::kMaxAuBytes;
+    {
+        NalReader r;
+        std::vector<Got> got;
+        auto sink = collect(got);
+        Bytes chunk(64 * 1024, 0x5a);
+        const Bytes start = {0, 0, 0, 1};
+        r.push(start.data(), start.size(), false, sink);
+        for (size_t sent = 0; sent < cap + 2 * chunk.size(); sent += chunk.size())
+            r.push(chunk.data(), chunk.size(), false, sink);
+        CHECK(r.overflows() == 1);
+        CHECK(got.empty());
+        r.push(s.bytes.data(), s.bytes.size(), false, sink);
+        r.flush(sink);
+        CHECK(datas(got) == expected(s));
+        CHECK(r.overflows() == 1);
+    }
+    {
+        NalReader r;
+        std::vector<Got> got;
+        auto sink = collect(got);
+        Bytes sei = {0, 0, 0, 1, 0x06};
+        sei.resize(1u << 20, 0x5a);
+        for (int i = 0; i < 9; i++)
+            r.push(sei.data(), sei.size(), false, sink);
+        r.push(s.bytes.data(), s.bytes.size(), false, sink);
+        r.flush(sink);
+        const std::vector<Bytes> want = expected(s);
+        CHECK(r.overflows() == 1);
+        CHECK(got.size() == want.size());
+        if (got.size() == want.size() && want.size() == 3) {
+            CHECK(got[0].sps && got[0].idr);
+            CHECK(got[0].data.size() < cap && got[0].data.size() > want[0].size());
+            CHECK(std::equal(want[0].begin(), want[0].end(), got[0].data.end() - want[0].size()));
+            CHECK(got[1].data == want[1] && got[2].data == want[2]);
+        }
+    }
+    {
+        /* A stream under the cap is untouched. */
+        NalReader r;
+        std::vector<Got> got;
+        auto sink = collect(got);
+        r.push(s.bytes.data(), s.bytes.size(), false, sink);
+        r.flush(sink);
+        CHECK(r.overflows() == 0 && datas(got) == expected(s));
+    }
+}
+
 int main()
 {
     Stream x264 = stream(x264_stream, sizeof x264_stream, x264_stream_nals,
@@ -525,6 +579,7 @@ int main()
     test_header_only_slice();
     test_empty();
     test_reset(x264);
+    test_size_caps(x264);
 
     std::vector<Got> got = feed_chunks(vt.bytes, {vt.bytes.size()});
     CHECK(got.size() == 3 && got[0].sps && got[0].idr && !got[1].sps && !got[2].idr);

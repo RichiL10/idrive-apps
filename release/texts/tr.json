@@ -1,0 +1,14 @@
+{
+  "cluster-render": {
+    "title": "Gösterge oluşturucu",
+    "description": "Tüm uygulamaların katmanlarını gösterge panelinde ve HUD'da çizer; ekran yuvalarını ve tek bir aktarım bütçesini paylaşır"
+  },
+  "waze-on-cluster": {
+    "title": "Waze göstergede",
+    "description": "CarPlay veya Android Auto haritasını gösterge panelinde gösterir: bir root yardımcısı geri alınabilir carplay ve aapd yamalarını desteklendikleri yerde uygular; açılıştan itibaren çalışan kayıt, haritanın H.264 akışını çözer ve akış geldikçe gösterge oluşturucu üzerinden çizer"
+  },
+  "robertn_waze_cluster": {
+    "title": "Waze göstergede",
+    "description": "CarPlay Waze haritasını gösterge paneline getirir: yamayı aracın ekranından etkinleştirin, harita CarPlay'i izler"
+  }
+}

@@ -5,44 +5,87 @@
  * waze-on-cluster tool, which puts the CarPlay cluster map on the instrument
  * cluster. It drives the tool entirely from the HMI, so no shell is needed.
  *
- * One LT_State_Wide page: a status line combining the patch state and the
- * render state; the cluster setting the map needs; Enable map and Disable
- * map, which apply and revert the carplay patch; the diagnostic capture
- * button and its status; and a scrolling list of both tools' log lines,
- * newest first, one per LT_Label_1Row, redrawn at most every
- * LIST_RENDER_MS. Once patched, the render puts the map on the cluster
- * whenever CarPlay streams it, with no button.
+ * The main page, one LT_State_Wide list in three sections, each under a
+ * header row. CarPlay and Android Auto have the same rows: Status, Patch,
+ * Remove patch; Android Auto adds Zoom with Zoom out and Zoom in, and the
+ * Hide phone's turn card checkbox. General: Cluster map (the shared render's
+ * map), the Hide BMW's turn box checkbox (the render's setting; a press asks
+ * the render to flip it), Logs, Restart head unit and the Restart row. Info
+ * rows read "Name: Value"; every on/off setting is a Hide checkbox. Every row
+ * stays on the page; one that cannot act now is greyed, and while patchd
+ * runs any operation every operation is. The restart's two rows, the last
+ * ones, are the only rows shown and hidden, so no other row moves: the
+ * button while a written change waits for the next head-unit start, its row
+ * while it has something to say. Once patched, the render puts the map on
+ * the cluster whenever the phone streams it, with no button.
  *
- * Enable map shows for an unpatched or unknown state and Disable map for a
- * patch, both only with no change pending (waze_cluster_control.js
+ * The Logs page (logs_control.js): Start capture and the Capture row, Save
+ * logs and the Saved logs row, the QR code of the address a phone on the
+ * car's hotspot downloads the saved archives from, that address, and the
+ * archives. The app holds the logs socket while the page is visible; the QR
+ * code is a PNG in QR_DIR (RAM), replaced when the address changes.
+ *
+ * CarPlay's Patch button is enabled for an unpatched or unknown state and Remove
+ * patch for a patch, both only with no change pending (waze_cluster_control.js
  * canEnable/canDisable); capture is enabled while the patch daemon is
- * reachable. The app connects both sockets while its page is visible and
- * closes them when it is hidden or the app shuts down; the tools keep
- * running. waze_cluster_control.js holds the protocol.
+ * reachable. The app connects both sockets while one of its pages is visible
+ * and closes them when it is hidden or the app shuts down; the tools keep
+ * running. Moving between its pages hides one before the other shows, so a
+ * hide counts only after HIDE_SETTLE_MS. waze_cluster_control.js holds the
+ * protocol.
+ *
+ * Every word on both pages is in the HMI's display language (src/i18n.js),
+ * read from HMIContext at start and on each change, which writes every row
+ * again; English until then, and without it. The tile's name and the Logs
+ * page's title are string ids the HMI shows itself (the RHMI text files).
  */
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const OnlineApp = require('oap-sdk/src/core/OnlineApp.js');
 const logging = require('oap-sdk/src/logging/logging');
-const { WazeClusterControl, MAX_LINES } = require('./waze_cluster_control.js');
+const someipBuilders = require('oap-sdk/src/someip/someipBuilders');
+const i18n = require('./i18n.js');
+const { WazeClusterControl, ZOOM_STEP } = require('./waze_cluster_control.js');
+const { LogsControl, ROWS: LOGS_ROWS } = require('./logs_control.js');
+const { qrPng } = require('./qr.js');
 
 const logger = logging.getSDKLogger();
 
 const STATE_NAME = 'ST_OnlineApps_WazeCluster';
 const STATUS_NAME = 'wocStatus';
-const SETUP_NAME = 'wocSetup';
+const MAP_NAME = 'wocMap';
 const ENABLE_NAME = 'wocEnable';
 const DISABLE_NAME = 'wocDisable';
 const RESTART_NAME = 'wocRestart';
+const RESTART_STATUS_NAME = 'wocRestartStatus';
+const AA_STATUS_NAME = 'wocAaStatus';
+const AA_ENABLE_NAME = 'wocAaEnable';
+const AA_DISABLE_NAME = 'wocAaDisable';
+const AA_ZOOM_NAME = 'wocAaZoom';
+const AA_ZOOM_OUT_NAME = 'wocAaZoomOut';
+const AA_ZOOM_IN_NAME = 'wocAaZoomIn';
+const AA_CARD_NAME = 'wocAaCard';
+const GUIDE_NAME = 'wocGuide';
+const HEAD_GENERAL_NAME = 'wocHeadGeneral';
 const CAPTURE_NAME = 'wocCapture';
 const CAPTURE_STATUS = 'wocCaptureStatus';
-const ROW_NAMES = Array.from({ length: MAX_LINES }, (_, i) => `wocRow${String(i + 1).padStart(2, '0')}`);
-const LIST_RENDER_MS = 500;
+const LOGS_NAME = 'wocLogs';
+const LOGS_STATE = 'ST_OnlineApps_WazeClusterLogs';
+const LOGS_SAVE = 'wocLogsSave';
+const LOGS_STATUS = 'wocLogsStatus';
+const LOGS_QR = 'wocLogsQr';
+const LOGS_URL = 'wocLogsUrl';
+const LOGS_ROW_NAMES = Array.from({ length: LOGS_ROWS }, (_, i) => `wocLogsRow${i + 1}`);
 const ROW_CHARS = 90;
 const PRESS_DEDUPE_MS = 400;
-/* in Map view the stock map is the fallback while CarPlay's cluster stream
- * is not live; the menu names are the HMI's en_GB ones */
-const SETUP_TEXT = 'Set Instrument cluster > Central display area to Map view';
+const HIDE_SETTLE_MS = 800;
+const HMI_CONTEXT = ['de.bmw.infotainment.hmi.hmicontext.HMIContext', 'HMI_CID'];
+const { t } = i18n;
+const QR_DIR = path.join(fs.existsSync('/dev/shm') ? '/dev/shm' : os.tmpdir(),
+    `robertn_waze_cluster_qr_${typeof process.getuid === 'function' ? process.getuid() : 'x'}`);
 
 /* A line as one row: no line breaks, at most ROW_CHARS characters. */
 function oneRow(line) {
@@ -64,15 +107,16 @@ class WazeClusterApp extends OnlineApp {
         this._lastPress = {};
         this._written = {};
         this._visible = false;
+        this._pages = { main: false, logs: false };
+        this._shownPage = 'main';   /* the page last shown, which shows again when the app does */
+        this._hideTimer = null;
+        this._qr = { url: undefined, file: null, chain: Promise.resolve() };
         this._sawForeground = false;
         this._shutdownPromise = null;
-        this._listTimer = null;
         this._control = new WazeClusterControl({ log: logger });
-        this._control.on('change', () => {
-            this._render();
-            this._scheduleLists();
-        });
-        this._control.on('log', () => this._scheduleLists());
+        this._control.on('change', () => this._render());
+        this._logs = new LogsControl({ log: logger });
+        this._logs.on('change', () => this._renderLogs());
 
         this.on('initialized', () => {
             this._appInitialized()
@@ -96,6 +140,7 @@ class WazeClusterApp extends OnlineApp {
         }
         const foregroundStart = this._startedForeground();
         return this._setupRhmi()
+            .then(() => this._setupLanguage())
             .then(() => this._registerEntryPoints())
             .then(() => {
                 // A foreground start declares itself ACTIVE before initialized()
@@ -128,11 +173,13 @@ class WazeClusterApp extends OnlineApp {
     _setupRhmi() {
         const rhmi = this.rhmiApplication;
         this._state = rhmi.getByName(STATE_NAME);
-        if (!this._state) {
-            return Promise.reject(new Error(`uiDescription has no ${STATE_NAME}`));
+        this._logsState = rhmi.getByName(LOGS_STATE);
+        if (!this._state || !this._logsState) {
+            return Promise.reject(new Error(`uiDescription has no ${STATE_NAME} or ${LOGS_STATE}`));
         }
-        const names = [STATUS_NAME, SETUP_NAME, ENABLE_NAME, DISABLE_NAME, RESTART_NAME, CAPTURE_NAME, CAPTURE_STATUS]
-            .concat(ROW_NAMES);
+        const names = [STATUS_NAME, MAP_NAME, RESTART_STATUS_NAME, ENABLE_NAME, DISABLE_NAME, AA_STATUS_NAME, AA_ENABLE_NAME, AA_DISABLE_NAME, AA_ZOOM_NAME,
+            AA_ZOOM_OUT_NAME, AA_ZOOM_IN_NAME, AA_CARD_NAME, RESTART_NAME, GUIDE_NAME, HEAD_GENERAL_NAME, CAPTURE_NAME, CAPTURE_STATUS,
+            LOGS_NAME, LOGS_SAVE, LOGS_STATUS, LOGS_QR, LOGS_URL].concat(LOGS_ROW_NAMES);
         names.forEach((name) => { this._components[name] = rhmi.getByName(name); });
         const missing = names.filter((name) => !this._components[name]);
         if (missing.length) {
@@ -140,8 +187,26 @@ class WazeClusterApp extends OnlineApp {
         }
         this._bind(ENABLE_NAME, () => this._control.enableMap());
         this._bind(DISABLE_NAME, () => this._control.disableMap());
+        this._bind(AA_ENABLE_NAME, () => this._control.enableAa());
+        this._bind(AA_DISABLE_NAME, () => this._control.disableAa());
+        this._bind(AA_ZOOM_OUT_NAME, () => this._control.zoom(-ZOOM_STEP));
+        this._bind(AA_ZOOM_IN_NAME, () => this._control.zoom(ZOOM_STEP));
+        this._bind(AA_CARD_NAME, () => {
+            /* as for the turn box: patchd's answer decides the tick */
+            delete this._written[`selected:${AA_CARD_NAME}`];
+            this._control.toggleCard();
+        });
         this._bind(RESTART_NAME, () => this._control.requestRestart());
+        this._bind(GUIDE_NAME, () => {
+            /* the HMI ticks or unticks the box itself; the render's answer
+             * decides what it shows */
+            delete this._written[`selected:${GUIDE_NAME}`];
+            this._control.toggleGuidance();
+        });
         this._bind(CAPTURE_NAME, () => this._control.capture());
+        this._bind(LOGS_NAME, () => Promise.resolve(rhmi.openState(LOGS_STATE))
+            .catch((err) => logger.warn(`openState ${LOGS_STATE} failed: ${err && err.message}`)));
+        this._bind(LOGS_SAVE, () => this._logs.save());
         // Presses also arrive as the application's raw 'userEvent'; both paths
         // land in _press, which keeps a press delivered twice to one.
         rhmi.on('userEvent', (ev) => {
@@ -167,21 +232,43 @@ class WazeClusterApp extends OnlineApp {
         rhmi.on('restoreHmi', () => {
             logger.info('RESTORE_HMI: re-pushing page content');
             this._written = {};
+            this._qr.url = undefined;
             this._render();
-            this._renderLists();
+            this._renderLogs();
         });
-        this._state.on('visible', (event) => {
-            const visible = isTrue(event && event.visible);
-            if (visible) {
-                this._sawForeground = true;
-            }
-            this._setVisible(visible);
-        });
-        return Promise.resolve(this._state.updateResources()).then(() => {
+        this._state.on('visible', (event) => this._pageVisible('main', isTrue(event && event.visible)));
+        this._logsState.on('visible', (event) => this._pageVisible('logs', isTrue(event && event.visible)));
+        this._removeStaleQr();
+        return Promise.all([this._state.updateResources(), this._logsState.updateResources()]).then(() => {
             logger.info(`page ready: ${names.length} components found`);
             this._render();
-            this._renderLists();
+            this._renderLogs();
         });
+    }
+
+    /* The words follow the HMI's display language: read at start and on
+     * each change; English until then, and without it. Never holds up the
+     * start. */
+    _setupLanguage() {
+        logger.info(`languages: en ${i18n.codes().join(' ')}`);
+        const [iface, instance] = HMI_CONTEXT;
+        let proxy;
+        Promise.resolve()
+            .then(() => someipBuilders.buildTypedProxy(iface, instance))
+            .then((p) => { proxy = p; return proxy.init(); })
+            .then(() => proxy.waitUntilAvailable())
+            .then(() => proxy.currentDisplayLanguage.subscribe((v) => this._displayLanguage(v)))
+            .then(() => proxy.currentDisplayLanguage.getValue())
+            .then((v) => this._displayLanguage(v))
+            .catch((err) => logger.warn(`display language unavailable from ${iface}: ${err && err.message}`));
+    }
+
+    _displayLanguage(value) {
+        if (i18n.setHmiLanguage(value)) {
+            logger.info(`display language ${value}: ${i18n.language()}`);
+            this._render();
+            this._renderLogs();
+        }
     }
 
     _bind(name, handler) {
@@ -239,13 +326,52 @@ class WazeClusterApp extends OnlineApp {
             return Promise.resolve();
         }
         this._sawForeground = true;
+        /* the tile opens the main page, whichever page the app was left on;
+         * its stack change may have come first and opened the Logs page's socket */
+        this._shownPage = 'main';
+        this._pages.logs = false;
+        this._logs.close();
         this._setVisible(true);
         return Promise.resolve(this.rhmiApplication.openEntryState(uuid))
             .catch((err) => logger.warn(`openEntryState failed: ${err && err.message}`));
     }
 
     /* ---- visibility ---- */
+    /* One page shown or hidden. The logs socket follows the Logs page; the
+     * app counts as hidden once neither page has shown for HIDE_SETTLE_MS. */
+    _pageVisible(page, visible) {
+        if (this._shutdownPromise) {
+            return;
+        }
+        this._pages[page] = visible;
+        if (visible) {
+            this._shownPage = page;
+        }
+        if (page === 'logs') {
+            if (visible) {
+                this._logs.open();
+            } else {
+                this._logs.close();
+            }
+        }
+        clearTimeout(this._hideTimer);
+        this._hideTimer = null;
+        if (visible) {
+            this._sawForeground = true;
+            this._setVisible(true);
+        } else if (!this._pages.main && !this._pages.logs) {
+            this._hideTimer = setTimeout(() => {
+                this._hideTimer = null;
+                this._setVisible(false);
+            }, HIDE_SETTLE_MS);
+        }
+    }
+
     _setVisible(visible) {
+        if (!visible) {
+            this._pages = { main: false, logs: false };
+            this._logs.close();
+        }
         if (this._shutdownPromise || this._visible === visible) {
             return;
         }
@@ -254,6 +380,12 @@ class WazeClusterApp extends OnlineApp {
         this._reportVisibilityStatus(visible);
         if (visible) {
             this._control.open();
+            /* back from an overlay or another app on the Logs page, which
+             * says nothing of its own */
+            if (this._shownPage === 'logs') {
+                this._pages.logs = true;
+                this._logs.open();
+            }
         } else {
             this._control.close();
         }
@@ -300,49 +432,118 @@ class WazeClusterApp extends OnlineApp {
         }
     }
 
+    /* Ticks or unticks a checkbox unless it already holds that state. */
+    _setSelected(name, selected) {
+        const key = `selected:${name}`;
+        if (this._written[key] !== selected) {
+            this._written[key] = selected;
+            Promise.resolve(this._components[name].setValue(0, 'eParam_RowSelected', selected, 'Bool'))
+                .catch((err) => logger.warn(`${name} select failed: ${err && err.message}`));
+        }
+    }
+
     _render() {
         if (!this._state || this._shutdownPromise) {
             return;
         }
-        this._write(STATUS_NAME, this._control.statusText());
-        this._write(SETUP_NAME, SETUP_TEXT);
-        this._write(CAPTURE_NAME, this._control.captureButtonText());
-        this._write(CAPTURE_STATUS, this._control.captureText());
-        const patch = this._control.connectedPatch();
-        /* While a reboot is underway no patch operation should start. */
-        const restarting = this._control.restartRequested();
-        const enable = this._control.canEnable();
-        const disable = this._control.canDisable();
-        this._setVisibleComp(ENABLE_NAME, enable);
-        this._setEnabled(ENABLE_NAME, enable);
-        this._setVisibleComp(DISABLE_NAME, disable);
-        this._setEnabled(DISABLE_NAME, disable);
-        this._setEnabled(CAPTURE_NAME, patch && !restarting && this._control.captureState.state !== 'closing');
-        /* The restart button appears only while a patch is written and waiting
-         * for a head-unit start; it is disabled once pressed so one press does
-         * one reboot. On units where carplay restarts at once it never shows. */
-        const needsRestart = this._control.restartNeeded();
-        this._setVisibleComp(RESTART_NAME, needsRestart);
-        this._setEnabled(RESTART_NAME, needsRestart && patch && !restarting);
+        const c = this._control;
+        [[ENABLE_NAME, c.enableButtonText()], [DISABLE_NAME, t('Remove patch')], [AA_ENABLE_NAME, t('Patch')], [AA_DISABLE_NAME, t('Remove patch')],
+            [AA_ZOOM_OUT_NAME, t('Zoom out')], [AA_ZOOM_IN_NAME, t('Zoom in')], [HEAD_GENERAL_NAME, t('General')], [LOGS_NAME, t('Logs')],
+            [RESTART_NAME, t('Restart head unit')]].forEach(([name, text]) => this._write(name, text));
+        this._write(STATUS_NAME, c.statusText());
+        this._write(MAP_NAME, c.mapText());
+        this._write(AA_STATUS_NAME, c.aaStatusText());
+        this._write(AA_ZOOM_NAME, c.zoomText());
+        this._write(AA_CARD_NAME, c.cardText());
+        this._setSelected(AA_CARD_NAME, c.cardHidden());
+        this._write(CAPTURE_NAME, c.captureButtonText());
+        this._write(CAPTURE_STATUS, c.captureText());
+        [[ENABLE_NAME, c.canEnable()], [DISABLE_NAME, c.canDisable()],
+            [AA_ENABLE_NAME, c.canEnableAa()], [AA_DISABLE_NAME, c.canDisableAa()],
+            [AA_ZOOM_OUT_NAME, c.canZoom(-ZOOM_STEP)], [AA_ZOOM_IN_NAME, c.canZoom(ZOOM_STEP)],
+            [AA_CARD_NAME, c.canToggleCard()], [CAPTURE_NAME, c.canCapture()], [RESTART_NAME, c.canRestart()]]
+            .forEach(([name, enabled]) => this._setEnabled(name, enabled));
+        const restartText = c.restartText();
+        this._setVisibleComp(RESTART_NAME, c.restartNeeded() || c.restartRequested());
+        this._write(RESTART_STATUS_NAME, restartText);
+        this._setVisibleComp(RESTART_STATUS_NAME, restartText !== '');
+        const hide = c.hideGuidance();
+        const unavailable = c.guidanceUnavailable();
+        this._setEnabled(GUIDE_NAME, hide !== null && !unavailable);
+        this._write(GUIDE_NAME, t("Hide BMW's turn box"));
+        this._setSelected(GUIDE_NAME, !!hide && !unavailable);
     }
 
-    _scheduleLists() {
-        if (!this._listTimer) {
-            this._listTimer = setTimeout(() => {
-                this._listTimer = null;
-                this._renderLists();
-            }, LIST_RENDER_MS);
-        }
-    }
-
-    _renderLists() {
-        if (!this._state || this._shutdownPromise) {
+    _renderLogs() {
+        if (!this._logsState || this._shutdownPromise) {
             return;
         }
-        /* Rows are only written, never hidden: on this HMI a row hidden at
-         * run time leaves the page without its other rows (mgu-emulator). */
-        const rows = this._control.rows();
-        ROW_NAMES.forEach((name, i) => this._write(name, oneRow(rows[i] || '')));
+        this._write(LOGS_SAVE, t('Save logs'));
+        this._write(LOGS_STATUS, this._logs.statusText());
+        this._write(LOGS_URL, this._logs.urlText());
+        this._setEnabled(LOGS_SAVE, this._logs.canSave());
+        const rows = this._logs.rows();
+        LOGS_ROW_NAMES.forEach((name, i) => this._write(name, oneRow(rows[i])));
+        this._showQr(this._logs.url());
+    }
+
+    /* Writes url's QR code (none: a blank square) as a new file and shows it,
+     * then removes the one it replaced. */
+    _showQr(url) {
+        const rhmi = this.rhmiApplication;
+        if (this._qr.url === url || !rhmi) {
+            return this._qr.chain;
+        }
+        this._qr.url = url;
+        this._qr.chain = this._qr.chain.then(() => {
+            /* the HMI reads the picture: the folder and the file world-readable */
+            try {
+                fs.mkdirSync(QR_DIR);
+            } catch (e) {
+                if (e.code !== 'EEXIST') {
+                    throw e;
+                }
+            }
+            fs.chmodSync(QR_DIR, 0o755);
+            const file = path.join(QR_DIR, `qr_${Date.now()}.png`);
+            fs.writeFileSync(file, qrPng(url).png);
+            fs.chmodSync(file, 0o644);
+            const bundle = rhmi.getResourceBundle();
+            const old = this._qr.file;
+            return Promise.resolve(bundle.createResourceHandles([file]))
+                .then(() => this._components[LOGS_QR].setValue(0, 'Graphic', file, 'ResourceId'))
+                .then(() => rhmi.flush())
+                .then(() => {
+                    this._qr.file = file;
+                    return old ? this._retireQr(bundle, old) : undefined;
+                });
+        }).catch((err) => {
+            this._qr.url = undefined;
+            logger.warn(`QR code failed: ${err && err.message}`);
+        });
+        return this._qr.chain;
+    }
+
+    _retireQr(bundle, file) {
+        return Promise.resolve()
+            .then(() => bundle.destroyResourceHandles([file]))
+            .catch((err) => logger.warn(`QR handle ${file}: ${err && err.message}`))
+            .then(() => {
+                try {
+                    fs.unlinkSync(file);
+                } catch (e) {
+                    /* gone already */
+                }
+            });
+    }
+
+    _removeStaleQr() {
+        try {
+            fs.readdirSync(QR_DIR).filter((n) => /^qr_\d+\.png$/.test(n))
+                .forEach((n) => fs.unlinkSync(path.join(QR_DIR, n)));
+        } catch (e) {
+            /* no folder yet */
+        }
     }
 
     /* ---- shutdown ---- */
@@ -351,8 +552,16 @@ class WazeClusterApp extends OnlineApp {
             return this._shutdownPromise;
         }
         logger.info(`robertn_waze_cluster shutdown: ${JSON.stringify(reason)}`);
-        clearTimeout(this._listTimer);
+        clearTimeout(this._hideTimer);
         this._control.close();
+        this._logs.close();
+        if (this._qr.file) {
+            try {
+                fs.unlinkSync(this._qr.file);
+            } catch (e) {
+                /* gone already */
+            }
+        }
         this._shutdownPromise = Promise.resolve()
             .then(() => this.destroyBundles().catch((err) =>
                 logger.info(`destroyBundles: ${err && err.message}`)))

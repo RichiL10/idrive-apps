@@ -222,7 +222,8 @@ bool layer_params(const cr::Json &j, LayerParams *p, std::string *err)
     n.pivot_x = n.pivot_x || j.count("px");
     n.pivot_y = n.pivot_y || j.count("py");
     struct Flag { const char *key; bool *field; } flags[] = {
-        {"visible", &n.visible}, {"exclusive", &n.exclusive}, {"prewarm", &n.prewarm}, {"contend", &n.contend}};
+        {"visible", &n.visible}, {"exclusive", &n.exclusive}, {"prewarm", &n.prewarm}, {"contend", &n.contend},
+        {"guide_hold", &n.guide_hold}};
     for (const Flag &f : flags) {
         v = *f.field ? 1 : 0;
         if (!num(j, f.key, 0, 1, &v, err)) return false;
@@ -472,7 +473,7 @@ void Server::op_layer(Client &c, const cr::Json &j, int64_t now_ms)
         return;
     }
     const int target = slots_->index(str(j, "target"));
-    if (target < 0) {
+    if (target < 0 || !slots_->targets()[target].follows.empty()) {
         error(c, "layer", ref, "unknown target " + str(j, "target"));
         return;
     }
@@ -573,12 +574,14 @@ void Server::on_json(Client &c, const std::string &body, int64_t now_ms)
         c.app = str(j, "app", "?").substr(0, 64);
         std::string targets;
         for (const TargetSpec &t : slots_->targets())
-            targets += (targets.empty() ? "" : ",") + t.name + ":" + std::to_string(t.width) + "x" +
-                       std::to_string(t.height);
+            if (t.follows.empty())
+                targets += (targets.empty() ? "" : ",") + t.name + ":" + std::to_string(t.width) + "x" +
+                           std::to_string(t.height);
         send(c, cr::json_object({{"ev", cr::json_quote("hello")},
                                  {"proto", std::to_string(cr::kProtocolVersion)},
                                  {"backend", cr::json_quote(backend_)},
-                                 {"targets", cr::json_quote(targets)}}));
+                                 {"targets", cr::json_quote(targets)},
+                                 {"repeat", "1"}}));
         c.target_sent.clear();
         log_info("client %llu: %s", (unsigned long long)c.id, c.app.c_str());
         return;
@@ -601,6 +604,18 @@ void Server::on_json(Client &c, const std::string &body, int64_t now_ms)
     const uint32_t ref = (uint32_t)ref_d;
     auto it = c.refs.find(ref);
     Layer *l = it == c.refs.end() ? nullptr : comp_->layer(c.id, it->second);
+    if (op == "repeat") {
+        const bool video = l && std::string(l->kind()) == "video";
+        if (video)
+            static_cast<VideoLayer *>(l)->repeat(now_ms);
+        /* Answered at most once per ref, as frames are (on_frame). */
+        const std::string why = video ? "" : l ? "only a video layer repeats a frame" : "no such layer";
+        std::string &last = c.frame_error[l ? ref : 0];
+        if (!why.empty() && why != last)
+            error(c, op, ref, why);
+        last = why;
+        return;
+    }
     if (op == "drop") {
         auto a = c.assets.find(ref);
         if (a != c.assets.end()) {
@@ -646,7 +661,7 @@ void Server::op_asset(Client &c, const cr::Json &j)
         return;
     }
     const int target = slots_->index(str(j, "target"));
-    if (target < 0) {
+    if (target < 0 || !slots_->targets()[target].follows.empty()) {
         error(c, "asset", ref, "unknown target " + str(j, "target"));
         return;
     }
@@ -937,10 +952,13 @@ void Server::report(int64_t now_ms)
         if (c.closing || c.app.empty())
             continue;
         for (size_t t = 0; t < slots_->targets().size(); t++) {
+            if (!slots_->targets()[t].follows.empty())
+                continue;   /* a hold: no client's target */
             const TargetStatus &s = slots_->status((int)t);
+            const bool hold_off = slots_->hold_disabled((int)t);
             const std::string line = std::string(target_state_name(s.state)) + "\n" + holder_name(s.holder) + "\n" +
                                      s.reason + "\n" + std::to_string(s.retry_ms) + "\n" +
-                                     rendering_name(s.rendering);
+                                     rendering_name(s.rendering) + "\n" + (hold_off ? "1" : "0");
             std::string &sent = c.target_sent[slots_->targets()[t].name];
             if (line == sent)
                 continue;
@@ -952,7 +970,8 @@ void Server::report(int64_t now_ms)
                                      {"reason", cr::json_quote(s.reason)},
                                      {"retry_in_ms", std::to_string(s.retry_ms >= 0 ? std::max<int64_t>(0, s.retry_ms - now_ms)
                                                                                    : -1)},
-                                     {"rendering", cr::json_quote(rendering_name(s.rendering))}}));
+                                     {"rendering", cr::json_quote(rendering_name(s.rendering))},
+                                     {"guide_disabled", hold_off ? "1" : "0"}}));
         }
         const Governor &gov = comp_->governor();
         const std::string budget = std::to_string(gov.cap()) + "\n" + gov.reason();
@@ -1004,6 +1023,7 @@ std::string Server::status_text(int64_t now_ms) const
                       rendering.c_str());
         s += line;
     }
+    s += slots_->guard_text();
     s += slots_->renderer_text(now_ms);
     s += slots_->port().status_text(now_ms);
     for (const Client &c : clients_)
@@ -1025,9 +1045,10 @@ std::string Server::status_text(int64_t now_ms) const
                     l = x;
             if (!l)
                 continue;
-            std::snprintf(line, sizeof line, "layer %u %s of %s on %s, %s z %d: %s%s%s\n", l->id(), l->kind(),
+            std::snprintf(line, sizeof line, "layer %u %s of %s on %s, %s z %d%s: %s%s%s\n", l->id(), l->kind(),
                           c.app.c_str(), slots_->targets()[l->target()].name.c_str(), klass_name(l->params.klass),
-                          l->params.z, layer_state_name(st), reason.empty() ? "" : " - ", reason.c_str());
+                          l->params.z, l->params.guide_hold ? "" : ", guide_hold 0", layer_state_name(st),
+                          reason.empty() ? "" : " - ", reason.c_str());
             s += line;
             const std::string stats = l->stats();
             if (!stats.empty())

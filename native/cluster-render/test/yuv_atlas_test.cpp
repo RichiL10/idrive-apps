@@ -42,7 +42,7 @@ struct Nv12 {
 static std::vector<uint8_t> atlas_of(Nv12 &f)
 {
     std::vector<uint8_t> a((size_t)f.w * atlas_height(f.h), 0xee);
-    pack_nv12_atlas(f.y.data(), f.pitch, f.uv.data(), f.pitch, f.w, f.h, a.data());
+    pack_nv12_atlas(f.y.data(), f.pitch, f.uv.data(), f.pitch, f.w, f.h, a.data(), 0);
     return a;
 }
 
@@ -282,6 +282,45 @@ static void test_round_levels()
     ok("every level, length and alignment rounds as defined, nothing outside written", all);
 }
 
+/* Packing with rounding is a plain copy of Y and split of U and V, then
+ * round_levels() over the atlas, byte for byte: on random pictures and on
+ * every level, at widths whose chroma rows are and are not a multiple of 16
+ * and with a padded pitch. */
+static std::vector<uint8_t> plain_pack(const Nv12 &f)
+{
+    std::vector<uint8_t> a((size_t)f.w * atlas_height(f.h));
+    for (uint32_t r = 0; r < f.h; r++)
+        std::memcpy(&a[(size_t)r * f.w], &f.y[(size_t)r * f.pitch], f.w);
+    for (uint32_t r = 0; r < f.h / 2; r++)
+        for (uint32_t k = 0; k < f.w / 2; k++) {
+            a[(size_t)(f.h + r) * f.w + k] = f.uv[(size_t)r * f.pitch + 2 * k];
+            a[(size_t)(f.h + r) * f.w + f.w / 2 + k] = f.uv[(size_t)r * f.pitch + 2 * k + 1];
+        }
+    return a;
+}
+
+static void test_pack_rounded()
+{
+    bool same = true;
+    std::srand(11);
+    for (uint32_t w : {64u, 72u, 1088u, 1280u})
+        for (uint32_t h : {32u, 480u})
+            for (uint32_t pad : {0u, 32u}) {
+                Nv12 f(w, h, w + pad);
+                for (uint8_t &b : f.y) b = (uint8_t)std::rand();
+                for (uint8_t &b : f.uv) b = (uint8_t)std::rand();
+                for (uint32_t i = 0; i < 256 && i < f.uv.size(); i++) f.uv[i] = f.y[i] = (uint8_t)i;
+                const std::vector<uint8_t> plain = plain_pack(f);
+                for (unsigned bits = 0; bits <= 3; bits++) {
+                    std::vector<uint8_t> want(plain.size()), got(plain.size(), 0xee);
+                    round_levels(want.data(), plain.data(), plain.size(), bits);
+                    pack_nv12_atlas(f.y.data(), f.pitch, f.uv.data(), f.pitch, w, h, got.data(), bits);
+                    same = same && got == want;
+                }
+            }
+    ok("packing with rounding equals packing, then rounding, byte for byte", same);
+}
+
 static void test_frame(const char *path)
 {
     Nv12 f(1088, 480, 1088);
@@ -318,6 +357,7 @@ int main(int argc, char **argv)
     test_no_bleed();
     test_siting();
     test_round_levels();
+    test_pack_rounded();
     test_frame(nullptr);
     if (argc > 1)
         test_frame(argv[1]);

@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Robert Nisipeanu
+# Kiro test build (S6): Android Auto is OFF by default (conf key aa_enabled
+# = 0), so this unit is installed but NOT enabled (component.json "enable" does
+# not list it). It guards an Android Auto patch, which exists only with
+# aa_enabled = 1: whoever turns that on must also enable this unit
+# (systemctl enable waze-on-cluster-aa-boot.service), before the first
+# Android Auto patch. With aa_enabled = 0 recovery.js leaves aapd alone even if
+# the unit is started.
+[Unit]
+Description=waze-on-cluster boot check: restore the original aapd before it starts if the Android Auto patch keeps the head unit from starting
+RequiresMountsFor=/var/opt
+After=local-fs.target
+# aapd.service (WantedBy=late.target, after multi-user.target) starts only
+# once this has finished, failed or timed out; it does not require it.
+Before=aapd.service
+
+[Service]
+# As waze-on-cluster-boot.service does for carplay: it records a boot that
+# starts a patched aapd and, at the threshold or when it cannot save that
+# record, remounts / read-write only to write the verified aapd and
+# aapd.conf back, then read-only again (PATCH.md "Boot recovery").
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/bin/node /var/opt/waze-on-cluster/current/recovery.js boot aapd
+# The step exits by 56 s whatever hangs (recovery.js BOOT_EXIT_MS), inside
+# the start timeout. A stop mid-restore lets it finish, inside the stop
+# timeout, so / is not left writable; KillMode=mixed signals only the step,
+# not its mount children.
+TimeoutStartSec=75
+TimeoutStopSec=75
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

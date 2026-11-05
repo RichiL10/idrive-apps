@@ -31,11 +31,44 @@
  * shown scene its renderer subscribed to is verified; one not subscribed
  * 1.5 s after it was shown, or after the renderer unsubscribed, is released
  * and asked for again at once, then on the ladder, its scene kept; with no
- * subscription seen since start, nothing is verified or done. */
+ * subscription seen since start, nothing is verified or done. Holds: asked
+ * for only while the map is shown and released within three passes of it
+ * not being shown; a take-over unmaps the shown stock content and the stock
+ * contents mapped before ours or while ours was asked for, never those
+ * mapped after it; the take-overs are counted; the HMI mapping its content
+ * again behind ours is logged; rendering verification never releases a
+ * hold; HMI content off the take-over list (the seat-belt panel) shown in
+ * the slot makes it yield at once, and it is not asked for while that is
+ * shown; parked there, it is never taken over or yielded to; the HMI
+ * mapping the box again behind ours takes no second take-over; more than 3
+ * losses within 60 s, not to a lock, give it up; a slot reported disabled
+ * (a lock, or a slot the unit does not use) is not asked for, the hold
+ * waiting as "slot locked", until it is enabled; after a door lock the hold
+ * is asked for again and takes over again once the slot is free and the
+ * map shown, at once again after a second lock; its take-overs' count
+ * starts over after 10 s shown, not at a release, so the map coming and
+ * going every 2 s keeps them on their steps; the map flapping spaces
+ * requests 1 s and take-overs 1.5 s apart. A hold with its slot from the
+ * table (guide_slots = auto) takes 0x103 or 0x105, whichever the table
+ * reports the box in (each with the other disabled, as on two cars), and
+ * before the box, 0x105 when it is enabled, else 0x103, else none, keeps
+ * its slot when the box is unmapped or mapped in any other slot or a
+ * disabled one, moves with it (released first, never two slots; each move
+ * a loss, never a fault; a ladder wait carried over),
+ * is one mapping to the guard in both slots (two drops in any of them
+ * disable it, across boots), and yields to the seat-belt panel there; a
+ * listed slot stays where it is. A loss
+ * with the slot locked does not climb the ladder, and after a lock a
+ * take-over target is asked for once the slot is not locked, with stock
+ * content shown there or not. */
 #include <cstdio>
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
+#include "../src/guard.h"
+#include "../src/log.h"
 #include "../src/slots.h"
 
 using namespace crs;
@@ -105,12 +138,15 @@ struct Rig {
     FakeScenes scenes;
     SlotManager m{&port, &scenes};
     int64_t now = 100000;
-    Rig()
+    /* take_over_contents: the map's allowlist (<target>_take_over_contents),
+     * the HMI's map as shipped. */
+    explicit Rig(std::vector<uint64_t> take_over_contents = {kHmiMap})
     {
         TargetSpec map;
         map.name = "map"; map.slot = kMapSlot; map.scene_id = kMapScene; map.width = 1088; map.height = 480;
         map.linger_ms = 2000;
         map.take_over_stock = true;
+        map.take_over_contents = take_over_contents;
         TargetSpec panel;
         panel.name = "panel"; panel.slot = kPanelSlot; panel.scene_id = kPanelScene; panel.width = 1920;
         panel.height = 720; panel.linger_ms = 3000;
@@ -194,7 +230,7 @@ static void timeout_and_ladder()
     ok("nothing before the 2 s retry", calls_are(""));
     r.run(20);
     ok("requested again after 2 s", calls_are("request map"));
-    r.m.on_refused(kMapScene, Refusal::Config, "E_DCSM_SLOTID_UNKNOWN", r.now);
+    r.m.on_refused(kMapScene, Refusal::NoSlot, "E_DCSM_SLOTID_UNKNOWN", r.now);
     ok("a configuration refusal retries on the ladder (5 s)",
        calls_are("release map") && r.m.status(0).retry_ms == r.now + 5000 &&
            r.m.status(0).holder == Holder::None);
@@ -504,7 +540,7 @@ static void slot_comes_back()
     r.m.tick(r.now);
     r.m.on_shown(kMapScene, r.now);
     joined();
-    /* Three losses in a row climb the ladder to its 10 s step. */
+    /* Three locks in a row. */
     for (int k = 0; k < 3; k++) {
         r.slot(kMapSlot, 0, kMapScene);   /* a door-open warning disables the slot */
         r.m.on_lost(kMapScene, "unmapped", r.now);
@@ -516,13 +552,13 @@ static void slot_comes_back()
     r.slot(kMapSlot, 0, kMapScene);
     r.m.on_lost(kMapScene, "unmapped", r.now);
     const int64_t lost = r.now;
-    ok("a fourth loss in a row waits 20 s on the ladder", r.m.status(0).retry_ms == lost + 20000);
+    ok("a fourth lock in a row: the ladder not climbed, 2 s", r.m.status(0).retry_ms == lost + 2000);
     joined();
     r.run(3000);   /* one report, before the loss: the display reports a slot only when it changes */
     ok("while the slot stays disabled, nothing is asked for", joined().find("request") == std::string::npos);
     r.slot(kMapSlot, 1, 0);           /* the door closed: the slot is free again */
     r.run(1100);
-    ok("the slot free again after it was away: asked for at once, not after 20 s",
+    ok("the slot free again after it was away: asked for at once",
        joined().find("request map") != std::string::npos && r.now - lost < 5000);
 
     Rig v;
@@ -571,6 +607,32 @@ static void slot_comes_back()
     e.run(1100);
     ok("the stock map mapped there and gone again: asked for at once",
        joined().find("request map") != std::string::npos);
+
+    /* A lock of 0x100 with everything unmapped, then the slot back straight
+     * to occupied with the HMI's map shown (the sequence the car reported for
+     * 0x105 after a door lock). */
+    Rig s;
+    s.m.want(0, true, true);
+    s.m.tick(s.now);
+    s.m.on_shown(kMapScene, s.now);
+    s.run(15000);
+    for (int k = 0; k < 2; k++) {
+        joined();
+        s.rows(kMapSlot, 0, {{kMapScene, 0}, {kHmiMap, 0}});
+        s.m.on_lost(kMapScene, "unmapped", s.now);
+        s.run(500);
+        s.rows(kMapSlot, 2, {{kHmiMap, 1}});
+        s.run(10);
+        ok(k ? "a second lock 15 s later: asked for at once again"
+             : "the slot back 0 -> 2 with the stock map shown: a take-over target asked for at once",
+           calls_are("release map; request map"));
+        s.rows(kMapSlot, 2, {{kHmiMap, 1}, {kMapScene, 3}});
+        s.m.on_parked(kMapScene, s.now);
+        s.run(10);
+        s.rows(kMapSlot, 2, {{kMapScene, 1}, {kHmiMap, 3}});
+        s.m.on_shown(kMapScene, s.now);
+        s.run(15000);
+    }
 
     Rig q;
     q.m.want(0, true, true);
@@ -763,6 +825,51 @@ static void take_over()
     p.run(10000);
     ok("a target without take_over_stock never unmaps", joined().find("take over") == std::string::npos &&
                                                            p.state(1) == TargetState::Parked);
+}
+
+/* Take-overs unmap only the stock contents the target lists
+ * (take_over_contents, the map's default the HMI's map 0x01000300): the
+ * speech dialog (0x01000400) or any other stock content is left alone, the
+ * target parked behind it; an empty list takes over nothing. */
+static void take_over_allowlist()
+{
+    Rig r;
+    park(r, true, kPanelScene);   /* the HMI's speech dialog shown in the map slot */
+    joined();
+    r.run(60000);
+    ok("parked behind the speech dialog 0x01000400: never unmapped, still parked",
+       joined().find("take over") == std::string::npos && r.state(0) == TargetState::Parked &&
+           r.m.status(0).holder == Holder::Stock);
+    r.rows(kMapSlot, 2, {{kHmiMap, 1}, {kMapScene, 3}});
+    r.m.on_parked(kMapScene, r.now);
+    joined();
+    r.m.tick(r.now);
+    ok("the HMI's map 0x01000300 on top instead: unmapped at once",
+       joined().find("take over map 0x1000300") != std::string::npos);
+
+    Rig s;
+    park(s, true);
+    joined();
+    s.m.tick(s.now);
+    ok("parked behind 0x01000300: unmapped", calls_are("take over map 0x1000300; slots?"));
+
+    Rig o;
+    park(o, true, kStockMap);   /* other stock content: a route preview, the assisted-driving view */
+    o.run(60000);
+    ok("parked behind other stock content: never unmapped", joined().find("take over") == std::string::npos &&
+                                                             o.state(0) == TargetState::Parked);
+
+    Rig e(std::vector<uint64_t>{});
+    park(e, true);
+    e.run(60000);
+    ok("an empty take_over_contents: take-over off, parked behind the HMI's map",
+       joined().find("take over") == std::string::npos && e.state(0) == TargetState::Parked);
+
+    Rig l({kHmiMap, kStockMap});
+    park(l, true, kStockMap);
+    joined();
+    l.m.tick(l.now);
+    ok("a content added to the list is unmapped", calls_are("take over map 0x1000101; slots?"));
 }
 
 /* The map shown, then a lock (a door-open or check-control warning):
@@ -1331,6 +1438,1137 @@ static void rendering()
        calls_are("release map; request map"));
 }
 
+/* The lines logged since the last call. */
+static std::string logged()
+{
+    static uint64_t seq;
+    std::vector<std::string> lines;
+    cld::log_lines_since(&seq, &lines);
+    std::string s;
+    for (const std::string &l : lines)
+        s += l + "\n";
+    return s;
+}
+
+static bool requested_none(const std::string &calls) { return calls.find("request") == std::string::npos; }
+
+static const uint64_t kGuideSlot = 0x105, kGuideScene = 0x010004f1;
+/* The HMI's maneuver panel; a second content a take-over may unmap (not the
+ * HMI's: for the queue's order); the seat-belt-warning panel, never taken
+ * over. */
+static const uint64_t kBox = 0x01000310, kBoxAlt = 0x01000315, kBelt = 0x01000314;
+
+/* The rig with a hold of kGuideSlot following the map (target 3); from_table:
+ * its slot from the slot table instead (guide_slots = auto). */
+struct GuideRig : Rig {
+    static const int kGuide = 3;
+    /* map_takes: the map's own take_over_contents, apart from the hold's. */
+    explicit GuideRig(bool from_table = false, std::vector<uint64_t> map_takes = {kHmiMap}) : Rig(map_takes)
+    {
+        TargetSpec g;
+        g.name = "guide"; g.slot = from_table ? 0 : kGuideSlot; g.scene_id = kGuideScene; g.width = g.height = 16;
+        g.linger_ms = 0; g.take_over_stock = true; g.follows = "map"; g.take_over_contents = {kBox, kBoxAlt};
+        g.strike_limit = 2;   /* as load_holds makes it */
+        if (from_table)
+            g.table_slots = {0x105, 0x103};
+        m.add(g);
+    }
+    uint64_t guide_slot() const { return m.targets()[kGuide].slot; }
+    /* The hold asked for and shown, the box parked behind it. */
+    void hold()
+    {
+        pass();
+        rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBox, 3}});
+        m.on_shown(kGuideScene, now);
+    }
+    /* Passes of the render loop, as Service::after_poll runs them. */
+    void pass(int64_t ms = 10)
+    {
+        for (int64_t t = 0; t < ms; t += 10) {
+            now += 10;
+            m.follow(now);
+            m.tick(now);
+        }
+    }
+    void show_map()
+    {
+        m.want(0, true, true);
+        pass();
+        rows(kMapSlot, 2, {{kMapScene, 1}});
+        m.on_shown(kMapScene, now);
+    }
+};
+
+static void guide_follows_the_map()
+{
+    GuideRig r;
+    logged();
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBoxAlt, 3}});   /* a route: the box shown */
+    r.pass(3000);
+    ok("hold: the map not shown, the guidance slot not asked for", joined().find("guide") == std::string::npos);
+    r.show_map();
+    joined();
+    r.pass();
+    ok("the map shown: the hold's empty scene published and asked for", calls_are("publish guide; request guide") &&
+                                                                          r.state(GuideRig::kGuide) ==
+                                                                              TargetState::Acquiring);
+    ok("logged with ours and the slot's rows",
+       logged().find("target guide: hold acquiring (was idle); ours 0x10004f1; slot 0x105 status 2: 0x1000310 class "
+                     "0 map 1, 0x1000315 class 0 map 3") != std::string::npos);
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBoxAlt, 3}, {kGuideScene, 3}});
+    r.m.on_parked(kGuideScene, r.now);
+    joined();
+    r.pass();
+    ok("parked behind the box: the HMI's contents mapped before ours unmapped as the HMI, shown and parked",
+       calls_are("take over guide 0x1000310; take over guide 0x1000315; slots?"));
+    const std::string over = logged();
+    ok("the take-over logged with what it unmapped, ours and the rows",
+       over.find("target guide: take-over 1 (1 since start): unmapping the stock HMI's 0x1000310 (class 0, map "
+                 "status 1), 0x1000315 (class 0, map status 3) in slot 0x105 as the HMI; the next") !=
+               std::string::npos &&
+           over.find("ours 0x10004f1; slot status 2:") != std::string::npos);
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBox, 3}, {kBoxAlt, 3}});
+    r.m.on_shown(kGuideScene, r.now);
+    const std::string again = logged();
+    ok("the HMI maps the box again behind ours: a line for each content, and the hold shown",
+       again.find("target guide: the stock HMI's 0x1000310 is mapped again, parked behind ours (map status 3, "
+                  "was 1)") != std::string::npos &&
+           again.find("the stock HMI's 0x1000315 is mapped again, parked behind ours (map status 3, was 3)") ==
+               std::string::npos &&
+           again.find("target guide: hold shown (was parked)") != std::string::npos &&
+           r.state(GuideRig::kGuide) == TargetState::Shown);
+    r.pass(60000);
+    ok("held behind the map for a minute: no more take-overs, no traffic", calls_are("") &&
+                                                                            r.state(GuideRig::kGuide) ==
+                                                                                TargetState::Shown);
+    r.m.want(0, false, false);
+    r.pass(30);
+    ok("the map no longer shown (lingering): the hold released within three passes",
+       calls_are("release guide") && r.state(0) == TargetState::Lingering &&
+           r.state(GuideRig::kGuide) == TargetState::Idle &&
+           logged().find("target guide: hold idle (was lingering)") != std::string::npos);
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBoxAlt, 3}});
+    r.m.want(0, true, true);
+    r.pass(20);
+    ok("the map shown again from its linger: the hold asked for again at once, in the same scene",
+       calls_are("request guide") && r.state(0) == TargetState::Shown);
+
+    GuideRig p;
+    p.rows(kGuideSlot, 2, {{kBox, 1}});
+    p.show_map();
+    p.pass();
+    p.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}});
+    p.m.on_parked(kGuideScene, p.now);
+    p.m.want(0, false, false);
+    joined();
+    p.pass(30);
+    ok("parked when the map goes: released", joined().find("release guide") != std::string::npos &&
+                                                 p.state(GuideRig::kGuide) == TargetState::Idle);
+}
+
+static void guide_queue_order()
+{
+    GuideRig r;
+    r.rows(kGuideSlot, 2, {{kBox, 1}});
+    r.show_map();
+    r.pass();
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}});
+    r.m.on_parked(kGuideScene, r.now);
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}, {kBoxAlt, 3}});   /* mapped after ours */
+    joined();
+    logged();
+    r.pass();
+    ok("take-over: the shown box unmapped; content mapped after ours left parked behind it",
+       calls_are("take over guide 0x1000310; slots?") &&
+           logged().find("unmapping the stock HMI's 0x1000310 (class 0, map status 1) in slot 0x105 as the HMI; "
+                         "left parked, mapped after ours: 0x1000315 (class 0, map status 3)") != std::string::npos);
+    /* One report for the unmap and the HMI's map again: 1 -> 3, never 0. */
+    r.rows(kGuideSlot, 2, {{kBoxAlt, 1}, {kGuideScene, 3}, {kBox, 3}});
+    r.pass(3000);
+    ok("a stock content shown in its place: unmapped at the next take-over, the re-mapped box left behind ours",
+       joined().find("take over guide 0x1000315") != std::string::npos &&
+           logged().find("take-over 2 (2 since start): unmapping the stock HMI's 0x1000315 (class 0, map status 1) "
+                         "in slot 0x105 as the HMI; left parked, mapped after ours: 0x1000310") != std::string::npos);
+
+    GuideRig a;
+    a.rows(kGuideSlot, 2, {{kBox, 1}});
+    a.show_map();
+    a.pass();
+    a.rows(kGuideSlot, 2, {{kBox, 1}, {kBoxAlt, 3}});   /* mapped while ours is asked for */
+    a.rows(kGuideSlot, 2, {{kBox, 1}, {kBoxAlt, 3}, {kGuideScene, 3}});
+    a.m.on_parked(kGuideScene, a.now);
+    joined();
+    a.pass();
+    ok("content mapped while ours was asked for can be ahead of it: unmapped too",
+       calls_are("take over guide 0x1000310; take over guide 0x1000315; slots?"));
+}
+
+static void guide_never_verified_out()
+{
+    GuideRig r;
+    r.slot(kGuideSlot, 1, 0);
+    r.show_map();
+    r.m.on_subscription(kMapScene, true, false, "renderer-1", r.now);   /* subscriptions observable */
+    r.pass();
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}});
+    r.m.on_shown(kGuideScene, r.now);
+    joined();
+    r.pass(60000);
+    ok("subscriptions observable, the KOMBI never subscribing to the hold's empty scene: kept, never released",
+       calls_are("") && r.state(GuideRig::kGuide) == TargetState::Shown &&
+           r.m.status(GuideRig::kGuide).rendering == Rendering::Checking && r.state(0) == TargetState::Shown);
+}
+
+/* Slot 0x105 as the car reported it with a route (2026-11-03): the box
+ * shown, the seat-belt variant 0x01000314 parked behind it at all times. */
+static void guide_live_route()
+{
+    GuideRig r;
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    r.show_map();
+    joined();
+    r.pass();
+    ok("the box shown, the seat-belt panel parked: the hold asked for", calls_are("publish guide; request guide"));
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}, {kGuideScene, 3}});
+    r.m.on_parked(kGuideScene, r.now);
+    joined();
+    logged();
+    r.pass();
+    ok("parked behind both: the box taken over, the seat-belt panel left alone",
+       calls_are("take over guide 0x1000310; slots?") &&
+           logged().find("unmapping the stock HMI's 0x1000310 (class 0, map status 1) in slot 0x105 as the HMI; the "
+                         "next") != std::string::npos);
+    /* The KOMBI shows ours, not the parked seat-belt panel; the HMI maps the
+     * box again behind ours about 100 ms later, before our map status. */
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}});
+    r.pass(100);
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}, {kBox, 3}});
+    r.pass(5000);
+    ok("ours shown, the box mapped again behind it: no second take-over", joined().find("take over") ==
+                                                                               std::string::npos);
+    r.m.on_shown(kGuideScene, r.now);
+    r.pass(60000);
+    ok("held a minute with both parked behind it: no traffic, no yield",
+       calls_are("") && r.state(GuideRig::kGuide) == TargetState::Shown &&
+           logged().find("yields") == std::string::npos);
+    r.m.want(0, false, false);
+    r.pass(30);
+    ok("the map hidden: released", calls_are("release guide") && r.state(GuideRig::kGuide) == TargetState::Idle);
+}
+
+static void guide_yields()
+{
+    /* The take-over as on the car, but the KOMBI promotes the seat-belt
+     * panel instead of ours. */
+    GuideRig k;
+    k.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    k.show_map();
+    k.pass();
+    k.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}, {kGuideScene, 3}});
+    k.m.on_parked(kGuideScene, k.now);
+    k.pass();
+    joined();
+    logged();
+    k.rows(kGuideSlot, 2, {{kBelt, 1}, {kGuideScene, 3}});
+    k.rows(kGuideSlot, 2, {{kBelt, 1}, {kGuideScene, 3}, {kBox, 3}});
+    k.pass();
+    ok("the seat-belt panel promoted instead of ours: released in the same pass, never taken over",
+       calls_are("release guide") && k.state(GuideRig::kGuide) == TargetState::Idle &&
+           logged().find("target guide: hold yields to 0x1000314 (class 0, map status 1)") != std::string::npos);
+    k.rows(kGuideSlot, 2, {{kBelt, 1}, {kBox, 3}});
+    k.pass(10000);
+    ok("not asked for while it is shown, the map shown", calls_are("") && k.state(0) == TargetState::Shown);
+    k.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    k.pass();
+    ok("parked again: asked for again", calls_are("request guide") &&
+                                            logged().find("hold no longer yields: 0x1000314 is not shown") !=
+                                                std::string::npos);
+
+    /* A seat-belt warning while held: the KOMBI shows the panel over ours. */
+    GuideRig r;
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    r.show_map();
+    r.pass();
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}, {kBox, 3}});
+    r.m.on_shown(kGuideScene, r.now);
+    joined();
+    r.rows(kGuideSlot, 2, {{kBelt, 1}, {kGuideScene, 3}, {kBox, 3}});
+    r.m.on_parked(kGuideScene, r.now);
+    r.pass();
+    ok("the seat-belt panel shown over the hold: released, never taken over",
+       calls_are("slots?; release guide") && r.state(GuideRig::kGuide) == TargetState::Idle);
+    r.rows(kGuideSlot, 2, {{kBelt, 1}, {kBox, 3}});
+    r.pass(10000);
+    ok("not asked for while it is shown", calls_are(""));
+    r.rows(kGuideSlot, 2, {{kBelt, 0}, {kBox, 1}});
+    r.pass();
+    ok("unmapped: asked for again", calls_are("request guide"));
+
+    GuideRig b;
+    b.rows(kGuideSlot, 2, {{kBelt, 1}});
+    b.show_map();
+    joined();
+    b.pass(5000);
+    ok("the seat-belt panel shown when the map is: never asked for, never taken over", calls_are(""));
+
+    GuideRig o;
+    o.rows(kGuideSlot, 2, {{kBox, 1}});
+    o.show_map();
+    o.pass();
+    o.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}});
+    o.m.on_parked(kGuideScene, o.now);
+    o.rows(kGuideSlot, 2, {{0x01000330, 1}, {kGuideScene, 3}});   /* other HMI content in its place */
+    joined();
+    o.pass(5000);
+    ok("parked behind HMI content off the list: yields, no take-over", calls_are("release guide") &&
+                                                                        o.state(GuideRig::kGuide) == TargetState::Idle);
+}
+
+/* A door opened: the KOMBI locks 0x105 and unmaps everything in it, then
+ * the HMI maps the box and the seat-belt panel again, as seen on the car
+ * (2026-11-03) with `panel` there. The map staying shown is this test's. */
+static void guide_door_lock()
+{
+    GuideRig h;
+    h.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    h.show_map();
+    h.pass();
+    h.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}, {kBox, 3}});
+    h.m.on_shown(kGuideScene, h.now);
+    joined();
+    logged();
+    const int64_t door = h.now;
+    h.rows(kGuideSlot, 0, {{kGuideScene, 0}, {kBelt, 0}, {kBox, 0}});
+    h.m.on_lost(kGuideScene, "unmapped", h.now);
+    h.pass(9000);
+    const std::string locked = joined();
+    ok("the lock: the hold down, not asked for while it lasts, waiting as \"slot locked\"",
+       locked.find("release guide") == 0 && requested_none(locked) &&
+           h.state(GuideRig::kGuide) == TargetState::Waiting &&
+           h.m.status(GuideRig::kGuide).reason == "slot locked");
+    h.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    h.pass();
+    ok("the slot free, the box shown again: asked for at once", calls_are("request guide"));
+    h.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}, {kGuideScene, 3}});
+    h.m.on_parked(kGuideScene, h.now);
+    joined();
+    h.pass();
+    const std::string over = joined();
+    ok("parked: one take-over, of the box", over.find("take over guide 0x1000310") == 0 &&
+                                                over.rfind("take over") == 0);
+    h.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}, {kBox, 3}});
+    h.m.on_shown(kGuideScene, h.now);
+    h.pass(door + 15000 - h.now);
+    ok("held again, not given up", calls_are("") && h.state(GuideRig::kGuide) == TargetState::Shown &&
+                                       logged().find("given up") == std::string::npos);
+    /* A second lock 15 s after the first, the slot back 1 s later. */
+    h.rows(kGuideSlot, 0, {{kGuideScene, 0}, {kBelt, 0}, {kBox, 0}});
+    h.m.on_lost(kGuideScene, "unmapped", h.now);
+    h.pass(1000);
+    joined();
+    h.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    h.pass();
+    ok("a second lock 15 s later: asked for at once when the slot is free, the ladder not climbed",
+       calls_are("request guide"));
+
+    /* The map lost with it: its slot locked too, the map refused "fetch
+     * removed" once when the slots come back and shown at the next try. */
+    GuideRig r;
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    r.show_map();
+    r.pass();
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}, {kBox, 3}});
+    r.m.on_shown(kGuideScene, r.now);
+    joined();
+    logged();
+    const int64_t lock = r.now;
+    r.rows(kMapSlot, 0, {{kMapScene, 0}});
+    r.rows(kGuideSlot, 0, {{kGuideScene, 0}, {kBelt, 0}, {kBox, 0}});
+    r.m.on_lost(kMapScene, "unmapped", r.now);
+    r.m.on_lost(kGuideScene, "unmapped", r.now);
+    r.pass();
+    ok("the lock: the map and the hold down", calls_are("release map; release guide"));
+    int map_requests = 0;
+    int64_t map_shown = -1, guide_request = -1;
+    std::string all;
+    for (int64_t w = 0; w < 30000 && guide_request < 0; w += 10) {
+        if (w == 2000) {
+            r.slot(kMapSlot, 1, 0);
+            r.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});   /* the HMI maps its contents again */
+        }
+        r.pass();
+        const std::string c = joined();
+        all += c + "; ";
+        if (c.find("request map") != std::string::npos && ++map_requests == 1) {
+            r.m.on_refused(kMapScene, Refusal::Transient, "fetch removed", r.now);
+        } else if (c.find("request map") != std::string::npos) {
+            r.rows(kMapSlot, 2, {{kMapScene, 1}});
+            r.m.on_shown(kMapScene, r.now);
+            map_shown = r.now;
+        }
+        if (c.find("request guide") != std::string::npos)
+            guide_request = r.now;
+    }
+    ok("the slots free: the map refused once, then shown; the hold asked for only once the map is shown",
+       map_requests == 2 && map_shown > lock && guide_request > map_shown &&
+           all.find("request guide") == all.rfind("request guide"));
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}, {kGuideScene, 3}});
+    r.m.on_parked(kGuideScene, r.now);
+    joined();
+    r.pass();
+    const std::string again = joined();
+    ok("one take-over, of the box", again.find("take over guide 0x1000310") == 0 && again.rfind("take over") == 0);
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}, {kBox, 3}});
+    r.m.on_shown(kGuideScene, r.now);
+    r.pass(10000);
+    ok("the map lost too: held again once it is shown, not given up",
+       calls_are("") && r.state(GuideRig::kGuide) == TargetState::Shown &&
+           logged().find("given up") == std::string::npos);
+}
+
+/* The take-overs' count starts over once the hold has been shown 10 s. */
+static void guide_take_over_settle()
+{
+    GuideRig r;
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    r.show_map();
+    r.pass();
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}, {kGuideScene, 3}});
+    r.m.on_parked(kGuideScene, r.now);
+    r.pass();
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}, {kBox, 3}});
+    r.m.on_shown(kGuideScene, r.now);
+    r.pass(5000);
+    logged();
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}, {kBelt, 3}});   /* the box over ours again */
+    r.m.on_parked(kGuideScene, r.now);
+    r.pass();
+    ok("parked again 5 s after shown: the count goes on",
+       logged().find("take-over 2 (2 since start): unmapping the stock HMI's 0x1000310") != std::string::npos);
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBox, 3}, {kBelt, 3}});
+    r.m.on_shown(kGuideScene, r.now);
+    r.pass(10000);
+    r.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}, {kBelt, 3}});
+    r.m.on_parked(kGuideScene, r.now);
+    r.pass();
+    ok("parked again 10 s after shown: the count started over, the take-over at once",
+       logged().find("take-over 1 (3 since start): unmapping the stock HMI's 0x1000310") != std::string::npos);
+}
+
+/* The map's <target>_take_over_contents and the hold's guide_take_over are
+ * separate lists (each target's own take_over_contents): neither widens or
+ * narrows the other, and the map's allowlist leaves the hold alone. */
+static void take_over_lists_are_separate()
+{
+    GuideRig a;   /* the map's list: the HMI's map only */
+    a.m.want(0, true, true);
+    a.pass();
+    a.rows(kMapSlot, 2, {{kBox, 1}, {kMapScene, 3}});   /* the box's content over the parked map */
+    a.m.on_parked(kMapScene, a.now);
+    joined();
+    a.pass(60000);
+    ok("the hold's list does not widen the map's: parked behind the box's content, never unmapped by the map",
+       joined().find("take over") == std::string::npos && a.state(0) == TargetState::Parked);
+
+    GuideRig b;
+    b.rows(kGuideSlot, 2, {{kHmiMap, 1}});   /* the HMI's map shown in the hold's slot */
+    b.show_map();
+    joined();
+    b.pass(3000);
+    ok("the map's list does not widen the hold's: the HMI's map shown in the guidance slot is yielded to, not "
+       "unmapped and not asked for",
+       joined().find("guide") == std::string::npos && b.state(GuideRig::kGuide) != TargetState::Acquiring);
+    b.rows(kGuideSlot, 2, {{kHmiMap, 3}, {kGuideScene, 3}});   /* only parked there: left alone */
+    b.pass();
+    b.m.on_parked(kGuideScene, b.now);
+    joined();
+    b.pass(60000);
+    ok("and parked behind it, the hold takes nothing over", joined().find("take over") == std::string::npos);
+
+    GuideRig c(false, std::vector<uint64_t>{});   /* the map takes over nothing */
+    c.rows(kGuideSlot, 2, {{kBox, 1}});
+    c.show_map();
+    joined();
+    c.pass();
+    ok("the map's list empty: the hold is still asked for with the map shown", calls_are("publish guide; request guide"));
+    c.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}});
+    c.m.on_parked(kGuideScene, c.now);
+    joined();
+    c.pass();
+    ok("and still takes over the box from guide_take_over: guide hold not broken",
+       calls_are("take over guide 0x1000310; slots?"));
+
+    GuideRig d(false, {kHmiMap, kBox});   /* the map's list names the box too: its own choice */
+    d.m.want(0, true, true);
+    d.pass();
+    d.rows(kMapSlot, 2, {{kBox, 1}, {kMapScene, 3}});
+    d.m.on_parked(kMapScene, d.now);
+    joined();
+    d.m.tick(d.now);
+    ok("a content added to the map's list is unmapped by the map", calls_are("take over map 0x1000310; slots?"));
+}
+
+static void guide_gives_up()
+{
+    GuideRig r;
+    r.rows(kGuideSlot, 2, {{kBox, 1}});
+    r.show_map();
+    logged();
+    int requests = 0;
+    for (int k = 0; k < 6; k++) {
+        bool asked = false;
+        for (int64_t w = 0; w < 30000 && !asked; w += 100) {
+            r.pass(100);
+            asked = joined().find("request guide") != std::string::npos;
+        }
+        if (!asked)
+            break;
+        requests++;
+        r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBox, 3}});
+        r.m.on_shown(kGuideScene, r.now);
+        r.rows(kGuideSlot, 2, {{kBox, 1}});   /* the HMI's box over ours again */
+        r.m.on_lost(kGuideScene, "fetch removed", r.now);
+    }
+    r.pass(300000);
+    ok("our scene removed 4 times within 60 s: given up, not asked for again",
+       requests == 4 && joined().find("request guide") == std::string::npos &&
+           logged().find("target guide: hold given up: its scene fetch removed, 4 losses within 60 s") !=
+               std::string::npos);
+
+    GuideRig l;
+    l.slot(kGuideSlot, 1, 0);
+    l.show_map();
+    int asked = 0;
+    for (int k = 0; k < 6; k++) {
+        l.pass(1100);
+        if (joined().find("request guide") == std::string::npos)
+            break;
+        asked++;
+        l.rows(kGuideSlot, 2, {{kGuideScene, 1}});
+        l.m.on_shown(kGuideScene, l.now);
+        l.rows(kGuideSlot, 0, {{kGuideScene, 0}});   /* a lock */
+        l.m.on_lost(kGuideScene, "unmapped", l.now);
+        l.slot(kGuideSlot, 1, 0);
+    }
+    ok("losses to a lock do not count", asked == 6);
+
+    /* The seat-belt panel shown over the hold: parked again and yielded to,
+     * one loss each time. */
+    GuideRig y;
+    y.rows(kGuideSlot, 2, {{kBox, 1}});
+    y.show_map();
+    logged();
+    int held = 0;
+    for (int k = 0; k < 4; k++) {
+        bool asked = false;
+        for (int64_t w = 0; w < 30000 && !asked; w += 100) {
+            y.pass(100);
+            asked = joined().find("request guide") != std::string::npos;
+        }
+        if (!asked)
+            break;
+        y.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBox, 3}});
+        y.m.on_shown(kGuideScene, y.now);
+        held++;
+        y.rows(kGuideSlot, 2, {{kBelt, 1}, {kGuideScene, 3}, {kBox, 3}});
+        y.m.on_parked(kGuideScene, y.now);
+        y.pass();
+        y.rows(kGuideSlot, 2, {{kBox, 1}});   /* the seat belt fastened */
+        if (k == 2)
+            ok("three seat-belt events within 60 s: three losses, not given up",
+               logged().find("given up") == std::string::npos);
+    }
+    ok("a fourth: given up", held == 4 && logged().find("hold given up") != std::string::npos);
+}
+
+/* Losses until the hold gives up: yields, the seat-belt panel shown over
+ * the hold (BMW's own content), or else faults, our scene unmapped with
+ * only the box (on the take-over list) in the slot, Dcsm2 staying up (the
+ * KOMBI's renderer restarting). Returns the requests. */
+static int lose_until_given_up(GuideRig &r, bool yields)
+{
+    r.rows(kGuideSlot, 2, {{kBox, 1}});
+    r.show_map();
+    int requests = 0;
+    for (int k = 0; k < 6; k++) {
+        bool asked = false;
+        for (int64_t w = 0; w < 30000 && !asked; w += 100) {
+            r.pass(100);
+            asked = joined().find("request guide") != std::string::npos;
+        }
+        if (!asked)
+            break;
+        requests++;
+        r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBox, 3}});
+        r.m.on_shown(kGuideScene, r.now);
+        if (yields) {
+            r.rows(kGuideSlot, 2, {{kBelt, 1}, {kGuideScene, 3}, {kBox, 3}});
+            r.m.on_parked(kGuideScene, r.now);
+            r.pass();
+            r.rows(kGuideSlot, 2, {{kBox, 1}});   /* the seat belt fastened */
+        } else {
+            r.rows(kGuideSlot, 2, {{kBox, 1}});
+            r.m.on_lost(kGuideScene, "unmapped", r.now);
+        }
+    }
+    r.pass(300000);
+    return requests;
+}
+
+/* Give-ups in two boots: of faults alone, a strike each and disabled; of
+ * yields to the seat-belt panel, no strike, held again the boot after. */
+static void guide_gives_up_twice()
+{
+    for (bool yields : {false, true}) {
+        const std::string path = "/tmp/crs-slots-giveup-" + std::to_string(getpid()) + ".txt";
+        const std::string what = yields ? "yields only" : "unmaps only";
+        unlink(path.c_str());
+        {
+            Guard g;
+            g.load(path, "t", "boot-1");
+            GuideRig r;
+            r.m.set_guard(&g);
+            const int asked = lose_until_given_up(r, yields);
+            ok((what + ", one boot: given up, " + (yields ? "no strike" : "a strike")).c_str(),
+               asked == 4 && logged().find("hold given up") != std::string::npos &&
+                   g.status_text() == (yields ? "" : "guard: guide 0x105 0x10004f1 0: 1 strike\n") &&
+                   !r.m.hold_disabled(0));
+        }
+        {
+            Guard g;
+            g.load(path, "t", "boot-2");
+            GuideRig r;
+            r.m.set_guard(&g);
+            const int asked = lose_until_given_up(r, yields);
+            ok((what + ", the next boot: given up again, " + (yields ? "still no strike" : "disabled")).c_str(),
+               asked == 4 && r.m.hold_disabled(0) == !yields &&
+                   g.status_text() ==
+                       (yields ? "" : "guard: guide 0x105 0x10004f1 0: disabled, 2 strikes\n"));
+        }
+        {
+            Guard g;
+            g.load(path, "t", "boot-3");
+            GuideRig r;
+            r.m.set_guard(&g);
+            const int asked = lose_until_given_up(r, yields);
+            ok((what + ", the boot after: " + (yields ? "held again" : "never asked for")).c_str(),
+               (asked > 0) == yields && r.m.hold_disabled(0) == !yields);
+        }
+        unlink(path.c_str());
+    }
+}
+
+static void guide_slot_disabled()
+{
+    GuideRig r;
+    r.slot(kGuideSlot, 1, 0);
+    r.show_map();
+    r.pass();
+    r.rows(kGuideSlot, 2, {{kGuideScene, 1}});
+    r.m.on_shown(kGuideScene, r.now);
+    joined();
+    r.rows(kGuideSlot, 0, {{kGuideScene, 1}});   /* reported disabled before the KOMBI unmaps ours */
+    r.pass(20);
+    ok("held, then the slot disabled: kept until the KOMBI unmaps it", calls_are("") &&
+                                                                        r.state(GuideRig::kGuide) ==
+                                                                            TargetState::Shown);
+    r.rows(kGuideSlot, 0, {{kGuideScene, 0}});
+    r.m.on_lost(kGuideScene, "unmapped", r.now);
+    r.pass(10000);
+    ok("unmapped: not asked for while the slot is disabled, the map shown, waiting as \"slot locked\"",
+       requested_none(joined()) && r.state(GuideRig::kGuide) == TargetState::Waiting &&
+           r.m.status(GuideRig::kGuide).reason == "slot locked");
+    r.slot(kGuideSlot, 1, 0);
+    r.pass();
+    ok("enabled again: asked for at once", calls_are("request guide"));
+
+    GuideRig d;
+    d.slot(kGuideSlot, 0, 0);   /* 0x103 on the owner's car */
+    d.show_map();
+    joined();
+    d.pass(10000);
+    ok("a slot reported disabled when the map is shown: never asked for, waiting as \"slot locked\"",
+       requested_none(joined()) && d.m.status(GuideRig::kGuide).reason == "slot locked");
+    d.pass(40000);
+    ok("50 s with no report since: still not asked for (no lock trust for a hold)",
+       requested_none(joined()) && d.m.status(GuideRig::kGuide).reason == "slot locked");
+
+    GuideRig u;
+    u.show_map();
+    joined();
+    u.pass(40000);
+    ok("a slot the table never names: never asked for, waiting as \"slot not reported\"",
+       requested_none(joined()) && u.m.status(GuideRig::kGuide).reason == "slot not reported");
+    u.rows(kGuideSlot, 2, {{kBox, 1}});
+    u.pass();
+    ok("named: asked for at once", joined().find("request guide") != std::string::npos);
+}
+
+static bool has_line(const std::string &text, const std::string &line)
+{
+    return text.find(line + "\n") != std::string::npos;
+}
+
+/* The mapping guard (guard.h) in the slot manager: one strike per mapping
+ * event. */
+static void guide_guard()
+{
+    const std::string path = "/tmp/crs-slots-guard-" + std::to_string(getpid()) + ".txt";
+    unlink(path.c_str());
+    Guard g;
+    g.load(path, "t", "boot-1");
+
+    GuideRig r;
+    r.m.set_guard(&g);
+    r.rows(kGuideSlot, 2, {{kBox, 1}});
+    r.show_map();
+    r.hold();
+    r.pass(2000);
+    r.rows(kMapSlot, 2, {{kStockMap, 1}});
+    r.m.on_lost(kMapScene, "fetch removed", r.now);
+    r.pass(5000);
+    joined();
+    r.pass(100);
+    ok("the map lost: the hold released, the map asked for again", r.state(GuideRig::kGuide) == TargetState::Idle &&
+                                                                     r.state(0) == TargetState::Acquiring);
+    r.port.up = false;
+    r.m.on_availability(false, r.now);
+    ok("the display service gone right after the map's request, 7 s after the released hold's: the hold blamed",
+       g.status_text() == "guard: guide 0x105 0x10004f1 0: 1 strike\n");
+    r.port.up = true;
+    r.m.on_availability(true, r.now);
+    r.pass(500);
+    r.port.up = false;
+    r.m.on_availability(false, r.now);   /* again, before the settle: nothing asked for since */
+    r.m.on_availability(false, r.now);   /* and a duplicate notice */
+    ok("two more drops within 10 s of the same events: no second strike against the hold",
+       has_line(g.status_text(), "guard: guide 0x105 0x10004f1 0: 1 strike"));
+
+    GuideRig s;
+    Guard g2;
+    unlink(path.c_str());
+    g2.load(path, "t", "boot-1");
+    s.m.set_guard(&g2);
+    s.rows(kGuideSlot, 2, {{kBox, 1}});
+    s.show_map();
+    s.hold();
+    s.pass(11000);
+    s.rows(kGuideSlot, 2, {{kBelt, 1}, {kGuideScene, 3}});
+    s.m.on_parked(kGuideScene, s.now);
+    s.rows(kGuideSlot, 2, {{kGuideScene, 1}});
+    s.m.on_shown(kGuideScene, s.now);   /* parked and shown again by the display */
+    s.pass(100);
+    s.port.up = false;
+    s.m.on_availability(false, s.now);
+    ok("a re-park and re-show by the display is no mapping: no strike 11 s after the hold's", g2.status_text().empty());
+
+    GuideRig n;
+    Guard g3;
+    unlink(path.c_str());
+    g3.load(path, "t", "boot-1");
+    n.m.set_guard(&g3);
+    n.rows(kGuideSlot, 2, {{kBox, 1}});
+    n.show_map();
+    n.pass();
+    joined();
+    n.m.on_refused(kGuideScene, Refusal::NoSlot, "map E_DCSM_SLOTID_UNKNOWN", n.now);
+    n.pass(60000);
+    ok("the hold's slot refused as unknown: a strike, not asked for again, idle; the map kept",
+       g3.status_text() == "guard: guide 0x105 0x10004f1 0: 1 strike\n" && requested_none(joined()) &&
+           n.state(GuideRig::kGuide) == TargetState::Idle && n.m.hold_disabled(0) && n.state(0) == TargetState::Shown);
+    unlink(path.c_str());
+}
+
+static void guide_no_flapping()
+{
+    GuideRig r;
+    r.rows(kGuideSlot, 2, {{kBox, 1}});
+    r.show_map();
+    joined();
+    /* The map shown and not, every 150 ms for 20 s; the KOMBI parks the
+     * hold behind the box, a take-over shows it with the box parked, a
+     * release shows the box. */
+    std::vector<int64_t> requests, overs;
+    for (int k = 0; k < 2000; k++) {
+        if (k % 15 == 0)
+            r.m.want(0, (k / 15) % 2 == 1, true);
+        r.pass();
+        const std::string c = joined();
+        if (c.find("request guide") != std::string::npos) {
+            requests.push_back(r.now);
+            r.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}});
+            r.m.on_parked(kGuideScene, r.now);
+        }
+        if (c.find("take over guide 0x1000310") != std::string::npos) {
+            overs.push_back(r.now);
+            r.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBox, 3}});
+            r.m.on_shown(kGuideScene, r.now);
+        }
+        if (c.find("release guide") != std::string::npos)
+            r.rows(kGuideSlot, 2, {{kBox, 1}});
+    }
+    bool spaced = requests.size() >= 2 && overs.size() >= 2;
+    for (size_t i = 1; i < requests.size(); i++)
+        spaced = spaced && requests[i] - requests[i - 1] >= SlotManager::kMinRequestGapMs;
+    for (size_t i = 1; i < overs.size(); i++)
+        spaced = spaced && overs[i] - overs[i - 1] >= SlotManager::kTakeOverMs[0];
+    ok("the map flapping every 150 ms for 20 s: requests at least 1 s apart, take-overs at least 1.5 s",
+       spaced && requests.size() <= 20 && overs.size() <= 14);
+    r.m.want(0, false, false);
+    r.pass(30);
+    ok("and the map left hidden: the hold released, idle", r.state(GuideRig::kGuide) == TargetState::Idle);
+
+    /* The map shown and hidden every 2 s for 60 s: the hold never shown
+     * 10 s, its take-overs on their steps. */
+    GuideRig f;
+    f.rows(kGuideSlot, 2, {{kBox, 1}});
+    f.show_map();
+    joined();
+    std::vector<int64_t> takes;
+    for (int k = 0; k < 6000; k++) {
+        if (k % 200 == 0)
+            f.m.want(0, (k / 200) % 2 == 0, true);
+        f.pass();
+        const std::string c = joined();
+        if (c.find("request guide") != std::string::npos) {
+            f.rows(kGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}});
+            f.m.on_parked(kGuideScene, f.now);
+        }
+        if (c.find("take over guide 0x1000310") != std::string::npos) {
+            takes.push_back(f.now);
+            f.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBox, 3}});
+            f.m.on_shown(kGuideScene, f.now);
+        }
+        if (c.find("release guide") != std::string::npos)
+            f.rows(kGuideSlot, 2, {{kBox, 1}});
+    }
+    bool stepped = takes.size() >= 6;
+    for (size_t i = 1; i < takes.size(); i++)
+        stepped = stepped && takes[i] - takes[i - 1] >= SlotManager::kTakeOverMs[std::min<size_t>(i - 1, 5)];
+    ok("the map flapping every 2 s for 60 s: take-overs 1.5 s apart four times, then 10 s, then 30 s",
+       stepped && takes.size() <= 7);
+}
+
+/* guide_slots = auto: the hold goes to 0x103 or 0x105, whichever the table
+ * reports the box in, or before the box shows, the one the HMI chooses, with
+ * the one scene id. */
+static const uint64_t kOtherGuideSlot = 0x103;
+
+/* The hold, wanted with the map shown and the box shown in slot, asked for
+ * there and shown, then the display service gone 2 s later and back. */
+static void map_then_drop(GuideRig &r, uint64_t slot)
+{
+    r.port.up = true;
+    r.m.on_availability(true, r.now);
+    r.rows(slot, 2, {{kBox, 1}});
+    r.show_map();
+    r.pass(2000);
+    r.rows(kMapSlot, 2, {{kMapScene, 1}});
+    r.m.on_shown(kMapScene, r.now);
+    r.pass();
+    r.rows(slot, 2, {{kGuideScene, 1}, {kBox, 3}});
+    r.m.on_shown(kGuideScene, r.now);
+    r.pass(2000);
+    r.port.up = false;
+    r.m.on_availability(false, r.now);
+}
+
+static void guide_auto_slot()
+{
+    /* A 2021 X5 G05 (US, 2026-11-04): 0x105 reported disabled and empty,
+     * the box shown in 0x103 with the seat-belt panel parked behind it. */
+    GuideRig r(true);
+    logged();
+    r.slot(kGuideSlot, 0, 0);
+    r.rows(kOtherGuideSlot, 2, {{kBelt, 3}, {kBox, 1}});
+    ok("auto, the box in 0x103 and 0x105 disabled: the hold's slot is 0x103, logged with the rows",
+       r.guide_slot() == kOtherGuideSlot &&
+           logged().find("target guide: hold moves to slot 0x103, where the slot table reports 0x1000310 (class 0, "
+                         "map status 1) (no slot before); ours 0x10004f1; slot 0x103 status 2: 0x1000314 class 0 "
+                         "map 3, 0x1000310 class 0 map 1") != std::string::npos);
+    r.pass(3000);
+    ok("auto: the map not shown, nothing asked for", requested_none(joined()));
+    r.show_map();
+    joined();
+    r.pass();
+    ok("the map shown: the hold asked for, in 0x103", calls_are("publish guide; request guide") &&
+                                                          r.state(GuideRig::kGuide) == TargetState::Acquiring);
+    r.rows(kOtherGuideSlot, 2, {{kBelt, 3}, {kBox, 1}, {kGuideScene, 3}});
+    r.m.on_parked(kGuideScene, r.now);
+    joined();
+    logged();
+    r.pass();
+    ok("parked in 0x103: the box taken over, the seat-belt panel left alone",
+       calls_are("take over guide 0x1000310; slots?") &&
+           logged().find("unmapping the stock HMI's 0x1000310 (class 0, map status 1) in slot 0x103 as the HMI; the "
+                         "next") != std::string::npos);
+    r.rows(kOtherGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}, {kBox, 3}});
+    r.m.on_shown(kGuideScene, r.now);
+    r.slot(kGuideSlot, 0, 0);
+    r.pass(60000);
+    ok("held in 0x103 a minute, the box parked behind it, 0x105 still disabled: no traffic, not moved",
+       calls_are("") && r.state(GuideRig::kGuide) == TargetState::Shown && r.guide_slot() == kOtherGuideSlot);
+    r.m.want(0, false, false);
+    r.pass(30);
+    ok("the map hidden: released", calls_are("release guide") && r.state(GuideRig::kGuide) == TargetState::Idle);
+    r.rows(kOtherGuideSlot, 1, {{kBelt, 3}, {kBox, 0}});   /* the route over: the box listed, unmapped */
+    r.pass(100);
+    ok("the box unmapped: the hold keeps 0x103", r.guide_slot() == kOtherGuideSlot);
+
+    /* The owner's car (2026-11-03): the box in 0x105, 0x103 disabled. */
+    GuideRig f(true);
+    f.slot(kOtherGuideSlot, 0, 0);
+    f.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    f.show_map();
+    joined();
+    f.pass();
+    ok("auto, the box in 0x105 and 0x103 disabled: asked for in 0x105",
+       f.guide_slot() == kGuideSlot && calls_are("publish guide; request guide"));
+    f.rows(kGuideSlot, 2, {{kBox, 1}, {kBelt, 3}, {kGuideScene, 3}});
+    f.m.on_parked(kGuideScene, f.now);
+    joined();
+    f.pass();
+    ok("parked: the box taken over, the seat-belt panel left alone, as with guide_slots = 0x105",
+       calls_are("take over guide 0x1000310; slots?"));
+
+    /* 0x105 and 0x103 disabled, the box nowhere the hold follows it. */
+    GuideRig a(true);
+    a.slot(kGuideSlot, 0, 0);
+    a.rows(kOtherGuideSlot, 0, {{kBox, 0}});   /* listed, unmapped */
+    a.rows(0x104, 2, {{kBox, 1}});
+    a.rows(0x203, 2, {{kBoxAlt, 1}});
+    a.show_map();
+    joined();
+    a.pass(40000);
+    ok("auto, 0x105 and 0x103 disabled, the box shown only in 0x104 and 0x203 (another target's): never asked for, "
+       "waiting as \"no slot: 0x105 0x103 not reported enabled\"",
+       requested_none(joined()) && a.guide_slot() == 0 && a.state(GuideRig::kGuide) == TargetState::Waiting &&
+           a.m.status(GuideRig::kGuide).reason == "no slot: 0x105 0x103 not reported enabled");
+    a.rows(kOtherGuideSlot, 0, {{kBox, 1}});
+    a.pass(100);
+    ok("the box in 0x103 reported disabled: not followed", a.guide_slot() == 0 && requested_none(joined()));
+    a.rows(kOtherGuideSlot, 2, {{kBox, 1}});
+    a.pass();
+    ok("the box shown in 0x103: asked for there at once", calls_are("publish guide; request guide") &&
+                                                              a.guide_slot() == kOtherGuideSlot);
+    a.rows(0x104, 2, {{kBox, 1}});
+    a.rows(kOtherGuideSlot, 1, {{kBox, 0}});
+    a.pass(100);
+    ok("then the box in 0x104 only: the hold stays in 0x103", a.guide_slot() == kOtherGuideSlot &&
+                                                                 calls_are(""));
+
+    /* The box moving while held. */
+    GuideRig v(true);
+    v.rows(kGuideSlot, 2, {{kBox, 1}});
+    v.show_map();
+    v.hold();
+    joined();
+    logged();
+    v.rows(kOtherGuideSlot, 2, {{kBox, 1}});
+    ok("held in 0x105, the box shown in 0x103: released from 0x105 in the same report, idle",
+       calls_are("release guide") && v.guide_slot() == kOtherGuideSlot &&
+           v.state(GuideRig::kGuide) == TargetState::Idle &&
+           logged().find("target guide: hold moves to slot 0x103, where the slot table reports 0x1000310 (class 0, "
+                         "map status 1) (was slot 0x105, released there)") != std::string::npos);
+    v.pass(1000);
+    ok("then asked for in 0x103, once, the request gap kept", calls_are("request guide"));
+    v.rows(kGuideSlot, 1, {{kBox, 0}});
+    v.rows(kOtherGuideSlot, 2, {{kBox, 1}, {kGuideScene, 3}});
+    v.m.on_parked(kGuideScene, v.now);
+    joined();
+    v.pass();
+    ok("the box left listed unmapped in 0x105: not followed back; in 0x103 taken over",
+       v.guide_slot() == kOtherGuideSlot && calls_are("take over guide 0x1000310; slots?"));
+
+    /* Moved while waiting on the ladder: the wait carries over. */
+    GuideRig l(true);
+    l.rows(kGuideSlot, 2, {{kBox, 1}});
+    l.show_map();
+    l.pass();
+    joined();
+    l.m.on_refused(kGuideScene, Refusal::Transient, "no valid reply", l.now);
+    l.pass(2000);
+    ok("refused in 0x105: asked again after the ladder's 2 s", calls_are("release guide; request guide"));
+    l.m.on_refused(kGuideScene, Refusal::Transient, "no valid reply", l.now);
+    joined();
+    l.pass(100);
+    l.rows(kOtherGuideSlot, 2, {{kBox, 1}});
+    l.pass(4700);
+    ok("refused again, then the box in 0x103: still waiting, not asked for before the ladder's 5 s",
+       l.guide_slot() == kOtherGuideSlot && l.state(GuideRig::kGuide) == TargetState::Waiting && calls_are(""));
+    l.pass(300);
+    ok("then asked for in 0x103 at the end of that wait", calls_are("request guide"));
+
+    /* The box moving to and fro: each move a loss, never a fault; more than
+     * 3 within 60 s give the hold up, with no strike. */
+    const std::string path = "/tmp/crs-slots-auto-" + std::to_string(getpid()) + ".txt";
+    unlink(path.c_str());
+    Guard g;
+    g.load(path, "t", "boot-1");
+    GuideRig p(true);
+    p.m.set_guard(&g);
+    p.rows(kGuideSlot, 2, {{kBox, 1}});
+    p.show_map();
+    logged();
+    int moves = 0;
+    for (int k = 0; k < 6; k++) {
+        bool asked = false;
+        for (int64_t w = 0; w < 10000 && !asked; w += 100) {
+            p.pass(100);
+            asked = joined().find("request guide") != std::string::npos;
+        }
+        if (!asked)
+            break;
+        const uint64_t at = p.guide_slot(), to = at == kGuideSlot ? kOtherGuideSlot : kGuideSlot;
+        p.rows(at, 2, {{kGuideScene, 1}, {kBox, 3}});
+        p.m.on_shown(kGuideScene, p.now);
+        p.rows(at, 1, {{kGuideScene, 1}});
+        p.rows(to, 2, {{kBox, 1}});
+        moves++;
+    }
+    p.pass(120000);
+    ok("the box moving between 0x105 and 0x103 while held: given up after 4 moves, no guard strike",
+       moves == 4 && requested_none(joined()) && g.status_text().empty() &&
+           logged().find("target guide: hold given up: its scene moved with the box to another slot, 4 losses "
+                         "within 60 s") != std::string::npos);
+    GuideRig w(true);
+    w.m.set_guard(&g);
+    w.rows(kGuideSlot, 2, {{kBox, 1}});
+    w.pass(2000);
+    w.slot(kGuideSlot, 0, 0);   /* a move from a locked slot counts too */
+    for (int k = 0; k < 4; k++) {
+        w.rows(k % 2 ? kGuideSlot : kOtherGuideSlot, 2, {{kBox, 1}});
+        w.pass(2000);
+    }
+    w.show_map();
+    joined();
+    w.pass(60000);
+    ok("the box moving 4 times within 60 s while the map is hidden: given up, never asked for, no strike",
+       requested_none(joined()) && g.status_text().empty());
+
+    /* The guard: one mapping whichever slot the hold is in, so a car whose
+     * KOMBI drops Dcsm2 at the hold's mapping restarts twice at most. */
+    unlink(path.c_str());
+    {
+        Guard d;
+        d.load(path, "t", "boot-1");
+        GuideRig e(true);
+        e.m.set_guard(&d);
+        map_then_drop(e, kGuideSlot);
+        ok("the display service gone 2 s after the hold's mapping in 0x105: one strike against guide auto",
+           d.status_text() == "guard: guide auto 0x10004f1 0: 1 strike\n" && !e.m.hold_disabled(0));
+        map_then_drop(e, kOtherGuideSlot);
+        ok("then 2 s after its mapping in 0x103: the second strike, disabled",
+           d.status_text() == "guard: guide auto 0x10004f1 0: disabled, 2 strikes\n" && e.m.hold_disabled(0));
+        joined();
+        e.port.up = true;
+        e.m.on_availability(true, e.now);
+        e.rows(kGuideSlot, 2, {{kBox, 1}});
+        e.show_map();
+        e.pass(30000);
+        ok("then the box in 0x105 again: never asked for, the map told",
+           joined().find("guide") == std::string::npos && e.m.hold_disabled(0));
+    }
+    {
+        Guard d;
+        d.load(path, "t", "boot-2");
+        GuideRig e(true);
+        e.m.set_guard(&d);
+        e.rows(kOtherGuideSlot, 2, {{kBox, 1}});
+        e.show_map();
+        joined();
+        e.pass(30000);
+        e.rows(kGuideSlot, 2, {{kBox, 1}});
+        e.pass(30000);
+        ok("the next boot: the box in 0x103, then 0x105, never asked for, the map told",
+           requested_none(joined()) && e.m.hold_disabled(0) && e.state(0) == TargetState::Shown);
+    }
+    unlink(path.c_str());
+
+    /* The seat-belt warning in the followed slot. */
+    GuideRig b(true);
+    b.rows(kOtherGuideSlot, 2, {{kBox, 1}, {kBelt, 3}});
+    b.show_map();
+    b.pass();
+    b.rows(kOtherGuideSlot, 2, {{kGuideScene, 1}, {kBelt, 3}, {kBox, 3}});
+    b.m.on_shown(kGuideScene, b.now);
+    joined();
+    b.rows(kOtherGuideSlot, 2, {{kBelt, 1}, {kGuideScene, 3}, {kBox, 3}});
+    b.m.on_parked(kGuideScene, b.now);
+    b.pass();
+    ok("auto, the seat-belt panel shown over the hold in 0x103: released at once, never taken over, not moved",
+       calls_are("slots?; release guide") && b.state(GuideRig::kGuide) == TargetState::Idle &&
+           b.guide_slot() == kOtherGuideSlot);
+    b.rows(kOtherGuideSlot, 2, {{kBelt, 1}, {kBox, 3}});
+    b.pass(10000);
+    ok("not asked for while it is shown", calls_are(""));
+    b.rows(kOtherGuideSlot, 2, {{kBelt, 0}, {kBox, 1}});
+    b.pass();
+    ok("the warning over: asked for again in 0x103", calls_are("request guide"));
+
+    /* The first table, the box in neither slot yet: the HMI's choice,
+     * 0x105 when it is enabled, else 0x103. */
+    auto first = [](GuideRig &g, uint32_t s105, uint32_t s103) {
+        SlotInfo m, a, b;
+        m.slot = kMapSlot; m.status = 2; m.content = kStockMap; m.map_status = 1;
+        a.slot = kGuideSlot; a.status = s105;
+        b.slot = kOtherGuideSlot; b.status = s103;
+        g.m.on_slots({m, b, a}, g.now);
+    };
+    GuideRig o(true);
+    logged();
+    first(o, 1, 0);
+    ok("the first table, 0x105 available and 0x103 disabled, no box: the hold's slot is 0x105, logged",
+       o.guide_slot() == kGuideSlot &&
+           logged().find("target guide: hold moves to slot 0x105, the first of the box's slots the slot table "
+                         "reports enabled (status 1) (no slot before)") != std::string::npos);
+    o.show_map();
+    joined();
+    o.pass();
+    o.rows(kGuideSlot, 2, {{kGuideScene, 1}});
+    o.m.on_shown(kGuideScene, o.now);
+    ok("the map shown: asked for in 0x105 before the box", calls_are("publish guide; request guide") &&
+                                                              o.state(GuideRig::kGuide) == TargetState::Shown);
+    o.rows(kGuideSlot, 2, {{kGuideScene, 1}, {kBox, 3}, {kBelt, 3}});
+    o.pass(20000);
+    ok("then the box mapped, parked behind ours: no take-over, not moved, still shown",
+       calls_are("") && o.guide_slot() == kGuideSlot && o.state(GuideRig::kGuide) == TargetState::Shown);
+    GuideRig c(true);
+    first(c, 0, 1);
+    c.show_map();
+    joined();
+    c.pass();
+    ok("the first table, 0x105 disabled and 0x103 available, no box: asked for in 0x103",
+       c.guide_slot() == kOtherGuideSlot && calls_are("publish guide; request guide"));
+    GuideRig both(true);
+    first(both, 2, 1);
+    ok("both enabled, no box: 0x105", both.guide_slot() == kGuideSlot);
+    GuideRig none(true);
+    first(none, 0, 0);
+    none.show_map();
+    joined();
+    none.pass(10000);
+    ok("both disabled, no box: no slot, never asked for", none.guide_slot() == 0 && requested_none(joined()));
+    first(none, 0, 1);
+    none.pass();
+    ok("then 0x103 reported available: asked for there", none.guide_slot() == kOtherGuideSlot &&
+                                                            calls_are("publish guide; request guide"));
+    first(none, 1, 1);
+    none.pass(100);
+    ok("then 0x105 available too, no box: the hold keeps 0x103", none.guide_slot() == kOtherGuideSlot);
+
+    /* An explicit slot keeps its slot whatever the table says. */
+    GuideRig x;
+    x.slot(kGuideSlot, 0, 0);
+    x.rows(kOtherGuideSlot, 2, {{kBox, 1}});
+    x.show_map();
+    joined();
+    x.pass(10000);
+    ok("guide_slots = 0x105, the box in 0x103 and 0x105 disabled: never asked for, waiting as \"slot locked\"",
+       requested_none(joined()) && x.guide_slot() == kGuideSlot &&
+           x.m.status(GuideRig::kGuide).reason == "slot locked");
+}
+
 int main()
 {
     refcount_and_linger();
@@ -1352,6 +2590,7 @@ int main()
     multi_row_holder();
     parked_then_shown();
     take_over();
+    take_over_allowlist();
     lock_then_take_overs();
     brief_shows_back_off();
     take_overs_restart_when_shown();
@@ -1365,6 +2604,20 @@ int main()
     fresh_fetch_failed();
     removal_retry();
     rendering();
+    guide_follows_the_map();
+    guide_queue_order();
+    guide_never_verified_out();
+    guide_live_route();
+    guide_yields();
+    guide_door_lock();
+    guide_take_over_settle();
+    take_over_lists_are_separate();
+    guide_gives_up();
+    guide_slot_disabled();
+    guide_guard();
+    guide_gives_up_twice();
+    guide_no_flapping();
+    guide_auto_slot();
     std::printf(failures ? "%d FAILED\n" : "all ok\n", failures);
     return failures ? 1 : 0;
 }

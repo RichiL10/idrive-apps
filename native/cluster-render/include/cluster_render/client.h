@@ -17,7 +17,12 @@
  * last settings: uniforms, mesh parts with their geometry and transforms,
  * binds and animations; on_ready() then asks the app for its content.
  * Frames are newest-wins per layer: a video frame not yet sent is replaced
- * by the next, so a producer never queues behind the display; an image
+ * by the next, so a producer never queues behind the display. A video
+ * layer's last frame is kept once sent (and over a reconnect), so a frame
+ * whose picture is that one again goes as a repeat (a few bytes; one per
+ * layer waits, and a whole frame queued after it drops it), or that frame
+ * whole to a service that has not had it on this connection, refused the
+ * layer, or takes no repeats; an image
  * layer or an asset is kept here whole, and what changed since it was last
  * sent goes as one update when the socket takes it (and the whole of it
  * again after a reconnect). Control messages, geometry included, keep their
@@ -29,6 +34,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -46,6 +52,7 @@ struct LayerOptions {
     bool exclusive = false;          /* hides every layer below it while drawn */
     bool prewarm = false;            /* asks for the slot before the first content */
     bool contend = false;            /* retries a slot the stock HMI takes */
+    bool guide_hold = true;          /* false: the stock HMI's guidance box shows while this layer wants the map */
     float opacity = 1.0f;
     /* Video, image and effect layers: turned (degrees clockwise) and scaled about
      * the pivot, in pixels from the layer's top-left (its centre unless
@@ -195,6 +202,14 @@ public:
      * undefined. False, and *atlas untouched, while not connected or for a
      * wrong size. */
     bool frame(uint32_t ref, std::vector<uint8_t> *atlas, uint64_t id);
+    /* A video frame whose picture is the layer's last frame's again, byte for
+     * byte. False while not connected, or when the layer has had no frame. */
+    bool repeat(uint32_t ref, uint64_t id);
+    /* A copy of the newest frame a video layer was given into *out; false
+     * when it has had none. */
+    bool latest(uint32_t ref, std::vector<uint8_t> *out) const;
+    /* A frame of the layer waits to be sent. */
+    bool frame_waiting(uint32_t ref) const { return frames_.count(ref) != 0; }
     /* An image or asset update: rects of rows packed one rect after
      * another, or no rects and the whole image. False when a rect is
      * outside the image or n does not match. */
@@ -205,6 +220,9 @@ public:
     std::function<void(const std::string &target, const std::string &state, const std::string &holder,
                        const std::string &reason)>
         on_target;
+    /* By target, from its last target event (before on_target): a guide
+     * hold following it is disabled (PROTOCOL.md). */
+    std::map<std::string, bool> guide_disabled;
     std::function<void(const std::string &op, uint32_t ref, const std::string &reason)> on_error;
     /* The shared upload cap changed (governor): KB/s now, the ceiling, why. */
     std::function<void(unsigned cap_kb, unsigned max_kb, const std::string &reason)> on_budget;
@@ -241,6 +259,8 @@ private:
         size_t dirty_bytes = 0;
         bool whole = false;              /* all of it is to be sent */
         bool have = false;               /* the app has drawn it */
+        std::vector<uint8_t> last;       /* a video layer's last frame sent, or the newest given before a reconnect */
+        bool sent = false;               /* a video frame of it went whole on this connection */
     };
     static const size_t kMaxDirty = 16;
 
@@ -274,6 +294,9 @@ private:
     };
     /* A buffer of n bytes into *v: a spare one, else a new one. */
     void take_spare(std::vector<uint8_t> *v, size_t n);
+    /* *px, a frame of the video layer ref, becomes its last; the one it
+     * replaces (or *px, for a layer gone) becomes a spare. */
+    void keep_last(uint32_t ref, std::vector<uint8_t> *px);
     bool video_frame_ok(uint32_t ref, size_t n) const;
 
     /* The message being written: cur_, then a frame's pixels in cur_px_,
@@ -283,9 +306,13 @@ private:
     size_t cur_off_ = 0;
     std::deque<std::string> ctl_;
     std::map<uint32_t, Frame> frames_;   /* the newest unsent frame per layer */
+    /* Layers with a repeat to send, one each, before control messages: a
+     * whole frame queued after it drops it. */
+    std::set<uint32_t> repeats_due_;
     std::vector<std::vector<uint8_t>> spare_;   /* frame buffers sent, to fill again, oldest first */
     static const size_t kMaxSpare = 4;
-    uint32_t last_frame_ref_ = 0;
+    uint32_t last_frame_ref_ = 0;   /* the layer whose frame went last; cur_px_'s while it is sent */
+    bool repeats_ = false;          /* the service takes repeats (its hello) */
 };
 
 }  // namespace cr
