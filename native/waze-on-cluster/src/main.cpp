@@ -75,10 +75,6 @@ const char *const kIgnoredKeys[] = {"tex_format",         "upload",          "di
 volatile sig_atomic_t g_stop;
 void on_signal(int) { g_stop = 1; }
 
-/* After a fatal device failure the process ends within this many ms even if
- * the teardown blocks on the hung GPU (exit_watchdog.h). */
-const int kExitWatchdogMs = 8000;
-
 std::string status_line(const FeedStatus &s)
 {
     return "{\"ev\":\"status\",\"state\":" + json_escape(s.state) + ",\"target\":" + json_escape(s.target) +
@@ -257,7 +253,10 @@ int serve(const Config &cfg)
         if (producer.device_fatal()) {
             exit_code = 1;   /* logged by the producer; systemd restarts the service */
             /* A hung GPU can make the teardown (MFXClose) block for good: end the
-             * process with the same code after a few seconds whatever happens. */
+             * process with the same code after a few seconds whatever happens.
+             * The producer's DeviceGuard armed it already when it published the
+             * failure (a main loop blocked elsewhere never gets here); this is
+             * then a no-op (exit_watchdog.h). */
             arm_exit_watchdog(kExitWatchdogMs, 1);
             break;
         }

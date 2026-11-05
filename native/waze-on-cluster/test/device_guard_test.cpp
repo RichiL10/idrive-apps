@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -54,6 +55,21 @@ static void isolated(const char *what, const std::function<void()> &body)
         fprintf(stderr, "FAIL: %s\n", what);
         failures++;
     }
+}
+
+/* The exit function the watchdog calls in these tests, instead of _exit. */
+static std::atomic<int> g_exits{0}, g_exit_code{-1};
+static void test_exit(int code)
+{
+    g_exit_code = code;
+    g_exits++;
+}
+
+static bool wait_exit(int ms)
+{
+    for (int i = 0; i < ms / 10 && g_exits == 0; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return g_exits > 0;
 }
 
 static void any_fault(const char *call, int status, int after = 0, int times = 0)
@@ -146,6 +162,78 @@ int main()
         d.shutdown();
         clear_faults();
     }
+
+    /* Review N1: the exit watchdog is armed by the fatal publication itself.
+     * Nothing polls fatal() here (a main loop blocked elsewhere), MFXClose
+     * never returns, and the watchdog still fires, once, with its code. The
+     * exit function and the grace period are the test's. In a child process:
+     * the watchdog is one-shot per process. */
+    isolated("the third device failure arms the exit watchdog while MFXClose hangs", [] {
+        clear_faults();
+        g_exits = 0;
+        Decoder d;
+        DeviceGuard g;
+        g.attach(&d);
+        g.set_exit_watchdog(150, 1, test_exit);
+        any_fault("DecodeFrameAsync", MFX_ERR_GPU_HANG);
+        for (int i = 0; i < 2; i++) {
+            expect(start(&d, &g), "decoder starts");
+            feed_one(&d);
+            d.shutdown();
+        }
+        expect(!g.fatal() && !wait_exit(400), "two failures: not fatal, the watchdog is not armed");
+
+        std::mutex m;
+        std::condition_variable cv;
+        bool release = false;
+        fake_msdk::on_close = [&] {
+            std::unique_lock<std::mutex> lock(m);
+            cv.wait_for(lock, std::chrono::seconds(20), [&] { return release; });
+        };
+        expect(start(&d, &g), "decoder starts the third time");
+        std::thread feeder([&] { feed_one(&d); });   /* stuck in MFXClose */
+        const bool fired = wait_exit(5000);
+        expect(fired, "the watchdog fired while MFXClose was still blocked");
+        expect(g.fatal(), "the failure is published");
+        expect(g_exit_code == 1, "with exit code 1");
+        {
+            std::lock_guard<std::mutex> lock(m);
+            release = true;
+        }
+        cv.notify_all();
+        feeder.join();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        expect(g_exits == 1, "and only once");
+        d.shutdown();
+        clear_faults();
+    });
+    isolated("a start that fails on a lost device three times in a row arms it too", [] {
+        clear_faults();
+        g_exits = 0;
+        Decoder d;
+        DeviceGuard g;
+        g.attach(&d);
+        g.set_exit_watchdog(100, 1, test_exit);
+        any_fault("MFXInit", MFX_ERR_DEVICE_LOST);
+        start(&d, &g);
+        start(&d, &g);
+        expect(!wait_exit(300), "two: not armed");
+        start(&d, &g);
+        expect(g.fatal() && wait_exit(5000) && g_exit_code == 1, "the third arms it");
+        clear_faults();
+    });
+    isolated("a guard with no watchdog set never arms one", [] {
+        clear_faults();
+        g_exits = 0;
+        Decoder d;
+        DeviceGuard g;
+        g.attach(&d);
+        any_fault("MFXInit", MFX_ERR_DEVICE_LOST);
+        for (int i = 0; i < 3; i++)
+            start(&d, &g);
+        expect(g.fatal() && !wait_exit(300), "fatal, and nothing armed from the guard");
+        clear_faults();
+    });
 
     /* A slow close after one failure changes nothing about the count. */
     {
