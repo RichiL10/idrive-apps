@@ -103,6 +103,23 @@ int main()
     ok("the minute counts every buffer dropped", cm.overflows == 3 && cm.losses == 0);
     ok("and starts over", caps.take_minute().overflows == 0);
 
+    /* Review N2: the RTP layer's drops reach the log and the minute line. */
+    StreamHealth rtp;
+    ok("no RTP events: nothing logged or counted", rtp.rtp_events(1000, 0, 0, 0, 0).empty());
+    ok("RTP events are logged with their counts",
+       rtp.rtp_events(1000, 2, 1, 0, 0) ==
+           "waze: RTP: 2 late or duplicate packets dropped, 1 stray, 0 new streams, 0 resets after silence");
+    ok("an idle reset is logged", rtp.rtp_events(1001, 0, 0, 0, 1).find("1 resets after silence") != std::string::npos);
+    ok("a new stream is logged", rtp.rtp_events(1002, 0, 0, 1, 0).find("1 new streams") != std::string::npos);
+    ok("only a few RTP lines a minute", rtp.rtp_events(1003, 1, 0, 0, 0).empty());
+    ok("the RTP events do not make the stream lost", !rtp.lost() && rtp.reason().empty());
+    ok("the RTP lines do not use up the loss lines", !rtp.loss(1004, kWall, "avb", 1, 2, 1, 0).empty());
+    const StreamHealth::Minute rm = rtp.take_minute();
+    ok("the minute counts every RTP event, logged or not",
+       rm.late == 3 && rm.stray == 1 && rm.streams == 1 && rm.idle_resets == 1);
+    ok("and starts over", rtp.take_minute().late == 0);
+    ok("the next minute logs RTP events again", !rtp.rtp_events(61001, 1, 0, 0, 0).empty());
+
     StreamHealth burst;
     unsigned logged = 0;
     for (int i = 0; i < 25; i++)

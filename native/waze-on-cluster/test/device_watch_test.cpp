@@ -2,9 +2,13 @@
 // Copyright (C) 2026 Robert Nisipeanu
 /* DeviceWatch (device_watch.h): kLimit session failures in a row, with no
  * decoded frame between, are fatal. */
+#include <signal.h>
 #include <stdio.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "device_watch.h"
+#include "exit_watchdog.h"
 
 using woc::DeviceWatch;
 
@@ -54,6 +58,25 @@ int main()
         expect(w.failed(1), "the next one is");
     }
     expect(DeviceWatch::kLimit == 3, "three failures in a row");
+    {
+        /* Review N6: the watchdog ends a process whose teardown hangs, with the given code. */
+        const pid_t pid = fork();
+        if (pid == 0) {
+            woc::arm_exit_watchdog(200, 1);
+            woc::arm_exit_watchdog(60000, 7);   /* armed once: a second call changes nothing */
+            sleep(30);                          /* stands for a teardown stuck in MFXClose */
+            _exit(99);
+        }
+        int st = 0, waited = 0;
+        pid_t r = 0;
+        for (int i = 0; i < 100 && r == 0; i++) {
+            r = waitpid(pid, &st, WNOHANG);
+            if (r == 0) { usleep(50000); waited += 50; }
+        }
+        if (r == 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); }
+        expect(r == pid && WIFEXITED(st) && WEXITSTATUS(st) == 1, "the watchdog ends a hung process with its code (1)");
+        expect(waited < 4000, "and within its grace period, not at the end of the hang");
+    }
     if (failures) {
         fprintf(stderr, "device_watch_test: %d failures\n", failures);
         return 1;

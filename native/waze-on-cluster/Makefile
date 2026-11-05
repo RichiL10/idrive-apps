@@ -145,9 +145,9 @@ $(BUILD)/host/decoder_test: $(DEC_SRC) test/fake_msdk.h src/decoder_msdk.h src/s
 	mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -Isrc -I$(KIT) -I$(CR)/src -Iabi/include -o $@ $(DEC_SRC) -lpthread
 
-$(BUILD)/host/device_watch_test: test/device_watch_test.cpp src/device_watch.h
+$(BUILD)/host/device_watch_test: test/device_watch_test.cpp src/device_watch.h src/exit_watchdog.h
 	mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/device_watch_test.cpp
+	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/device_watch_test.cpp -lpthread
 
 $(BUILD)/host/map_rect_test: test/map_rect_test.cpp src/map_rect.h
 	mkdir -p $(@D)
@@ -206,7 +206,7 @@ $(BUILD)/host/alt_screen_test: test/alt_screen_test.cpp src/alt_screen.cpp src/a
 	mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/alt_screen_test.cpp src/alt_screen.cpp
 
-$(BUILD)/host/packet_queue_test: test/packet_queue_test.cpp src/packet_queue.h
+$(BUILD)/host/packet_queue_test: test/packet_queue_test.cpp src/packet_queue.h src/arrival_time.h
 	mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/packet_queue_test.cpp -lpthread
 

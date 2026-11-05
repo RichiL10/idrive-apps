@@ -246,6 +246,8 @@ struct Decoder::State {
     {
         if (!session_gpu_copy || cpu_layout)
             note(sts);
+        else if (sts == MFX_ERR_GPU_HANG || sts == MFX_ERR_DEVICE_LOST)
+            note(sts);   /* a hung or lost device is not how a failing copy shows */
     }
     /* The session is beyond use: close it now and count it. */
     void device_lost()

@@ -39,6 +39,7 @@
 #include "alt_screen.h"
 #include "config.h"
 #include "control.h"
+#include "exit_watchdog.h"
 #include "guide_setting.h"
 #include "head_unit.h"
 #include "log.h"
@@ -73,6 +74,10 @@ const char *const kIgnoredKeys[] = {"tex_format",         "upload",          "di
 
 volatile sig_atomic_t g_stop;
 void on_signal(int) { g_stop = 1; }
+
+/* After a fatal device failure the process ends within this many ms even if
+ * the teardown blocks on the hung GPU (exit_watchdog.h). */
+const int kExitWatchdogMs = 8000;
 
 std::string status_line(const FeedStatus &s)
 {
@@ -251,6 +256,9 @@ int serve(const Config &cfg)
             break;
         if (producer.device_fatal()) {
             exit_code = 1;   /* logged by the producer; systemd restarts the service */
+            /* A hung GPU can make the teardown (MFXClose) block for good: end the
+             * process with the same code after a few seconds whatever happens. */
+            arm_exit_watchdog(kExitWatchdogMs, 1);
             break;
         }
         if (control.owner_fd() >= 0 && (p[2].revents & (POLLIN | POLLHUP | POLLERR)))
@@ -295,9 +303,11 @@ int serve(const Config &cfg)
             if (producer.minute(now, &m, &sm, &bm, &overflows))
                 log_info("waze: %u frames decoded in the last minute, %u without a picture to catch up, %u changed, "
                          "%u corrupted; the last picture is %s; %u losses (%u packets), %llu dropped by the receive "
-                         "queue, %u buffers dropped at their size cap; packets waited %.1f ms on average, %lld ms at most",
+                         "queue, %u buffers dropped at their size cap; RTP: %u late or duplicate, %u stray, %u new "
+                         "streams, %u resets after silence; packets waited %.1f ms on average, %lld ms at most",
                          m.frames + bm.skipped, bm.skipped, m.changed, sm.corrupted, m.blank ? "blank" : "not blank",
-                         sm.losses, sm.lost, (unsigned long long)overflows, sm.overflows, bm.wait_us.mean() / 1000.0,
+                         sm.losses, sm.lost, (unsigned long long)overflows, sm.overflows, sm.late, sm.stray,
+                         sm.streams, sm.idle_resets, bm.wait_us.mean() / 1000.0,
                          (long long)(bm.wait_us.max / 1000));
             producer.track_keyframe_wait(now);
             const std::string detail = producer.stream_detail();

@@ -407,6 +407,33 @@ int main()
         r.feed(nullptr, false, 7);
         expect(r.dec.device_failures() == 1 && !r.dec.decoding(), "a device status with the CPU copy closes it");
     });
+    /* Review N1: a hung or lost device in a VPP run is the device's even in a
+     * session with GPU copy that still counts a lost copy as a lost picture;
+     * only MFX_ERR_DEVICE_FAILED stays ambiguous there. */
+    for (const int status : {MFX_ERR_GPU_HANG, MFX_ERR_DEVICE_LOST}) {
+        isolated("a hang or a lost device in a VPP run with GPU copy closes the session at once", [status] {
+            any_fault({"VPP_Run", status, 1, 1});
+            Run r("", 0, true);
+            r.sequence(kCarPlay, 4, 1);
+            expect(r.pictures == std::vector<uint8_t>({1}) && r.dec.device_failures() == 1 && !r.dec.decoding(),
+                   "counted at the first failure, waiting for an SPS");
+            r.sequence(kCarPlay, 2, 10);
+            expect(r.dec.device_failures() == 1 && r.dec.decoding() && count("session") == 2, "the next SPS starts a new session");
+        });
+        isolated("a hang or a lost device in the wait for VPP with GPU copy closes the session at once", [status] {
+            any_fault({"vpp-sync", status, 1, 1});
+            Run r("", 0, true);
+            r.sequence(kCarPlay, 4, 1);
+            expect(r.pictures == std::vector<uint8_t>({1}) && r.dec.device_failures() == 1 && !r.dec.decoding(),
+                   "counted at the first failure, waiting for an SPS");
+        });
+    }
+    isolated("MFX_ERR_DEVICE_FAILED in the wait for VPP with GPU copy stays a lost picture", [] {
+        any_fault({"vpp-sync", MFX_ERR_DEVICE_FAILED, 1, 1});
+        Run r("", 0, true);
+        r.sequence(kCarPlay, 4, 1);
+        expect(r.dec.device_failures() == 0 && r.dec.decoding(), "not a device failure while the copy may be the cause");
+    });
     if (failures) {
         fprintf(stderr, "decoder_test: %d failures\n", failures);
         return 1;

@@ -7,6 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "arrival_time.h"
 #include "log.h"
 #include "yuv_atlas.h"
 
@@ -219,15 +220,24 @@ void VideoProducer::feed_datagram(const PacketQueue::Packet &p)
         probe_.record_rtp(data, len);
         std::lock_guard<std::mutex> lock(decode_mutex_);
         packet_ = &p;
-        const uint64_t before = rtp_.stats().overflows;
+        const RtpH264::Stats before = rtp_.stats();
         /* When it arrived, not when it was taken off the queue: a decoder
          * running behind is not silence on the wire. */
-        rtp_.arrival(cld::now_ms() - (int64_t)(p.waited_us / 1000), rtp_sink_);
+        rtp_.arrival(arrival_ms(cld::now_ms(), p.waited_us), rtp_sink_);
         rtp_.push(data, len, rtp_sink_);
         packet_ = nullptr;
-        if (const uint64_t n = rtp_.stats().overflows - before) {
+        const RtpH264::Stats &after = rtp_.stats();
+        const uint32_t n = (uint32_t)(after.overflows - before.overflows);
+        const uint32_t late = (uint32_t)(after.late - before.late), stray = (uint32_t)(after.stray - before.stray);
+        const uint32_t streams = (uint32_t)(after.streams - before.streams);
+        const uint32_t idle = (uint32_t)(after.idle_resets - before.idle_resets);
+        if (n || late || stray || streams || idle) {
             std::lock_guard<std::mutex> flock(frame_mutex_);
-            const std::string line = health_.overflow(cld::now_ms(), "RTP fragment buffer (FU-A)", (uint32_t)n);
+            const int64_t now = cld::now_ms();
+            std::string line = health_.overflow(now, "RTP fragment buffer (FU-A)", n);
+            if (!line.empty())
+                log_warn("%s", line.c_str());
+            line = health_.rtp_events(now, late, stray, streams, idle);
             if (!line.empty())
                 log_warn("%s", line.c_str());
         }
