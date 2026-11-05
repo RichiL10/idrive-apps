@@ -436,6 +436,38 @@ static void new_ssrc_new_stream()
     CHECK(outcomes == std::vector<int>{GapSettler::NewStream});
 }
 
+/* A new SSRC whose first timestamp equals the old stream's last one, with the
+ * old stream's access unit still open (no marker, no later timestamp): the
+ * old unit ends at the switch, so its slice does not join the new stream's
+ * SPS, PPS and IDR. */
+static void new_ssrc_same_timestamp_closes_au()
+{
+    Opt a, b;
+    a.ssrc = 0xaaaaaaaa;
+    b.ssrc = 0xbbbbbbbb;
+    RtpH264 r;
+    Out o;
+    push(r, o, rtp(100, 5000, false, kP, a));    /* an open VCL access unit of the old stream */
+    push(r, o, rtp(7, 5000, true, kSps, b));     /* the new stream starts at the same timestamp */
+    std::vector<Bytes> probation = {annexb(kP)};
+    CHECK(o.ev == probation);   /* on probation: nothing yet */
+    push(r, o, rtp(8, 5000, true, kPps, b));
+    push(r, o, rtp(9, 5000, false, kIdr, b));
+    push(r, o, rtp(10, 6500, false, kP, b));
+    std::vector<Bytes> want = {annexb(kP), kAuEnd, annexb(kSps), annexb(kPps), annexb(kIdr), kAuEnd, annexb(kP)};
+    CHECK(o.ev == want);
+    CHECK(r.stats().streams == 1 && r.stats().aus == 2);
+
+    /* Nothing open at the switch: no extra access unit end. */
+    RtpH264 r2;
+    Out o2;
+    push(r2, o2, rtp(100, 5000, true, kP, a));   /* marked: ends its own unit */
+    push(r2, o2, rtp(7, 5000, true, kSps, b));
+    push(r2, o2, rtp(8, 5000, true, kPps, b));
+    std::vector<Bytes> want2 = {annexb(kP), kAuEnd, annexb(kSps), annexb(kPps)};
+    CHECK(o2.ev == want2);
+}
+
 static void stray_ssrc_ignored()
 {
     Opt a, b;
@@ -733,6 +765,7 @@ int main(int argc, char **argv)
     late_and_duplicate_dropped();
     backward_jump_rules();
     new_ssrc_new_stream();
+    new_ssrc_same_timestamp_closes_au();
     stray_ssrc_ignored();
     fu_a_size_cap();
     golden_stream15(argc > 1 ? argv[1] : "test/data/stream15_start.rtp");

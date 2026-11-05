@@ -40,6 +40,7 @@ VideoProducer::VideoProducer(const VideoConfig &cfg)
     : cfg_(cfg), atlas_bytes_((size_t)cfg.tex_width * atlas_height(cfg.tex_height)),
       change_(cfg.tex_width, cfg.tex_height), freeze_(cfg.freeze)
 {
+    device_.attach(&decoder_);
     rtp_sink_ = [this](const uint8_t *d, size_t n, bool end_of_au) { on_nal(d, n, end_of_au); };
     rtp_.on_gap = [this](const RtpH264::Gap &g) { gaps_.gap(g, packet_->source, packet_->dropped); };
     if (pipe2(ready_, O_NONBLOCK | O_CLOEXEC) < 0)
@@ -304,19 +305,18 @@ void VideoProducer::on_nal(const uint8_t *data, size_t len, bool end_of_au)
 
 bool VideoProducer::start_decoder(std::string *err)
 {
-    if (device_fatal_.load()) {
+    if (device_.fatal()) {
         *err = "the GPU decoder is beyond recovery; the service is exiting for systemd to restart it";
         return false;
     }
+    const uint64_t reported = device_.reported();
     if (!decoder_.init(cfg_.drm_device.c_str(), cfg_.tex_width, cfg_.tex_height, cfg_.tex_level_bits, cfg_.gpu_copy, err,
                        cfg_.src_crop)) {
-        /* After a device failure, a decoder that cannot even start is one
-         * more failure in a row. */
-        if (device_.in_a_row() > 0 && device_.failed(1)) {
-            device_fatal_ = true;
-            log_error("waze: the GPU decoder failed %u times in a row (the last: decoder start: %s); exiting for "
-                      "systemd to restart the service", DeviceWatch::kLimit, err->c_str());
-        }
+        /* A device status that kept the session from even starting was
+         * counted by the guard as it happened (the decoder's hook); after an
+         * earlier device failure, a decoder that cannot start for another
+         * reason is one more failure in a row. */
+        device_.init_failed(reported, *err);
         std::lock_guard<std::mutex> flock(frame_mutex_);
         last_err_ = *err;
         decode_errs_++;
@@ -338,20 +338,14 @@ void VideoProducer::decode(const uint8_t *data, size_t len, bool end_of_au)
         if (!line.empty())
             log_warn("%s", line.c_str());
     }
-    if (const uint64_t lost = decoder_.device_failures()) {
+    if (decoder_.device_failures()) {
         /* A GPU hang or a lost device: drop the whole decoder (session, VA
-         * display, render node) so the next SPS starts it afresh; kLimit in a
-         * row with no frame between are fatal (device_watch.h). */
+         * display, render node) so the next SPS starts it afresh. The failure
+         * was counted, and kLimit in a row with no frame between published as
+         * device_fatal() (device_guard.h), when it happened: before the
+         * teardown that may block on a hung GPU. */
         decoder_.shutdown();
         decoder_up_ = false;
-        if (device_.failed(lost)) {
-            device_fatal_ = true;
-            log_error("waze: the GPU decoder failed %u times in a row (the last: %s); exiting for systemd to "
-                      "restart the service", DeviceWatch::kLimit, derr.c_str());
-        } else {
-            log_warn("waze: the GPU decoder failed (%s); %llu in a row, the decoder starts again at the next SPS",
-                     derr.c_str(), (unsigned long long)device_.in_a_row());
-        }
     }
     const bool decoding = decoder_.decoding();
     if (ok && decoding == decoding_)
