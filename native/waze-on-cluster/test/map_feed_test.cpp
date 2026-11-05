@@ -111,6 +111,9 @@ struct Rig {
         crs::TargetSpec m, p, g;
         m.name = "map"; m.slot = 0x100; m.scene_id = 0x010004f0; m.width = 1088; m.height = 480; m.linger_ms = 1500;
         m.take_over_stock = true;   /* as cluster-render.conf ships it */
+        /* map_take_over_contents as shipped (the HMI's map) plus the stock content FakePort::steal
+         * maps (the same value cluster-render's own service tests list) */
+        m.take_over_contents = {0x01000300, 0x01000101};
         p.name = "panel"; p.slot = 0x203; p.scene_id = 0x01000400; p.width = 1920; p.height = 720; p.linger_ms = 3000;
         g.name = "guide_0x105"; g.slot = 0x105; g.scene_id = kGuide; g.width = g.height = 16; g.linger_ms = 0;
         g.take_over_stock = true; g.follows = "map"; g.take_over_contents = {kBox};
