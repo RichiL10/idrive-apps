@@ -17,7 +17,9 @@
  * once the holder is done; recovery (automatic) yields: its restore reports
  * a failure and keeps the counter, so the next boot retries.
  * (Kiro test change, S2: upstream broke ANY lock older than STALE_MS without
- * looking at the pid, so a slow but live holder lost it to a second writer.)
+ * looking at the pid, so a slow but live holder lost it to a second writer.
+ * Breaking is serialised by a second O_EXCL file, <lock>.break, and the lock
+ * is read again under it, so two waiters cannot both break one dead lock.)
  *
  * inUse(file) is whether a process runs file (a /proc/<pid>/exe is its
  * inode): such a file, once replaced, has to stay linked for / to go
@@ -53,16 +55,48 @@ function tryAcquire() {
         if (e.code === 'ENOENT') { try { ensureDir(path.dirname(LOCK)); } catch (e2) { return false; } return tryAcquire(); }
         if (e.code !== 'EEXIST') return false;
         try {
-            var gone = holderGone(fs.readFileSync(LOCK, 'utf8'));
-            var age = Date.now() - fs.statSync(LOCK).mtime.getTime();
-            if (gone === true || (gone === null && age > STALE_MS) || age > HUNG_MS) {
-                if (gone === false)
-                    console.error('remount lock: holder alive but holding for ' + Math.round(age / 1000) + ' s, taken as hung, lock broken');
-                fs.unlinkSync(LOCK);
-                return tryAcquire();
-            }
+            var seen = fs.readFileSync(LOCK, 'utf8');
+            if (breakable(seen) && breakDead(seen)) return tryAcquire();
         } catch (e3) {}
         return false;
+    }
+}
+
+/* Whether the lock a process read (text) is one to break: its holder is gone,
+ * or it holds no pid and is older than STALE_MS, or it is older than HUNG_MS. */
+function breakable(text) {
+    var gone = holderGone(text);
+    var age = Date.now() - fs.statSync(LOCK).mtime.getTime();
+    return gone === true || (gone === null && age > STALE_MS) || age > HUNG_MS;
+}
+
+/* Breaking is check-then-act, so two waiters that both read the same dead lock
+ * could each unlink it in turn: the second one would delete the first one's NEW
+ * lock and both would write at once. Breakers are therefore serialised by a
+ * second O_EXCL file, and under it the lock is read again: it is unlinked only
+ * if it is still the very lock that was judged dead. (Kiro test change, S2.)
+ * Returns true when the lock was removed by this call. */
+var BREAK_STALE_MS = 10000;
+function breakDead(seen) {
+    var guard = LOCK + '.break';
+    var fd;
+    try { fd = fs.openSync(guard, 'wx'); } catch (e) {
+        /* Another breaker is at work; a guard left by a breaker that died is old. */
+        try { if (Date.now() - fs.statSync(guard).mtime.getTime() > BREAK_STALE_MS) fs.unlinkSync(guard); } catch (e2) {}
+        return false;
+    }
+    try {
+        fs.closeSync(fd);
+        var now = fs.readFileSync(LOCK, 'utf8');
+        if (now !== seen || !breakable(now)) return false;   /* replaced or taken since: not ours to break */
+        if (holderGone(now) === false)
+            console.error('remount lock: holder alive but holding for ' + Math.round((Date.now() - fs.statSync(LOCK).mtime.getTime()) / 1000) + ' s, taken as hung, lock broken');
+        fs.unlinkSync(LOCK);
+        return true;
+    } catch (e3) {
+        return false;
+    } finally {
+        try { fs.unlinkSync(guard); } catch (e4) {}
     }
 }
 
@@ -111,4 +145,4 @@ function holds(link, target) {
     return !(b && a.ino === b.ino && a.dev === b.dev) && inUse(link);
 }
 
-module.exports = { acquire, release, tryAcquire, inUse, holds };
+module.exports = { acquire, release, tryAcquire, breakDead, inUse, holds };

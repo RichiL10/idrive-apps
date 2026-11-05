@@ -1676,6 +1676,49 @@ test('remount lock: acquire waits for a live holder up to its timeout, then give
     }
 });
 
+/* Review finding F2: two waiters that read the same dead lock must not both break it. */
+test('remount lock: a second waiter that read the same dead lock does not break the first waiter\'s new lock; breakers are serialised', () => {
+    const lockPath = path.join(ROOT, 'race.lock');
+    const env = { WOC_REMOUNT_LOCK: process.env.WOC_REMOUNT_LOCK, WOC_REMOUNT_LOCK_STALE_MS: process.env.WOC_REMOUNT_LOCK_STALE_MS,
+        WOC_REMOUNT_LOCK_HUNG_MS: process.env.WOC_REMOUNT_LOCK_HUNG_MS };
+    process.env.WOC_REMOUNT_LOCK = lockPath;
+    process.env.WOC_REMOUNT_LOCK_STALE_MS = '50';
+    delete process.env.WOC_REMOUNT_LOCK_HUNG_MS;
+    const key = require.resolve('../remount_lock.js'), cached = require.cache[key];
+    delete require.cache[key];
+    try {
+        const lock = require('../remount_lock.js');
+        const dead = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+        const deadText = dead.stdout + ' 2026-01-01T00:00:00.000Z\n';
+
+        /* Waiter B read the dead lock; waiter A broke it and took its own; B now tries to break what it read. */
+        fs.writeFileSync(lockPath, deadText);
+        assert.strictEqual(lock.tryAcquire(), true, 'A breaks the dead lock and takes it');
+        assert.strictEqual(lock.breakDead(deadText), false, 'B must not break A\'s new lock');
+        assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid), 'A still holds it');
+        assert(!fs.existsSync(lockPath + '.break'), 'the breaker guard is removed after a refused break');
+        lock.release();
+
+        /* The guard of a breaker at work keeps a second breaker out; a guard left by a dead breaker goes once old. */
+        fs.writeFileSync(lockPath, deadText);
+        fs.writeFileSync(lockPath + '.break', '');
+        assert.strictEqual(lock.breakDead(deadText), false, 'a breaker at work is waited for');
+        assert(fs.existsSync(lockPath), 'the dead lock is left alone meanwhile');
+        const oldGuard = Date.now() / 1000 - 60;
+        fs.utimesSync(lockPath + '.break', oldGuard, oldGuard);
+        assert.strictEqual(lock.breakDead(deadText), false, 'the stale guard is cleared by this call, the break is retried by the caller');
+        assert(!fs.existsSync(lockPath + '.break'), 'a stale guard is removed');
+        assert.strictEqual(lock.tryAcquire(), true, 'the next attempt breaks the dead lock');
+        lock.release();
+        assert(!fs.existsSync(lockPath + '.break'), 'no guard left behind');
+    } finally {
+        try { fs.unlinkSync(lockPath); } catch (e) {}
+        try { fs.unlinkSync(lockPath + '.break'); } catch (e) {}
+        require.cache[key] = cached;
+        Object.keys(env).forEach((k) => { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; });
+    }
+});
+
 test('the watcher service stays up without a patch to watch, and stops on SIGTERM', async () => {
     const w = makeWorld();
     w.install('carplay', 'none');
