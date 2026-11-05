@@ -452,6 +452,10 @@ void define_keys(Config *cfg)
     cfg->define("log_file_kb", "512");
     for (const char *key : kIgnoredKeys)
         cfg->define(key, "");
+    /* Android Auto opt-in (patch/aa_enabled.js reads it for patchd and the boot
+     * recovery). The render does not use it; it is defined only so that a
+     * local_conf that sets it still starts the service. */
+    cfg->define("aa_enabled", "0");
 }
 
 int main(int argc, char **argv)
