@@ -407,9 +407,9 @@ not `<target>`'s own file:
 
 | When | What happens to it |
 |---|---|
-| a change is written while CarPlay runs `<target>` | created; kept while CarPlay runs it |
+| a change is written while CarPlay runs `<target>` | created before the first byte is written, whether or not CarPlay is restarted after (Kiro test build); when it cannot be created and verified, nothing is written; kept while CarPlay runs it |
 | a change puts CarPlay's running bytes back | moved back to `<target>` |
-| `patchd` restarts CarPlay | removed |
+| `patchd` restarts CarPlay | removed once nothing runs the old inode; a restart that failed leaves it, so `/` can still go read-only |
 | `patchd` starts, or any later write window | removed once nothing runs it |
 | the tool is removed | `deactivate` removes one that holds nothing; a held one goes to the deploy tool (`"removeWhenUnused"`), which removes it once nothing runs it, at the latest at a later start |
 
@@ -888,8 +888,11 @@ exits by 56 s, after one bounded try to put `/` back read-only and
 releasing the lock. CarPlay waits for the step 75 s at most
 (`TimeoutStartSec`). CarPlay does
 not require the step: it starts when the step has exited, failed or timed
-out. The step exits 0 whatever happens, and it is in recmgr's lists, so a
-timeout does not reboot the unit. Its `RequiresMountsFor=/var/opt` adds no
+out. The step exits 0 whatever happens, except that it exits 1 while a
+ro-failed guard stands (below: `/` could not be verified read-only); the unit
+runs it with `ExecStart=-`, so the status changes no ordering, it is the
+failure the journal shows. It is in recmgr's lists, so a timeout does not
+reboot the unit. Its `RequiresMountsFor=/var/opt` adds no
 wait to CarPlay: `/var/opt` is mounted from fstab before `local-fs.target`,
 which CarPlay is already ordered after.
 
@@ -944,7 +947,18 @@ between its check and the rename; the boot step, which CarPlay waits for,
 links it only if a process runs it. `patchd` removes a link nothing runs. A
 shared remount lock (`remount_lock.js`) keeps it and `patchd` from
 remounting `/` at once; the watcher yields to `patchd`, a boot step waits up
-to 10 s for it. A stop waits for a restore in progress. Recovery never
+to 10 s for it. A stop waits for a restore in progress.
+
+The ro-failed guard (Kiro test build). A write window (patchd's change, a
+restore, a mode repair, the boot step at its hard deadline) that ends with `/`
+not verified read-only by `/proc/mounts` keeps the remount lock and writes
+`/dev/shm/waze-on-cluster/remount.lock.ro-failed` with the reason. While it
+stands no writer takes the lock (patchd refuses the change, recovery refuses
+the restore and the repair), patchd's status is an error naming it, the
+watcher retries `remount,ro` every 5 s, and the boot step exits 1. It clears,
+and the lock goes, when `/` is verified read-only: by the next change, status
+read, boot step or watcher try, or after `mount -o remount,ro /` by hand; the
+file is on tmpfs, so a head-unit start also clears it. Recovery never
 stops, kills, restarts or reboots anything; its only action on a service is
 the start above.
 

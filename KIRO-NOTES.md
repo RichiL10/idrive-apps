@@ -96,6 +96,18 @@ Left as they are, on purpose:
   `feed_datagram` passes `arrival_ms(now, waited_us)` is checked by reading, the arithmetic by test.
 - A new SSRC whose first two packets arrive swapped counts as stray (as in the fork and RFC 3550); unlikely on a local link.
 
+## Review fix-p: `/` read-only before the lock goes (F-P1..F-P3)
+
+- patchd links the running binary as `.woc-running` before EVERY replacement while a process runs it (also when it
+  restarts the service after), and writes nothing when that link cannot be made and checked; recovery's restore does the
+  same. A failed restart therefore cannot leave an unlinked running inode that keeps `/` writable.
+- A write window that ends with `/` not verified read-only (all remount,ro tries failed, or the boot step's hard
+  deadline with an ineffective remount,ro) keeps the remount lock and sets `<lock>.ro-failed` (patch/remount_lock.js).
+  patchd reports it as an error, writers are refused, the boot step exits 1 (journal), the watcher retries every 5 s.
+  How to clear it: `mount -o remount,ro /`, then any change, a status read, a boot step or a watcher tick clears the
+  marker; a head-unit start clears it too (tmpfs). A dead holder's lock does not outlive the process, the marker does.
+- Not on a car: the unit's `ExecStart=-` makes the boot step's exit 1 informational; CarPlay still starts after it.
+
 ## NOT verified
 
 - Nothing ran on a car, on a head unit, with a real phone, a real cluster or real MSDK hardware. The decoder

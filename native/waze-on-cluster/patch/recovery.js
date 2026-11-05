@@ -60,8 +60,9 @@
  * aapd.conf not readable by them, as a write
  * under umask 077 leaves them) its original's mode and owner, nothing
  * else. Each remount is bounded (STEP_MS); a boot step gives
- * up at BOOT_BOUND_MS whatever hangs and exits by BOOT_EXIT_MS, after one
- * bounded try to put / back read-only. It never kills, restarts or reboots
+ * up at BOOT_BOUND_MS whatever hangs and exits by BOOT_EXIT_MS, after a few
+ * bounded tries to put / back read-only (it exits 1 and keeps the remount lock
+ * with the ro-failed guard when / is still not verified read-only). It never kills, restarts or reboots
  * anything; the only start is `systemctl start` of the service after a
  * crash or a SIGKILL patchd did not send, never stop or restart, bounded by
  * START_DELAYS_MS per boot.
@@ -363,8 +364,8 @@ function rootIsReadOnly() {
     return false;
 }
 
-function remount(rw, cb) {
-    cp.execFile(MOUNT, ['-o', 'remount,' + (rw ? 'rw' : 'ro'), '/'], { timeout: STEP_MS }, function (err) { cb(err); });
+function remount(rw, cb, ms) {
+    cp.execFile(MOUNT, ['-o', 'remount,' + (rw ? 'rw' : 'ro'), '/'], { timeout: ms || STEP_MS }, function (err) { cb(err); });
 }
 
 function remountRo(tries, cb) {
@@ -375,20 +376,97 @@ function remountRo(tries, cb) {
     });
 }
 
+/* The ro-failed guard (Kiro test build, review of fix-p). A write window that
+ * ends with / not verified read-only does not hand / on: `writing` stays set,
+ * the remount lock stays held and <lock>.ro-failed names the reason (see
+ * remount_lock.js), so no other writer (patchd, a later restore or mode
+ * repair) takes it while / may be writable. roGuard tries to clear it, before
+ * a write and once per PROBE_MS in the watcher: the guard goes when / is
+ * verified read-only. The boot step exits 1 while it stands. */
+var roFailed = null;
+function roFailedError(why) {
+    var e = new Error('ro-failed: ' + why + '; / may be writable, nothing is written until it is read-only again (mount -o remount,ro /)');
+    e.roFailed = true;
+    return e;
+}
+function holdRoFailed(why) {
+    roFailed = why;
+    writing = true;
+    lock.markRoFailed(why);
+    log('ERROR: ro-failed: ' + why + '. / may still be writable: the remount lock is kept and no restore or patch writes until / is read-only again ' +
+        '(mount -o remount,ro /; the next run clears the guard)');
+}
+/* True when no guard stands; one whose / is read-only now is cleared. */
+function roSettled() {
+    var why = roFailed !== null ? roFailed : lock.roFailedReason();
+    if (why === null) return true;
+    if (!rootIsReadOnly()) return false;
+    roFailed = null;
+    writing = false;
+    lock.clearRoFailed();
+    lock.release();
+    return true;
+}
+/* cb(null) with no guard (synchronously) or once it is cleared, else cb(why). */
+function roGuard(cb) {
+    var why = roFailed !== null ? roFailed : lock.roFailedReason();
+    if (why === null) { cb(null); return; }
+    lock.healRo(why, rootIsReadOnly, function (done) { remountRo(RO_TRIES, done); }, function (left) {
+        if (!left) {
+            roFailed = null;
+            writing = false;
+            log('/ is read-only again: the ro-failed guard is cleared');
+        }
+        cb(left);
+    });
+}
+/* The end of a write window: the lock goes, and `writing` clears, only once
+ * / is read-only (roErr null); else the guard is set. Returns err, marked
+ * when it is the ro-failed one. */
+function endWindow(err, roErr) {
+    if (roErr) {
+        holdRoFailed(roErr.message);
+        if (err) err.roFailed = true;
+    } else {
+        writing = false;
+        lock.release();
+    }
+    return err;
+}
+/* The pre-lock part of a write: cb(err) with the guard's error, or cb(null)
+ * and the lock taken (waitMs: waited for). */
+function takeLock(waitMs, cb) {
+    roGuard(function (standing) {
+        if (standing) { cb(roFailedError(standing)); return; }
+        if (waitMs) {
+            lock.acquireWrite(waitMs, function (got, rf) {
+                cb(got ? null : rf !== null ? roFailedError(rf) : new Error('remount lock held for ' + waitMs + ' ms; deferring'));
+            });
+            return;
+        }
+        if (!lock.tryAcquireWrite()) { var rf = lock.roFailedReason(); cb(rf !== null ? roFailedError(rf) : new Error('remount lock held; deferring')); return; }
+        cb(null);
+    });
+}
+
 /* The read-write remount failed (non-zero exit, killed by the timeout or by a
  * signal): it may still have changed the mount before it failed, so / is put
  * back read-only, bounded as everywhere, before the caller clears its writing
- * mark and lets go of the lock. A failure of that is logged, never thrown;
- * finish(err) then reports the remount that failed. */
+ * mark and lets go of the lock. If that fails too, finish(err, roErr) gets
+ * the ro-failed error and the caller keeps the lock (endWindow). */
 function rwFailed(mErr, finish) {
     var done = false;
     function end(roErr) {
         if (done) return;
         done = true;
         if (roErr) log('after the failed read-write remount, / could not be put back read-only: ' + roErr.message);
-        finish(new Error('remount rw: ' + mErr.message));
+        finish(new Error('remount rw: ' + mErr.message), roErr || null);
     }
     try { remountRo(RO_TRIES, end); } catch (e) { end(e); }
+}
+
+function sameInode(a, b) {
+    try { var x = fs.statSync(a), y = fs.statSync(b); return x.ino === y.ino && x.dev === y.dev; } catch (e) { return false; }
 }
 
 /* What a restore of t.files[i] writes, or null when it has no backup of
@@ -436,7 +514,7 @@ function repairModes(t, waitMs, cb) {
     if (!list.length) { cb(null, 0); return; }
     function locked() {
         writing = true;
-        function finish(err) { writing = false; lock.release(); cb(err, err ? 0 : list.length); }
+        function finish(err, roErr) { err = endWindow(err, roErr); cb(err, err ? 0 : list.length); }
         remount(true, function (mErr) {
             if (mErr) { rwFailed(mErr, finish); return; }
             var wErr = null;
@@ -446,18 +524,13 @@ function repairModes(t, waitMs, cb) {
                     log('set ' + x.file + ' to its original\'s mode 0' + x.want.mode.toString(8) + ' and owner ' + x.want.uid + ':' + x.want.gid);
                 });
             } catch (e) { wErr = e; }
-            remountRo(RO_TRIES, function (roErr) { finish(wErr || roErr); });
+            remountRo(RO_TRIES, function (roErr) { finish(wErr || roErr, roErr); });
         });
     }
-    if (waitMs) {
-        lock.acquire(waitMs, function (got) {
-            if (got) locked();
-            else cb(new Error('remount lock held for ' + waitMs + ' ms; deferring'), 0);
-        });
-        return;
-    }
-    if (!lock.tryAcquire()) { cb(new Error('remount lock held; deferring'), 0); return; }
-    locked();
+    takeLock(waitMs, function (err) {
+        if (err) { cb(err, 0); return; }
+        locked();
+    });
 }
 
 /* Restore t's originals from its verified backups, under the shared remount
@@ -498,14 +571,22 @@ function restoreTarget(t, onlyIfRunning, fails, cb, waitMs) {
     function locked() {
         var released = false;
         writing = true;
-        function finish(err, outcome) { if (!released) { released = true; writing = false; lock.release(); } cb(err, outcome); }
+        function finish(err, outcome, roErr) { if (!released) { released = true; err = endWindow(err, roErr); } cb(err, outcome); }
         remount(true, function (mErr) {
-            if (mErr) { rwFailed(mErr, finish); return; }
+            if (mErr) { rwFailed(mErr, function (err, roErr) { finish(err, undefined, roErr); }); return; }
             var wErr = null;
             try {
                 if (writes.length && !lock.holds(t.running, t.target) && (!onlyIfRunning || lock.inUse(t.target))) {
                     try { fs.unlinkSync(t.running); } catch (e) {}
                     try { fs.linkSync(t.target, t.running); } catch (e) { log('keeping the running ' + t.name + ' linked failed: ' + e.message); }
+                    /* A process runs the target and nothing links its inode: the
+                     * rename would leave an unlinked file in use, / could not go
+                     * read-only. Nothing is written then; / goes read-only below
+                     * and the lock goes with it. With no process on the target
+                     * (checked again after the failure) the restore goes on
+                     * without the link. */
+                    if (!sameInode(t.target, t.running) && lock.inUse(t.target))
+                        throw new Error('a process runs ' + t.target + ' and keeping it linked as ' + t.running + ' failed; nothing written, the restore waits for the next boot');
                 }
                 writes.forEach(function (w) { fileMode.replace(w.file, w.buf, w.want); });
                 record.write(t.target, !writes.length ? { patched: false } : refused ? { patched: false, by: 'refused', at: new Date().toISOString() }
@@ -513,30 +594,37 @@ function restoreTarget(t, onlyIfRunning, fails, cb, waitMs) {
                 try { fs.unlinkSync(t.pending); } catch (e) {}   /* the pending patch is gone */
             } catch (e) { wErr = e; }
             remountRo(RO_TRIES, function (roErr) {
-                if (wErr) finish(new Error('writing: ' + wErr.message + (roErr ? '; ' + roErr.message : '')));
-                else finish(roErr, writes.length ? 'restored' : 'original');
+                if (wErr) finish(new Error('writing: ' + wErr.message + (roErr ? '; ' + roErr.message : '')), undefined, roErr);
+                else finish(roErr, writes.length ? 'restored' : 'original', roErr);
             });
         });
     }
-    if (waitMs) {
-        lock.acquire(waitMs, function (got) {
-            if (got) locked();
-            else cb(new Error('remount lock held for ' + waitMs + ' ms; deferring'));
-        });
-        return;
-    }
-    if (!lock.tryAcquire()) { cb(new Error('remount lock held; deferring')); return; }
-    locked();
+    takeLock(waitMs, function (err) {
+        if (err) { cb(err); return; }
+        locked();
+    });
 }
 
 /* Whether a restore holds the remount lock in this process. */
 var writing = false;
 
 /* A restore cut short (the boot step out of time): / is put back read-only,
- * one bounded try, and the lock released. */
+ * a few bounded tries within one STEP_MS, and `writing` clears and the lock
+ * is released only once / is verified read-only. If it is not, the guard is
+ * set (holdRoFailed): the lock stays held, <lock>.ro-failed names the reason,
+ * and the boot step exits 1. */
+var ABANDON_TRIES = 3;
 function abandonRestore(cb) {
     if (!writing) { cb(); return; }
-    remount(false, function () { writing = false; lock.release(); cb(); });
+    var per = Math.max(100, Math.floor(STEP_MS / ABANDON_TRIES));
+    (function attempt(n) {
+        remount(false, function () {
+            if (rootIsReadOnly()) { roFailed = null; writing = false; lock.clearRoFailed(); lock.release(); cb(); return; }
+            if (n > 1) { attempt(n - 1); return; }
+            holdRoFailed('the boot step ran out of time and / is still read-write after ' + ABANDON_TRIES + ' remount,ro tries');
+            cb();
+        }, per);
+    })(ABANDON_TRIES);
 }
 
 /* ---- the service's run ---- */
@@ -616,6 +704,7 @@ function Recovery(opts) {
     this._pid = 0;              /* the main PID of the active run */
     this._run = '';             /* the active run, for the healthy timer */
     this._lastProbe = -Infinity;
+    this._roTry = -Infinity;
     this._activeSince = null;   /* start of the current continuous-active run */
     this._settled = null;       /* the run whose healthy minute needs nothing more */
     this._startAt = null;       /* when the scheduled start is due */
@@ -713,12 +802,23 @@ Recovery.prototype.startBoot = function (cb) {
      * meanwhile waits for it, as for a restore (whenRestored), and nothing
      * more is decided. */
     this.restoring = true;
-    this._repairModes(function (err, n) {
-        self.restoring = false;
-        if (err) self._log(self.target.name + ': setting its original\'s mode and owner failed: ' + err.message);
-        var stops = self._restored.splice(0);
-        if (stops.length) { stops.forEach(function (f) { f(); }); cb({ action: 'stopped', repaired: n || undefined }); return; }
-        self._decide(function (r) { if (n) r.repaired = n; cb(r); });
+    /* A guard left by a write window that could not put / back read-only
+     * (roGuard): cleared when / is read-only, else nothing is written. */
+    roGuard(function (standing) {
+        if (standing) {
+            self.restoring = false;
+            self._log('ERROR: ' + self.target.name + ': ' + roFailedError(standing).message);
+            self._restored.splice(0).forEach(function (f) { f(); });
+            cb({ action: 'ro-failed', roFailed: true, error: standing });
+            return;
+        }
+        self._repairModes(function (err, n) {
+            self.restoring = false;
+            if (err) self._log(self.target.name + ': setting its original\'s mode and owner failed: ' + err.message);
+            var stops = self._restored.splice(0);
+            if (stops.length) { stops.forEach(function (f) { f(); }); cb({ action: 'stopped', repaired: n || undefined }); return; }
+            self._decide(function (r) { if (n) r.repaired = n; cb(r); });
+        });
     });
 };
 
@@ -780,6 +880,7 @@ Recovery.prototype._restoreWith = function (fails, saved, cb, refused) {
             /* The counter stays, so the next start tries again. */
             self._log('boot recovery restore failed: ' + err.message + '; ' + n + ' starts as it is');
             r = { action: 'restore-failed', fails: fails, error: err.message };
+            if (err.roFailed) r.roFailed = true;
             /* Patched, crashing, and no backup can ever restore it (S4). */
             if (err.unavailable && self.target.failedMark && !refused) { self._markFailed(fails, err.message); r.failed = true; }
         } else {
@@ -842,6 +943,13 @@ Recovery.prototype.tick = function (cb) {
     var self = this;
     if (this._busy || this.restoring || off(this.target)) { cb({ action: 'skip' }); return; }
     var now = this._now();
+    /* A standing ro-failed guard is retried here, once per PROBE_MS. */
+    if (roFailed !== null && now - this._roTry >= PROBE_MS) {
+        this._roTry = now;
+        this._busy = true;
+        roGuard(function () { self._busy = false; cb({ action: 'ro-retry' }); });
+        return;
+    }
     if (this._startAt !== null && now >= this._startAt) { this._startDue(cb); return; }
     var fresh = now - this._lastProbe < (this._pid ? ALIVE_PROBE_MS : PROBE_MS);
     if (fresh && (!this._pid || this._alive(this._pid))) { cb({ action: this._healthy(now) }); return; }
@@ -1022,24 +1130,38 @@ Recovery.prototype.onShutdown = function (cb) {
 module.exports = {
     Recovery: Recovery, tally: tally, parseShow: parseShow, targets: targets, TARGETS: TARGETS, THRESHOLD: THRESHOLD,
     RESTORE_BOUND_MS: RESTORE_BOUND_MS, BOOT_BOUND_MS: BOOT_BOUND_MS, BOOT_EXIT_MS: BOOT_EXIT_MS, restoreTarget: restoreTarget, repairModes: repairModes,
-    realSystemState: realSystemState, failedReason: failedReason,
+    realSystemState: realSystemState, failedReason: failedReason, roGuard: roGuard,
 };
 
 /* ---- run as the boot step or the watcher ---- */
 
-/* The boot step for one service (`recovery.js boot [carplay|aapd]`) always
- * exits 0, by BOOT_EXIT_MS at the latest, a restore cut short after a try
- * to put / back read-only: the service's start never waits on its failure. Nothing runs the service before it, so the restore links
+/* The boot step for one service (`recovery.js boot [carplay|aapd]`) exits by
+ * BOOT_EXIT_MS at the latest, a restore cut short after tries to put / back
+ * read-only: 0, or 1 while a ro-failed guard stands (/ not verified read-only).
+ * The unit runs it with ExecStart=-, so the service's start never waits on its failure. Nothing runs the service before it, so the restore links
  * the patched binary only if a process runs it. */
 function runBoot(name) {
     var t = TARGETS[name || 'carplay'];
     if (!t) { log('unknown service ' + name); process.exit(0); }
     /* Android Auto off (S6): leave before anything of aapd's is read. */
     if (off(t)) { log(t.name + ' boot check: off (' + aaSwitch.OFF_REASON + '); nothing checked'); process.exit(0); }
+    /* The exit status: 0, or 1 while a ro-failed guard stands (/ may be
+     * writable; the lock and <lock>.ro-failed are kept, see holdRoFailed).
+     * The service's unit runs this with ExecStart=-, so the status changes
+     * no ordering; it is the terminal failure the journal shows. */
+    function leave() {
+        if (roSettled()) process.exit(0);
+        log('ERROR: ' + t.name + ' boot check failed: / is not verified read-only (ro-failed: ' + (roFailed !== null ? roFailed : lock.roFailedReason()) +
+            '); the remount lock is kept and nothing writes / until it is read-only again; exiting 1');
+        process.exit(1);
+    }
     setTimeout(function () {
         log(t.name + ' boot check: out of time after ' + BOOT_BOUND_MS + ' ms; ' + t.name + ' starts as it is');
-        setTimeout(function () { process.exit(0); }, BOOT_EXIT_MS - BOOT_BOUND_MS).unref();
-        abandonRestore(function () { process.exit(0); });
+        setTimeout(function () {
+            if (writing && roFailed === null) holdRoFailed('the boot step ran out of time and its remount,ro did not return');
+            leave();
+        }, BOOT_EXIT_MS - BOOT_BOUND_MS).unref();
+        abandonRestore(leave);
     }, BOOT_BOUND_MS).unref();
     var t0 = monoMs();
     var rec = new Recovery({ target: t, restore: function (fails, cb) { restoreTarget(t, true, fails, cb, BOOT_LOCK_WAIT_MS); },
@@ -1048,10 +1170,10 @@ function runBoot(name) {
         log(t.name + ' boot check: ' + r.action + (r.patch ? ' (' + r.patch + ' patch, ' + r.fails + ' failed)' : '') +
             (r.repaired ? ', mode and owner set on ' + r.repaired + ' file' + (r.repaired === 1 ? '' : 's') : '') +
             ' in ' + Math.round(monoMs() - t0) + ' ms, ' + Math.round(process.uptime() * 1000) + ' ms since node started');
-        process.exit(0);
+        leave();
     });
     /* A stop mid-restore lets the restore finish (it exits then). */
-    process.on('SIGTERM', function () { rec.whenRestored(function () { process.exit(0); }); });
+    process.on('SIGTERM', function () { rec.whenRestored(leave); });
 }
 
 /* The watcher follows carplay, and aapd where the unit has it; each has its

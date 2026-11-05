@@ -127,6 +127,68 @@ function release() {
     } catch (e) {}
 }
 
+/* The ro-failed guard (Kiro test build, review of fix-p). A writer that could
+ * not put / back read-only must not hand / to the next writer: it keeps the
+ * lock and writes <lock>.ro-failed ("pid time reason"), which outlives the
+ * writer (the lock goes with a dead holder, and with a live one after
+ * HUNG_MS). While the marker stands no writer takes the lock
+ * (tryAcquireWrite, acquireWrite); readers and plain tryAcquire (a service
+ * start) are not held back. The marker is in the socket directory (tmpfs,
+ * cleared each boot) and clears when a run verifies / read-only: healRo
+ * below, or by hand (`mount -o remount,ro /`, then any run of patchd or
+ * recovery clears it, or delete the file). */
+var RO_FAILED = LOCK + '.ro-failed';
+function roFailedReason() {
+    try {
+        var t = fs.readFileSync(RO_FAILED, 'utf8').trim().split(' ');
+        return t.slice(2).join(' ') || 'ro-failed';
+    } catch (e) { return null; }
+}
+function markRoFailed(reason) {
+    try { ensureDir(path.dirname(LOCK)); } catch (e) {}
+    try { fs.writeFileSync(RO_FAILED, process.pid + ' ' + new Date().toISOString() + ' ' + String(reason || 'ro-failed').replace(/\s+/g, ' ') + '\n'); return true; }
+    catch (e) { return false; }
+}
+function clearRoFailed() { try { fs.unlinkSync(RO_FAILED); } catch (e) {} }
+function ownsLock() {
+    try { return (fs.readFileSync(LOCK, 'utf8').split(' ')[0] || '') === String(process.pid); } catch (e) { return false; }
+}
+/* tryAcquire for a writer: false while the ro-failed marker stands (and the
+ * lock is let go again if it was taken a moment before the marker). */
+function tryAcquireWrite() {
+    if (!tryAcquire()) return false;
+    if (roFailedReason() !== null) { release(); return false; }
+    return true;
+}
+/* acquire for a writer: cb(true), or cb(false, why): why is the marker's
+ * reason, null when the lock was only busy. */
+function acquireWrite(timeoutMs, cb) {
+    var deadline = Date.now() + timeoutMs;
+    (function attempt() {
+        if (tryAcquireWrite()) { cb(true, null); return; }
+        var why = roFailedReason();
+        if (why !== null || Date.now() >= deadline) { cb(false, why); return; }
+        setTimeout(attempt, 100);
+    })();
+}
+/* Try to clear a standing guard. why: the reason (the marker's, or this
+ * process's own). isRo(): / is read-only per /proc/mounts. remountRo(done):
+ * a bounded remount,ro, done(err). cb(null) once / is verified read-only (the
+ * marker is gone and a lock this process held is released), else cb(why) with
+ * the guard, and a lock this process held, left in place. A lock another live
+ * process holds is not taken: cb(why). */
+function healRo(why, isRo, remountRo, cb) {
+    var mine = ownsLock();
+    function cleared() { clearRoFailed(); release(); cb(null); }
+    if (isRo()) { cleared(); return; }
+    if (!mine && !tryAcquire()) { cb(why); return; }
+    remountRo(function () {
+        if (isRo()) { cleared(); return; }
+        if (!mine) release();
+        cb(why);
+    });
+}
+
 var PROC = process.env.WOC_PROC || '/proc';
 function inUse(file) {
     var st;
@@ -145,4 +207,5 @@ function holds(link, target) {
     return !(b && a.ino === b.ino && a.dev === b.dev) && inUse(link);
 }
 
-module.exports = { acquire, release, tryAcquire, breakDead, inUse, holds };
+module.exports = { acquire, release, tryAcquire, breakDead, inUse, holds, roFailedReason, markRoFailed, clearRoFailed, ownsLock,
+    tryAcquireWrite, acquireWrite, healRo };

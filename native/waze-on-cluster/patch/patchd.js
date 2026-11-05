@@ -592,6 +592,8 @@ function status(extra, aaExtra) {
             var msg = { ev: 'status', state: cpBusy ? 'busy' : st.state, panel: st.panel, mode: st.mode, res: st.res, safe: st.safe,
                         busy: busy || (rebooting ? 'restart' : null), restart: restartMsg() };
             if (!cpBusy && st.reason) msg.reason = st.reason;
+            var roWhy = roStanding();
+            if (roWhy !== null && !cpBusy) { msg.state = 'error'; msg.reason = roReason(roWhy); }
             if (!cpBusy && st.carplay) msg.carplay = st.carplay;
             if (!cpBusy && st.pending) msg.pending = st.pending;
             if (!cpBusy && st.conflict) msg.conflict = st.conflict;
@@ -633,6 +635,36 @@ function remountRo(tries, cb) {
         if (tries > 0 && (!hookDeadline || Date.now() < hookDeadline)) { setTimeout(function () { remountRo(tries - 1, cb); }, 500); return; }
         cb(new Error('/ is still read-write after remount'));
     });
+}
+
+/* The ro-failed guard (Kiro test build, review of fix-p; remount_lock.js). A
+ * write window that ends with / not verified read-only keeps the remount lock
+ * and writes <lock>.ro-failed, which no writer passes (patchd's changes, a
+ * boot-recovery restore) until / is read-only again; status reports it as an
+ * error. roHeal tries to clear it before a change: it is gone once / is
+ * verified read-only (or by hand: mount -o remount,ro /, then any change or
+ * status clears it). */
+function roReason(why) {
+    return 'ro-failed: ' + why + '; / may be writable, so nothing is changed until it is read-only again (mount -o remount,ro / clears it)';
+}
+/* The standing guard's reason, null when none (one whose / is read-only is cleared). */
+function roStanding() {
+    var why = lock.roFailedReason();
+    if (why === null) return null;
+    if (rootIsReadOnly() && !busy) { lock.clearRoFailed(); if (lock.ownsLock()) lock.release(); return null; }
+    return why;
+}
+/* cb(null) with no guard or once it is cleared, else cb(why). */
+function roHeal(cb) {
+    var why = lock.roFailedReason();
+    if (why === null) { cb(null); return; }
+    lock.healRo(why, rootIsReadOnly, function (done) { remountRo(3, done); }, cb);
+}
+/* The end of a write window: the lock goes only once / is read-only; else it
+ * is kept with the guard set. */
+function endWindow(roErr) {
+    if (roErr) { lock.markRoFailed(roErr.message); log('ERROR: ro-failed: ' + roErr.message + '; the remount lock is kept and nothing writes / until it is read-only again'); }
+    else lock.release();
 }
 
 /* Restarting carplay or aapd is safe only while nothing takes its SIGKILL
@@ -989,13 +1021,13 @@ function unlinkQuiet(f) { try { fs.unlinkSync(f); } catch (e) {} }
 function dropUnusedRunning(cb) {
     var stale = activeTargets().filter(function (t) { return fs.existsSync(t.running) && !needed(t); });
     if (!stale.length) { cb(); return; }
-    lock.acquire(5000, function (got) {
-        if (!got) { log('remount lock busy; unused links wait for the next write window'); cb(); return; }
+    lock.acquireWrite(5000, function (got, roWhy) {
+        if (!got) { log(roWhy !== null ? 'ro-failed guard stands (' + roWhy + '); unused links wait' : 'remount lock busy; unused links wait for the next write window'); cb(); return; }
         remount(true, function (mErr) {
             stale.forEach(function (t) { if (!mErr && !needed(t)) { unlinkQuiet(t.running); log('removed ' + t.running + ': nothing runs it'); } });
             remountRo(3, function (roErr) {
                 if (roErr) log('WARNING: ' + roErr.message);
-                lock.release();
+                endWindow(roErr);
                 cb();
             });
         });
@@ -1028,9 +1060,29 @@ function patchWith(t, args, action, blocked, done, run) {
     remount(true, function (mErr) {
         if (mErr) { fin(new Error('remount rw: ' + mErr.message), null); return; }
         if (!needed(t)) unlinkQuiet(t.running);
-        var linked = false;
-        if (!restartable && !fs.existsSync(t.running)) {
-            try { fs.linkSync(t.target, t.running); linked = true; } catch (e) { log('keeping the running ' + t.name + ' linked failed: ' + e.message); }
+        /* The old inode stays linked (t.running) before EVERY replacement while
+         * a process runs it, whether or not the service is restarted after:
+         * a restart can fail (systemctl, the SIGKILL, the wait for the PID),
+         * and an unlinked file still held open keeps / from going read-only.
+         * When it cannot be linked and verified, nothing is written. */
+        var linked = false, targetRuns = lock.inUse(t.target);
+        if (fs.existsSync(t.running)) {
+            /* What is left here is a link a process runs (needed above) and it
+             * is not the target's own file: no name is left for the target's. */
+            if (targetRuns) { fin(new Error(t.name + ' not changed: processes run both ' + t.target + ' and ' + t.running + '; nothing written, try after the next head-unit start'), null); return; }
+        } else if (!restartable || targetRuns) {
+            var linkErr = null;
+            try { fs.linkSync(t.target, t.running); } catch (e) { linkErr = e; }
+            if (!linkErr && !sameInode(t.running, t.target)) linkErr = new Error(t.running + ' is not the inode of ' + t.target);
+            if (!linkErr) linked = !restartable;
+            else {
+                log('keeping the running ' + t.name + ' linked failed: ' + linkErr.message);
+                if (targetRuns || lock.inUse(t.target)) {
+                    unlinkQuiet(t.running);
+                    fin(new Error(t.name + ' not changed: a process runs ' + t.target + ' and keeping it linked as ' + t.running + ' failed (' + linkErr.message + '); nothing written'), null);
+                    return;
+                }
+            }
         }
         var extraBefore = t.extra.map(sha).join();
         cp.execFile(process.execPath, [t.patcher].concat(args), { timeout: tmo(60000) }, function (pErr, out, errOut) {
@@ -1042,7 +1094,11 @@ function patchWith(t, args, action, blocked, done, run) {
             var changed = !pErr && !/nothing to do|already at the original/i.test(text);
             if (changed && restartable) {
                 restartUnit(t, function (rErr) {
-                    if (!rErr) unlinkQuiet(t.running);
+                    /* The kept link goes once nothing runs the old inode (checked in
+                     * /proc), never while a process still holds it: a failed or
+                     * partial restart leaves it for finalizeRo's remount,ro and for
+                     * dropUnusedRunning after. */
+                    if (!needed(t)) unlinkQuiet(t.running);
                     finalizeRo(t, pErr || rErr || null, function (e, r) { done(e, r, 'restarted'); });
                 });
             } else if (changed && sameFile(t.running, t.target) && t.extra.map(sha).join() === extraBefore) {
@@ -1224,6 +1280,15 @@ function rebootCmd(sock) {
     });
 }
 
+/* The lock for one change, after the ro-failed guard is cleared or found
+ * standing: cb(true), or cb(false, the reason shown). */
+function acquireOp(cb) {
+    roHeal(function (standing) {
+        if (standing !== null) { cb(false, roReason(standing)); return; }
+        lock.acquireWrite(OP_LOCK_WAIT_MS, function (got, roWhy) { cb(got, got ? null : roWhy !== null ? roReason(roWhy) : LOCK_BUSY_REASON); });
+    });
+}
+
 /* Runs one user operation for target ('carplay' | 'aa') under the shared
  * remount lock; busy is set before anything asynchronous, so no second
  * operation or reboot starts meanwhile. Without the lock within
@@ -1231,17 +1296,16 @@ function rebootCmd(sock) {
 function operate(target, label, fn) {
     busy = target;
     if (target === 'aa') status(null, { reason: label }); else status({ reason: label });
-    lock.acquire(OP_LOCK_WAIT_MS, function (got) {
+    acquireOp(function (got, why) {
         if (!got) {
             busy = null;
-            var why = LOCK_BUSY_REASON;
             log(label + ': ' + why);
             if (target === 'aa') { aaError = why; status(null, { state: 'error', reason: why }); } else status({ state: 'error', reason: why });
             quitWhenIdle();
             return;
         }
         fn(function (pErr, roErr, activation, refused) {
-            lock.release();
+            endWindow(roErr);
             busy = null;
             if (roErr) log('WARNING: ' + roErr.message + ' — run: mount -o remount,ro /');
             var t = target === 'aa' ? AA : CP;
@@ -1521,7 +1585,10 @@ function hookStep(which, t, read, run, done) {
         log(which + ': ' + (p.op === 'apply' ? 'applying' : 'reverting') + ' the ' + label + ' patch');
         run(p.op, function (pErr, roErr, activation, refused, aaRun) {
             var written = files.map(sha).join() !== before;
-            if (roErr) log('WARNING: ' + roErr.message + ' — the next head-unit start mounts / read-only again');
+            if (roErr) {
+                lock.markRoFailed(roErr.message);
+                log('WARNING: ' + roErr.message + ' — the next head-unit start mounts / read-only again; until then no writer takes the remount lock (ro-failed)');
+            }
             if (written && pErr) writePending(t, p.op, aaRun);
             var r = {};
             if (written || !pErr) {
@@ -1561,7 +1628,9 @@ function oneShot(which) {
     var result = {};
     hookDeadline = Date.now() + HOOK_DEADLINE_MS;
     function finish(code) {
-        lock.release();
+        /* A guard that stands keeps the lock (this process exits; the marker
+         * outlives it and refuses every writer until / is read-only). */
+        if (lock.roFailedReason() === null) lock.release();
         /* After the removal nothing of this tool is left to remove the links:
          * one that holds nothing goes now; one left (a process runs it, or
          * dropping it failed) goes to the deploy tool, which removes it once
@@ -1583,7 +1652,14 @@ function oneShot(which) {
     if (which === 'deactivate') markBy = 'removal';
     highfInstall = which === 'activate' && headUnit.variant() === 'HIGHF';
     try { ensureDir(path.dirname(SOCK)); } catch (e) { result.status = e.message; finish(1); return; }
-    lock.acquire(20000, function (got) {
+    roHeal(function (standing) {
+      if (standing !== null) {
+          result.status = roReason(standing);
+          log(which + ': ' + result.status);
+          finish(1);
+          return;
+      }
+      lock.acquireWrite(20000, function (got) {
         if (!got) {
             result.status = 'the remount lock stayed held (a boot-recovery restore may be running); nothing changed, try again in two minutes';
             log(which + ': ' + result.status);
@@ -1624,6 +1700,7 @@ function oneShot(which) {
                 finish(which === 'deactivate' ? aaCode : 0);
             });
         });
+      });
     });
 }
 
