@@ -70,7 +70,7 @@ CLIENT_SRC = client/client.cpp client/protocol.cpp
 KIT_TESTS = $(H)/map_upload_test $(H)/yuv_atlas_test $(H)/frame_clock_test $(H)/block_pack_test
 CPP_TESTS = $(H)/log_test $(H)/slots_test $(H)/governor_test $(H)/compositor_test $(H)/service_test \
 	$(H)/dcsm2_port_test $(H)/ramses_console_test $(H)/dcsm27_port_test $(H)/generation_test $(H)/holds_test \
-	$(H)/guard_test $(H)/head_unit_test $(H)/refused_test $(H)/liveness_test $(H)/heartbeat_tracker_test
+	$(H)/guard_test $(H)/head_unit_test $(H)/refused_test $(H)/liveness_test $(H)/heartbeat_tracker_test $(H)/connect_wait_test
 
 all: test
 
@@ -93,6 +93,7 @@ test-cpp: $(CPP_TESTS)
 	$(H)/head_unit_test test/head_unit_cases.jsonl
 	$(H)/refused_test $(H)/cluster-render
 	$(H)/liveness_test
+	$(H)/connect_wait_test
 	$(H)/heartbeat_tracker_test
 	$(H)/service_test
 
@@ -182,6 +183,9 @@ $(H)/guard_test: $(O)/test/guard_test.o $(O)/src/guard.o $(O)/src/log.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
 
 $(H)/liveness_test: $(O)/test/liveness_test.o
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+$(H)/connect_wait_test: $(O)/test/connect_wait_test.o
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 $(H)/heartbeat_tracker_test: $(O)/test/heartbeat_tracker_test.o $(O)/dcsm/heartbeat_tracker.o
