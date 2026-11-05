@@ -254,6 +254,16 @@ function patchKind(t) {
 
 function hasBackup(t) { return t.backups.some(exists); }
 
+/* Whether t's binary holds exactly the original its backup's record names
+ * (sha256_original), or the proven stock build. Read only for a failed mark,
+ * which is rare: the boot step otherwise never reads the binary. */
+function holdsRecordedOriginal(t) {
+    try {
+        var cur = fs.readFileSync(t.target), h = sha256(cur), meta = JSON.parse(readText(t.target + '.woc-orig.json'));
+        return (!!meta && typeof meta.sha256_original === 'string' && meta.sha256_original === h) || (!!t.stock && t.stock(0, cur));
+    } catch (e) { return false; }
+}
+
 /* Whether a file besides the binary (aapd.conf) still differs from its
  * verified backup: part of a patch a restore did not get to. */
 function leftover(t) {
@@ -718,6 +728,10 @@ Recovery.prototype._decide = function (cb) {
             (st.unknown ? '; 1 boot with no record' : ''));
     }
     var kind = patchKind(t);
+    /* Marked failed and restored by hand: the patch record no longer describes
+     * the file (a new one), and the backup that failed its check is beside it.
+     * The binary holding the original the backup's record names is stock. */
+    if (st.failed && t.failedMark && kind !== 'none' && kind !== 'original' && holdsRecordedOriginal(t)) kind = 'original';
     if (kind === 'none' || kind === 'original') {
         /* The binary is stock again (by hand, a firmware update, Disable): the
          * failed mark, if any, is stale. */
