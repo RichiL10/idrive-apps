@@ -18,7 +18,14 @@
  *
  * Protocol (newline-delimited JSON, one object per line):
  *   app -> patchd  {"cmd":"status"}
- *                  {"cmd":"apply","panel":"high"|"mid","mode":"fifo"|"udp"|"avb"}
+ *                  {"cmd":"apply","panel":"high"|"mid","mode":"fifo"|"udp"|"avb","unproven":true?}
+ *                    unproven:true only after the user confirmed patching a
+ *                    carplay build outside the proven list (status
+ *                    "unproven"); without it the first edit of such a build
+ *                    is refused with the reason UNPROVEN_REASON, nothing
+ *                    changed (S3). An apply or revert that cannot take the
+ *                    shared remount lock within 15 s is refused (state
+ *                    error), never written without it.
  *                    all modes apply the variant gate + self-start; they differ
  *                    only in the sink. avb = stock avb:// sink (the mode the app
  *                    applies; the render joins the media bus); udp = udp://
@@ -26,6 +33,8 @@
  *                    file); fifo = file:// FIFO sink
  *                  {"cmd":"revert"}
  *                  {"cmd":"aa-apply"} | {"cmd":"aa-revert"}   the Android Auto patch
+ *                                   (all aa-* commands are refused while
+ *                                   aa_enabled is 0, the default: aa_enabled.js)
  *                  {"cmd":"aa-density","value":n} | {"cmd":"aa-card","value":"shown"|"hidden"}
  *                                   save the choice and, with the patch on disk,
  *                                   apply it (one change per DENSITY_SPACING_MS)
@@ -52,7 +61,12 @@
  *                    start; state is unknown with that reason until then)
  *                    pending: apply | revert, while a written change waits for
  *                    the next head-unit start (carplay is then deferred)
- *                    aa: Android Auto's patch, {state, reason, conflict, pending,
+ *                    unproven: true when the carplay build is outside the
+ *                    proven list and not patched yet: Enable map needs the
+ *                    user's confirmation, sent as apply's unproven:true
+ *                    aa: Android Auto's patch, {enabled (false while
+ *                    aa_enabled is 0: state is then "off", nothing under
+ *                    aapd's paths is read for writing or written), state, reason, conflict, pending,
  *                    aapd (restarted | deferred), dpi and diskCard (on disk),
  *                    runDpi and runCard (while pending: what aapd runs until
  *                    the next start, null for no patch), density and card
@@ -128,6 +142,10 @@ var AAPD = process.env.WOC_AAPD || '/usr/bin/aapd';
 var AAPD_CONF = process.env.WOC_AAPD_CONF || '/etc/aapd.conf';
 var CODING = process.env.WOC_CODING || '/dev/shm/rawcodingdata';
 var aapdConf = require('./aapd_conf.js');
+var aaSwitch = require('./aa_enabled.js');
+/* Android Auto is opt-in (aa_enabled = 1 in the conf); every aapd path below
+ * is guarded by it (S6). Read at each use. */
+function aaOn() { return aaSwitch.enabled(); }
 /* The density the owner chose for Android Auto, and the head-unit restarts
  * asked for, kept across updates. */
 var STATE_DIR = process.env.WOC_STATE_DIR || '/var/opt/waze-on-cluster';
@@ -167,6 +185,11 @@ var OP_LOCK_WAIT_MS = parseInt(process.env.WOC_OP_LOCK_WAIT_MS, 10) || 15000;
  * so a retry after a couple of minutes finds it free. Keep the wording: the
  * app maps it to its "lock busy" text (it matches /another change to \/ is running/). */
 var LOCK_BUSY_REASON = 'another change to / is running (a boot-recovery restore or another write); nothing changed, try again in two minutes';
+/* Enable map on a carplay build outside the proven list without the user's
+ * confirmation (S3): the patcher refused it, nothing changed. The app shows
+ * its confirm step on the status field `unproven`; this text is for a client
+ * that sent a plain apply anyway. Keep "needs your confirmation". */
+var UNPROVEN_REASON = 'untested carplay build: Enable map needs your confirmation; nothing changed';
 
 var clients = [];
 var logLines = [];
@@ -427,7 +450,10 @@ function readState(cb) {
         if (pending) { state = 'unknown'; mode = null; reason = pending.reason; carplay = 'deferred'; }
         cachedState = { state: state, panel: variant ? variant[1].toLowerCase() : null, mode: mode, res: res, safe: safe, reason: reason, carplay: carplay,
                         pending: pending ? pending.action || 'apply' : null, pendingBy: pending ? pending.by : null,
-                        conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable, proven: proven, recovered: recovered(TARGET) };
+                        conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable, proven: proven, recovered: recovered(TARGET),
+                        /* the first edit of this build needs the user's confirmation (S3);
+                         * a modified build is refused by the patcher anyway (a conflict) */
+                        unproven: known && !hasBackup && pristine && !proven };
         cb(cachedState);
     });
 }
@@ -449,6 +475,12 @@ var aaState = { state: 'unknown', density: aaDensity(), card: aaCard() };
 var aaInFlight = false;
 var aaFresh = [];     /* callers waiting for a read that starts after the one in flight */
 function readAaState(cb, fresh) {
+    /* Android Auto off (the default): no read of aapd, aapd.conf, their
+     * backups or markers, no patcher spawned. */
+    if (!aaOn()) {
+        cb({ state: 'off', enabled: false, reason: aaSwitch.OFF_REASON, conflict: null, dpi: null, density: aaDensity(), card: aaCard(), binary: 'off' });
+        return;
+    }
     if (aaInFlight) {
         if (fresh) aaFresh.push(cb); else cb(aaState);
         return;
@@ -525,7 +557,7 @@ function aaCard() {
 function cropEnv(card, dpi) { return card === 'hidden' ? 'WOC_SRC_CROP=-s src_crop=' + aapdConf.srcCrop(card, dpi) + '\n' : null; }
 
 function aaMsg(st) {
-    var m = { state: busy === 'aa' ? 'busy' : st.state, density: st.density, card: st.card, densities: [aapdConf.DENSITY_MIN, aapdConf.DENSITY_MAX, aapdConf.DENSITY_STEP] };
+    var m = { enabled: st.enabled !== false, state: busy === 'aa' ? 'busy' : st.state, density: st.density, card: st.card, densities: [aapdConf.DENSITY_MIN, aapdConf.DENSITY_MAX, aapdConf.DENSITY_STEP] };
     /* While a change runs, the line says so; the values on disk stay. */
     if (busy !== 'aa') ['reason', 'conflict', 'aapd', 'recovered'].forEach(function (k) { if (st[k]) m[k] = st[k]; });
     ['pending', 'dpi', 'diskCard'].forEach(function (k) { if (st[k]) m[k] = st[k]; });
@@ -556,6 +588,7 @@ function status(extra, aaExtra) {
             if (!cpBusy && st.pending) msg.pending = st.pending;
             if (!cpBusy && st.conflict) msg.conflict = st.conflict;
             if (!cpBusy && st.recovered) msg.recovered = st.recovered;
+            if (st.unproven) msg.unproven = true;
             if (extra) Object.keys(extra).forEach(function (k) { msg[k] = extra[k]; });
             msg.aa = aaMsg(aa);
             if (aaExtra) Object.keys(aaExtra).forEach(function (k) { msg.aa[k] = aaExtra[k]; });
@@ -937,11 +970,14 @@ function finalizeRo(t, errSoFar, done, restartable) {
  * removed: by the next write window, by patchd when it starts, and after the
  * tool's removal by the deploy tool (deactivate's "removeWhenUnused"). */
 function needed(t) { return lock.holds(t.running, t.target); }
+/* The targets this install touches: CarPlay, and Android Auto only when
+ * aa_enabled is 1. */
+function activeTargets() { return aaOn() ? [CP, AA] : [CP]; }
 function unlinkQuiet(f) { try { fs.unlinkSync(f); } catch (e) {} }
 
 /* Removes the links nothing executes, / read-write only for that. */
 function dropUnusedRunning(cb) {
-    var stale = [CP, AA].filter(function (t) { return fs.existsSync(t.running) && !needed(t); });
+    var stale = activeTargets().filter(function (t) { return fs.existsSync(t.running) && !needed(t); });
     if (!stale.length) { cb(); return; }
     lock.acquire(5000, function (got) {
         if (!got) { log('remount lock busy; unused links wait for the next write window'); cb(); return; }
@@ -1035,8 +1071,8 @@ function patchWith(t, args, action, blocked, done, run) {
  * "avb": the stock avb:// sink, the media bus the render joins (the mode the
  * app applies). "udp": Edit 2 sink -> udp://127.0.0.1:UDP_PORT, the stream
  * sink the projection bridge accepts, which this tool receives. "fifo": sink
- * -> the file:// FIFO (the bridge rejects it on the car). `unproven`: the
- * press of CarPlay's Patch button, which also patches a build outside the proven list;
+ * -> the file:// FIFO (the bridge rejects it on the car). `unproven`: an
+ * Enable map the user confirmed for a build outside the proven list (S3);
  * install-time activation never does. */
 function apply(panel, mode, noRestart, unproven, done) {
     if (panel !== 'high' && panel !== 'mid') { done(new Error('panel must be high or mid')); return; }
@@ -1142,7 +1178,7 @@ function rebootCmd(sock) {
     var deny = rebooting ? 'a restart is already in progress'
         : busy ? 'another operation is running'
         : quitting ? 'patchd is stopping'
-        : !readPending(CP) && !readPending(AA) ? 'no restart is pending'
+        : !activeTargets().some(readPending) ? 'no restart is pending'
         : null;
     if (!deny) {
         recent = recentReboots(now);
@@ -1194,13 +1230,16 @@ function operate(target, label, fn) {
             quitWhenIdle();
             return;
         }
-        fn(function (pErr, roErr, activation) {
+        fn(function (pErr, roErr, activation, refused) {
             lock.release();
             busy = null;
             if (roErr) log('WARNING: ' + roErr.message + ' — run: mount -o remount,ro /');
             var t = target === 'aa' ? AA : CP;
             if (pErr || roErr) {
-                var reason = [pErr && pErr.message, roErr && roErr.message].filter(Boolean).join('; ');
+                /* The patcher's refusal of a build outside the proven list (S3):
+                 * the words the app shows as its confirmation request. */
+                var reason = [pErr && (target === 'carplay' && refused && /not a proven build/.test(refused) ? UNPROVEN_REASON : pErr.message),
+                    roErr && roErr.message].filter(Boolean).join('; ');
                 log(label + ' failed: ' + reason);
                 if (target === 'aa') { aaError = reason; status(null, { state: 'error', reason: reason }); }
                 else status({ state: 'error', reason: reason });
@@ -1255,6 +1294,10 @@ function handle(line, sock) {
         return;
     }
 
+    /* Android Auto is off unless the conf says aa_enabled = 1 (S6): its
+     * commands change nothing and touch no aapd path. */
+    if (/^aa-/.test(msg.cmd) && !aaOn()) { log(msg.cmd + ' refused: ' + aaSwitch.OFF_REASON); refuse(aaSwitch.OFF_REASON); return; }
+
     var hu = (msg.cmd === 'apply' || msg.cmd === 'aa-apply') && headUnit.refused();
     if (hu) { log(msg.cmd + ' refused: ' + hu); refuse(hu); return; }
     if (/^(aa-)?(apply|revert)$/.test(msg.cmd) && headUnit.variant() === 'HIGHF') highfMark(/^aa-/.test(msg.cmd) ? AA : CP, 'user');
@@ -1262,8 +1305,13 @@ function handle(line, sock) {
     if (msg.cmd === 'apply' || msg.cmd === 'revert') {
         var panel = msg.panel;
         var mode = (msg.mode === 'avb' || msg.mode === 'udp') ? msg.mode : 'fifo';   /* capture mode; default fifo */
+        /* A build outside the proven list is patched only when the app says the
+         * user confirmed it ({"unproven":true}); a plain apply on such a build
+         * is refused by the patcher, changing nothing (S3). */
+        var unproven = msg.cmd === 'apply' && msg.unproven === true;
+        if (unproven) log('apply: the user confirmed patching a carplay build outside the proven list');
         operate('carplay', msg.cmd === 'apply' ? 'applying' : 'reverting',
-            msg.cmd === 'apply' ? function (cb) { apply(panel, mode, false, true, cb); } : function (cb) { revert(false, false, cb); });
+            msg.cmd === 'apply' ? function (cb) { apply(panel, mode, false, unproven, cb); } : function (cb) { revert(false, false, cb); });
     } else if (msg.cmd === 'aa-apply') {
         operate('aa', 'applying', function (cb) { aaApply(false, cb); });
     } else if (msg.cmd === 'aa-revert') {
@@ -1491,7 +1539,7 @@ function oneShot(which) {
          * dropping it failed) goes to the deploy tool, which removes it once
          * nothing runs it. A target's own file is not a link to hand over. */
         (which === 'deactivate' && Date.now() < hookDeadline - RO_RESERVE_MS ? dropUnusedRunning : function (cb) { cb(); })(function () {
-            [CP, AA].forEach(function (t) {
+            activeTargets().forEach(function (t) {
                 var p = readPending(t);
                 if (p && !result.reboot) result.reboot = p.reason;
                 if (which === 'deactivate' && fs.existsSync(t.running) && !sameInode(t.running, t.target))
@@ -1521,6 +1569,19 @@ function oneShot(which) {
             if (r.conflict) result.conflict = r.conflict;
             if (r.reset) result.reset = true;
             if (code) { finish(code); return; }
+            /* Android Auto is off (the default): aapd and aapd.conf are not
+             * read for writing, written or linked, by an install or a removal
+             * alike (S6). Only the existence of an old backup of ours is
+             * looked at (stat), to say so. */
+            if (!aaOn()) {
+                result.aa = { status: aaSwitch.OFF_REASON };
+                if (fs.existsSync(AAPD + '.woc-orig') || fs.existsSync(AAPD_CONF + '.woc-orig')) {
+                    result.aa.status += '; a backup of an earlier Android Auto patch exists: set aa_enabled = 1 and remove the tool again to put aapd back';
+                }
+                log(which + ': ' + result.aa.status);
+                finish(0);
+                return;
+            }
             if (hookDeadline - Date.now() < AA_HOOK_MIN_MS) {
                 result.aa = { status: which === 'deactivate' ? 'Android Auto not undone: out of time; the tool stays to guard it'
                     : 'Android Auto left as it is: out of time; the next install or Android Auto\'s Patch button applies it' };
