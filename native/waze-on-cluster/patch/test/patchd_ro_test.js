@@ -394,6 +394,48 @@ async function main() {
     mcalls = newMountCalls();
     ok('C an empty status: a plain apply is refused before anything is remounted', r.state === 'error' && /status unreadable/.test(r.reason || '') && mcalls.length === 0, JSON.stringify([r, mcalls]));
     d3.child.kill('SIGKILL');
+    /* ---- R3-4 (review of fix5-p): output cut after "known: yes", and a status read already in flight, do not pass the precheck ---- */
+    var FAKE = path.join(dir, 'fake-patcher.js'), FAKE_MODE = path.join(dir, 'fake-patcher-mode');
+    fs.writeFileSync(FAKE, 'var fs = require("fs"), cp = require("child_process"), a = process.argv.slice(2);\n' +
+        'var m = a[0] === "status" && fs.existsSync(' + JSON.stringify(FAKE_MODE) + ') ? fs.readFileSync(' + JSON.stringify(FAKE_MODE) + ', "utf8").trim() : "";\n' +
+        'if (m) setTimeout(function () { process.stdout.write("known: yes, pristine synthetic\\n"); }, m === "slow" ? 600 : 0);\n' +
+        'else process.exit(cp.spawnSync(process.execPath, [' + JSON.stringify(path.join(__dirname, '..', 'carplay_patch.js')) + '].concat(a), { stdio: "inherit" }).status);\n');
+    var d4 = startPatchd('c4', TGT, PROC, { WOC_TEST_PATCHER: FAKE });
+    for (i = 0; i < 200 && !fs.existsSync(d4.sock); i++) await sleep(25);
+    fs.writeFileSync(FAKE_MODE, 'cut');
+    newMountCalls();
+    r = await op(d4, { cmd: 'apply', panel: 'high', mode: 'avb' });
+    mcalls = newMountCalls();
+    ok('R3-4 output cut after known: yes: a plain apply is refused before anything is remounted', r.state === 'error' && /status unreadable/.test(r.reason || '') && mcalls.length === 0, JSON.stringify([r, mcalls]));
+    d4.child.kill('SIGKILL');
+    /* a patchd that has read nothing yet: its cache is the initial one, which would pass the precheck */
+    fs.writeFileSync(FAKE_MODE, 'slow');
+    d4 = startPatchd('c5', TGT, PROC, { WOC_TEST_PATCHER: FAKE });
+    for (i = 0; i < 200 && !fs.existsSync(d4.sock); i++) await sleep(25);
+    newMountCalls();
+    r = await new Promise(function (resolve, reject) {
+        var c = net.connect(d4.sock), buf = '', last = null;
+        var timer = setTimeout(function () { c.destroy(); resolve(last); }, 8000);
+        c.setEncoding('utf8');
+        c.on('error', reject);
+        c.on('connect', function () { c.write(JSON.stringify({ cmd: 'apply', panel: 'high', mode: 'avb' }) + '\n'); });   /* no wait for patchd's own status */
+        c.on('data', function (data) {
+            buf += data;
+            var k;
+            while ((k = buf.indexOf('\n')) >= 0) {
+                var m = JSON.parse(buf.slice(0, k));
+                buf = buf.slice(k + 1);
+                if (m.ev !== 'status') continue;
+                last = m;
+                if (m.state === 'error') { clearTimeout(timer); c.destroy(); resolve(m); return; }
+            }
+        });
+    });
+    mcalls = newMountCalls();
+    ok('R3-4 an apply sent while a status read runs waits for a fresh one (not the initial cache): refused, nothing remounted',
+        r && r.state === 'error' && /status unreadable/.test(r.reason || '') && mcalls.length === 0, JSON.stringify([r, mcalls]));
+    fs.unlinkSync(FAKE_MODE);
+    d4.child.kill('SIGKILL');
     /* ---- F-P1: the link cannot be made while a process runs the file: nothing is written ---- */
     d.child.kill('SIGKILL');
     var LONG = path.join(dir, 'usr', new Array(245).join('c'));   /* name + '.woc-running' is over NAME_MAX (255) */

@@ -129,7 +129,7 @@ var headUnit = require('./head_unit.js');
 var record = require('./patch_record.js');
 
 var HERE = __dirname;
-var PATCHER = path.join(HERE, 'carplay_patch.js');
+var PATCHER = (process.env.WOC_TEST && process.env.WOC_TEST_PATCHER) || path.join(HERE, 'carplay_patch.js');   /* WOC_TEST_PATCHER: tests only */
 var TARGET = process.env.WOC_CARPLAY || '/usr/bin/carplay';
 var FIFO = process.env.WOC_FIFO || '/run/waze-on-cluster/alt.h264';
 /* The local UDP sink for udp mode. Must match the render's udp_port
@@ -379,8 +379,12 @@ function writePending(t, action, run) {
 /* Read the patcher's state of the target binary. Only one hashing subprocess
  * runs at a time; a caller that arrives while one is in flight gets the last
  * known state (never null), so the status/logs ops always carry a real value. */
-function readState(cb) {
-    if (statusInFlight) { cb(cachedState); return; }
+function readState(cb, fresh) {
+    /* fresh: the caller decides on the result (the apply precheck), so it never gets the cache of a read that was already running: it waits for that one and reads again. */
+    if (statusInFlight) {
+        if (fresh) setTimeout(function () { readState(cb, true); }, 50); else cb(cachedState);
+        return;
+    }
     statusInFlight = true;
     cp.execFile(process.execPath, [PATCHER, 'status', '--target', TARGET], { timeout: tmo(15000) }, function (err, out) {
         statusInFlight = false;
@@ -395,7 +399,8 @@ function readState(cb) {
         var resOriginal = /res:\s+ORIGINAL/.test(text);
         var known = /known:\s+NO/.test(text) ? false : true;
         /* No known: line (empty or unparsable output): nothing is known about the build, so a plain apply is refused before the remount. */
-        var statusOk = /known:\s+(yes|NO)/.test(text);
+        /* Output cut after known: yes (no proven: line) is as unreadable as none (review of fix5-p, R3-4). */
+        var statusOk = /known:\s+NO/.test(text) || (/known:\s+yes/.test(text) && /proven:\s+(yes|no)\b/.test(text));
         var unknownWhy = /known:\s+NO — (.*)/.exec(text);
         var pristine = /known:\s+yes, pristine/.test(text);
         var proven = !/proven:\s+no/.test(text);
@@ -1426,7 +1431,7 @@ function handle(line, sock) {
                     return;
                 }
                 go();
-            });
+            }, true);
         } else go();
     } else if (msg.cmd === 'aa-apply') {
         operate('aa', 'applying', function (cb) { aaApply(false, cb); });
