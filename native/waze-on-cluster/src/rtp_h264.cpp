@@ -69,6 +69,13 @@ bool RtpH264::push(const uint8_t *pkt, size_t len, const Sink &sink)
         ssrc_ = ssrc;
         if (on_gap)
             on_gap(g);
+        /* The old stream's access unit still open ends here, as on an idle
+         * reset, and its timestamp is forgotten: the new stream's timestamps
+         * are its own, so one equal to the old one's must still start an
+         * access unit of its own instead of joining the old one's NAL
+         * units. */
+        end_au(sink);
+        have_ts_ = false;
         replay(sink);
     } else if (confirmed) {
         /* Same SSRC, a jump confirmed by the packet after it: the sequence
