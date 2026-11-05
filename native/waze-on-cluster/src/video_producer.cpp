@@ -294,8 +294,19 @@ void VideoProducer::on_nal(const uint8_t *data, size_t len, bool end_of_au)
 
 bool VideoProducer::start_decoder(std::string *err)
 {
+    if (device_fatal_.load()) {
+        *err = "the GPU decoder is beyond recovery; the service is exiting for systemd to restart it";
+        return false;
+    }
     if (!decoder_.init(cfg_.drm_device.c_str(), cfg_.tex_width, cfg_.tex_height, cfg_.tex_level_bits, cfg_.gpu_copy, err,
                        cfg_.src_crop)) {
+        /* After a device failure, a decoder that cannot even start is one
+         * more failure in a row. */
+        if (device_.in_a_row() > 0 && device_.failed(1)) {
+            device_fatal_ = true;
+            log_error("waze: the GPU decoder failed %u times in a row (the last: decoder start: %s); exiting for "
+                      "systemd to restart the service", DeviceWatch::kLimit, err->c_str());
+        }
         std::lock_guard<std::mutex> flock(frame_mutex_);
         last_err_ = *err;
         decode_errs_++;
@@ -317,6 +328,21 @@ void VideoProducer::decode(const uint8_t *data, size_t len, bool end_of_au)
         if (!line.empty())
             log_warn("%s", line.c_str());
     }
+    if (const uint64_t lost = decoder_.device_failures()) {
+        /* A GPU hang or a lost device: drop the whole decoder (session, VA
+         * display, render node) so the next SPS starts it afresh; kLimit in a
+         * row with no frame between are fatal (device_watch.h). */
+        decoder_.shutdown();
+        decoder_up_ = false;
+        if (device_.failed(lost)) {
+            device_fatal_ = true;
+            log_error("waze: the GPU decoder failed %u times in a row (the last: %s); exiting for systemd to "
+                      "restart the service", DeviceWatch::kLimit, derr.c_str());
+        } else {
+            log_warn("waze: the GPU decoder failed (%s); %llu in a row, the decoder starts again at the next SPS",
+                     derr.c_str(), (unsigned long long)device_.in_a_row());
+        }
+    }
     const bool decoding = decoder_.decoding();
     if (ok && decoding == decoding_)
         return;
@@ -337,6 +363,7 @@ void VideoProducer::decode(const uint8_t *data, size_t len, bool end_of_au)
 
 void VideoProducer::on_frame(const VideoFrame &f)
 {
+    device_.frame();   /* under decode_mutex_, like every decode */
     if (!f.atlas && !f.same) {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         const std::string line = health_.frame(cld::now_ms(), f.corrupted, gaps_.after_loss());

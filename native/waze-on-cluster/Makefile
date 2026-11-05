@@ -61,7 +61,8 @@ CPP_TESTS = $(BUILD)/host/nal_reader_test $(BUILD)/host/rtp_h264_test $(BUILD)/h
 		$(BUILD)/host/map_feed_test $(BUILD)/host/keyframe_wait_test $(BUILD)/host/freeze_watch_test \
 		$(BUILD)/host/alt_screen_test $(BUILD)/host/packet_queue_test $(BUILD)/host/backlog_test \
 		$(BUILD)/host/stream_health_test $(BUILD)/host/source_crop_test \
-		$(BUILD)/host/map_rect_test $(BUILD)/host/guide_setting_test $(BUILD)/host/decoder_test
+		$(BUILD)/host/map_rect_test $(BUILD)/host/guide_setting_test $(BUILD)/host/decoder_test \
+		$(BUILD)/host/device_watch_test
 # The control socket is Linux's (accept4): built and run on Linux only (make test-x86).
 LINUX_TESTS = $(if $(filter Linux,$(shell uname -s)),$(BUILD)/host/refused_test)
 CPP_TESTS += $(LINUX_TESTS)
@@ -114,6 +115,7 @@ test-cpp: $(CPP_TESTS)
 	$(BUILD)/host/map_rect_test
 	$(BUILD)/host/guide_setting_test
 	$(BUILD)/host/decoder_test
+	$(BUILD)/host/device_watch_test
 	$(if $(LINUX_TESTS),$(LINUX_TESTS),@echo 'refused_test: Linux only (make test-x86)')
 	$(MAKE) -C $(CR) test-kit BUILD=$(abspath $(BUILD))/kit
 
@@ -139,6 +141,10 @@ DEC_SRC = test/decoder_test.cpp test/fake_msdk.cpp src/decoder_msdk.cpp src/nal_
 $(BUILD)/host/decoder_test: $(DEC_SRC) test/fake_msdk.h src/decoder_msdk.h src/source_crop.h src/nal_reader.h $(KIT)/yuv_atlas.h
 	mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -Isrc -I$(KIT) -I$(CR)/src -Iabi/include -o $@ $(DEC_SRC) -lpthread
+
+$(BUILD)/host/device_watch_test: test/device_watch_test.cpp src/device_watch.h
+	mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -Isrc -o $@ test/device_watch_test.cpp
 
 $(BUILD)/host/map_rect_test: test/map_rect_test.cpp src/map_rect.h
 	mkdir -p $(@D)

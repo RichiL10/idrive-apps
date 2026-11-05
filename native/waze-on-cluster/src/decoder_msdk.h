@@ -157,6 +157,18 @@ public:
      * size cap since init(). */
     uint64_t buffer_overflows() const;
 
+    /* Sessions closed since init() because MSDK reported a GPU hang or a
+     * lost or failed device (MFX_ERR_GPU_HANG, MFX_ERR_DEVICE_LOST,
+     * MFX_ERR_DEVICE_FAILED). Such a session is closed at the first failure
+     * (not after kFailLimit access units), and the decoder then waits for the
+     * next SPS (decoding() false). The caller drops the whole decoder (device
+     * and VA display with it) and starts it afresh (device_watch.h). Two
+     * exceptions keep the GPU copy fallbacks as they are: a step of the setup
+     * that fails in a session with GPU copy goes on in one without, and a
+     * VPP run failing in a session with GPU copy is the copy's failure
+     * until the output is copied on the CPU (State::note_vpp). */
+    uint64_t device_failures() const;
+
     /* What comparing each picture with the one before and packing it took,
      * in microseconds. */
     crk::Spread pack_us() const;

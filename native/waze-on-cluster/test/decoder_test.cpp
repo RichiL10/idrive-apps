@@ -13,7 +13,10 @@
  * session goes on as it is; three in a row move its output planes off
  * 16-byte alignment (the CPU copy), and every picture after them comes
  * out. Each failure runs in a child process, since the fallback is the
- * process's. */
+ * process's. A GPU hang or a lost or failed device (device_failures) closes
+ * the session at the first failure and the decoder waits for the next SPS;
+ * the GPU copy fallbacks above keep their own handling of those statuses
+ * (a setup step falls back; a VPP run is the copy's until the CPU copy). */
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -25,6 +28,7 @@
 
 #include "decoder_msdk.h"
 #include "fake_msdk.h"
+#include "mfx/mfxdefs.h"
 
 using fake_msdk::access_unit;
 using fake_msdk::calls;
@@ -62,6 +66,8 @@ static void fault(const char *call, int status, int after = 0, int times = 0)
     fake_msdk::gpu_fault.times = times;
 }
 
+static void any_fault(const fake_msdk::AnyFault &f) { fake_msdk::any_fault = f; }
+
 static void expect(bool ok, const char *what)
 {
     if (!ok) {
@@ -82,6 +88,7 @@ struct Run {
      * for none. */
     std::vector<int> frames;
     std::vector<uint8_t> pictures;   /* the atlases' first bytes */
+    std::string last_error;          /* what the last feed reported ("" when it succeeded) */
     bool whole = true;               /* every atlas one level throughout */
 
     explicit Run(const char *crop, unsigned level_bits = 0, bool gpu_copy = false)
@@ -96,7 +103,8 @@ struct Run {
     void feed(const char *sps, bool idr, uint8_t content, bool picture = true)
     {
         const std::string au = access_unit(sps, idr, content);
-        std::string err;
+        std::string &err = last_error;
+        err.clear();
         dec.feed((const uint8_t *)au.data(), au.size(),
                  [this](const VideoFrame &f) {
                      expect(f.w == 1088 && f.h == 480, "every frame of the output size");
@@ -284,6 +292,121 @@ int main()
         expect(count("decode-sync") == 0, "no crop: no wait for the decode task");
         expect(count("header 1280x720") == 1 && count("header 1088x480") == 0, "no crop: no header read while running");
     }
+    /* A GPU hang or a lost or failed device (device_failures): the session
+     * is closed at the first failure, the decoder waits for the next SPS, and
+     * the next sequence starts in a new session. */
+    for (const int status : {MFX_ERR_GPU_HANG, MFX_ERR_DEVICE_LOST, MFX_ERR_DEVICE_FAILED}) {
+        isolated("a device status in a decode closes the session", [status] {
+            any_fault({"DecodeFrameAsync", status, 2, 1});
+            Run r("");
+            r.sequence(kCarPlay, 3, 1);
+            expect(r.last_error.find("GPU device failed") != std::string::npos, "the error says the device failed");
+            r.feed(nullptr, false, 4);
+            r.feed(nullptr, false, 5);
+            expect(r.pictures == std::vector<uint8_t>({1, 2}), "the pictures before the failure, none after it");
+            expect(r.dec.device_failures() == 1 && !r.dec.decoding(), "closed at the first failure, waiting for an SPS");
+            expect(count("session") == 1, "no second session before the next SPS");
+            r.sequence(kCarPlay, 2, 10);
+            expect(r.pictures == std::vector<uint8_t>({1, 2, 10, 11}), "the next sequence decodes");
+            expect(count("session") == 2 && count("init 1088x480") == 2, "in a new session");
+            expect(r.dec.device_failures() == 1 && r.dec.decoding(), "one failure counted, decoding again");
+        });
+    }
+    {
+        /* Not the device: kFailLimit's skip-and-go-on, no failure counted. */
+        any_fault({"DecodeFrameAsync", MFX_ERR_UNKNOWN, 2, 3});
+        Run r("");
+        r.sequence(kCarPlay, 6, 1);
+        expect(r.pictures == std::vector<uint8_t>({1, 2, 6}), "another status loses only that access unit");
+        expect(r.dec.device_failures() == 0 && r.dec.decoding(), "no device failure, the sequence goes on");
+        expect(count("session") == 1, "in the same session");
+    }
+    {
+        any_fault({"vpp-sync", MFX_ERR_DEVICE_LOST, 1, 1});
+        Run r("");
+        r.sequence(kCarPlay, 4, 1);
+        expect(r.pictures == std::vector<uint8_t>({1}) && r.dec.device_failures() == 1 && !r.dec.decoding(),
+               "a device status in the wait for VPP closes the session");
+    }
+    {
+        Run r("");
+        r.feed(kCarPlay, true, 1);
+        r.feed(nullptr, false, 2);
+        any_fault({"decode-sync", MFX_ERR_GPU_HANG, 0, 1});
+        r.feed(nullptr, false, 3, false);
+        expect(r.dec.device_failures() == 1 && !r.dec.decoding(),
+               "a device status in the wait for a frame without a picture closes the session");
+    }
+    {
+        any_fault({"decode-sync", MFX_ERR_GPU_HANG, 1, 1});
+        Run r(kAndroidAutoCrop);
+        r.sequence(kAndroidAuto, 4, 20);
+        expect(r.pictures == std::vector<uint8_t>({20}) && r.dec.device_failures() == 1 && !r.dec.decoding(),
+               "a device status in src_crop's wait for the decode task closes the session");
+    }
+    {
+        any_fault({"DECODE_Init", MFX_ERR_GPU_HANG, 0, 1});
+        Run r("");
+        r.feed(kCarPlay, true, 1);
+        r.feed(nullptr, false, 2);
+        expect(r.pictures.empty() && r.dec.device_failures() == 1 && !r.dec.decoding(),
+               "a device status starting a sequence counts, and nothing decodes before the next SPS");
+        r.sequence(kCarPlay, 2, 3);
+        expect(r.pictures == std::vector<uint8_t>({3, 4}) && r.dec.device_failures() == 1,
+               "the next SPS starts it again");
+    }
+    {
+        any_fault({"DecodeHeader", MFX_ERR_DEVICE_LOST, 0, 1});
+        Run r("");
+        r.feed(kCarPlay, true, 1);
+        expect(r.dec.device_failures() == 1 && !r.dec.decoding(), "a device status reading the header counts");
+    }
+    {
+        any_fault({"DECODE_Init", MFX_ERR_NOT_INITIALIZED, 0, 1});
+        Run r("");
+        r.feed(kCarPlay, true, 1);
+        expect(r.dec.device_failures() == 0 && !r.dec.decoding(), "another status starting a sequence is no device failure");
+    }
+    /* GPU copy: its fallbacks come first and are as they were. */
+    isolated("a device status setting up a session with GPU copy falls back", [] {
+        fault("MFXInitEx", MFX_ERR_DEVICE_FAILED);
+        Run r("", 0, true);
+        r.sequence(kCarPlay, 3, 1);
+        expect(r.pictures == std::vector<uint8_t>({1, 2, 3}) && count("session") == 1, "a session without GPU copy");
+        expect(r.dec.device_failures() == 0 && r.dec.decoding(), "not a device failure");
+    });
+    isolated("a hang in a setup step with GPU copy falls back", [] {
+        fault("VPP_Init", MFX_ERR_GPU_HANG);
+        Run r("", 0, true);
+        r.sequence(kCarPlay, 3, 1);
+        expect(r.pictures == std::vector<uint8_t>({1, 2, 3}) && r.dec.device_failures() == 0, "the fallback session decodes");
+        Run again("", 0, true);
+        again.sequence(kCarPlay, 2, 5);
+        expect(count("session gpucopy 1") == 0 && again.pictures == std::vector<uint8_t>({5, 6}),
+               "and GPU copy is off for the process, as before");
+    });
+    isolated("the session without GPU copy failing too", [] {
+        fault("DECODE_QueryIOSurf", MFX_ERR_GPU_HANG);
+        any_fault({"DECODE_Init", MFX_ERR_GPU_HANG, 0, 1});
+        Run r("", 0, true);
+        r.feed(kCarPlay, true, 1);
+        expect(count("session gpucopy 1") == 1 && count("session") == 1, "the fallback was tried first");
+        expect(r.pictures.empty() && r.dec.device_failures() == 1 && !r.dec.decoding(), "then the device failure counts");
+    });
+    isolated("device statuses of VPP runs with GPU copy", [] {
+        /* The copy's failures come as these statuses too (upstream's tests
+         * use MFX_ERR_DEVICE_FAILED): lost pictures, then the CPU copy. Only a
+         * device status after that closes the session. */
+        fault("VPP_Run", MFX_ERR_DEVICE_FAILED);
+        Run r("", 0, true);
+        r.sequence(kCarPlay, 6, 1);
+        expect(r.pictures == std::vector<uint8_t>({4, 5, 6}) && r.dec.device_failures() == 0 && r.dec.decoding(),
+               "three lost pictures, the CPU copy, no device failure");
+        expect(count("session gpucopy 1") == 1 && count("init 1088x480") == 1, "in the same session");
+        any_fault({"VPP_Run", MFX_ERR_DEVICE_FAILED, 0, 1});
+        r.feed(nullptr, false, 7);
+        expect(r.dec.device_failures() == 1 && !r.dec.decoding(), "a device status with the CPU copy closes it");
+    });
     if (failures) {
         fprintf(stderr, "decoder_test: %d failures\n", failures);
         return 1;
