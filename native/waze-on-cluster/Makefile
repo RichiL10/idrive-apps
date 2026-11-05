@@ -99,6 +99,9 @@ test-node:
 	umask 077 && $(NODE) patch/test/units_test.js
 	umask 077 && $(NODE) patch/test/aapd_test.js
 	umask 077 && $(NODE) patch/test/head_unit_test.js
+	umask 077 && $(NODE) patch/test/atomic_write_test.js
+	umask 077 && $(NODE) patch/test/patchd_unproven_test.js
+	umask 077 && $(NODE) patch/test/patchd_aa_off_test.js
 
 test-cpp: $(CPP_TESTS)
 	$(BUILD)/host/nal_reader_test
