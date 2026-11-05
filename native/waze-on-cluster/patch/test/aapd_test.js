@@ -411,11 +411,17 @@ function ro(t) { return /\bro\b/.test(fs.readFileSync(t.mounts, 'utf8')); }
      * aapd restored but aapd.conf not is refused. */
     var half = patchdUnit();
     hook(half, 'activate');
-    fs.mkdirSync(half.conf + '.woc-tmp');
+    /* Kiro test change (S1): the temporary file's name is per process now, so a folder in the way
+     * no longer fails the write. A file capability aapd.conf carries that setfattr cannot copy does:
+     * the write is refused with aapd.conf unchanged. */
+    var fakeGet = path.join(half.d, 'bin', 'getfattr'), fakeSet = path.join(half.d, 'bin', 'setfattr');
+    fs.writeFileSync(fakeGet, '#!/bin/sh\nfor f; do :; done\ncase "$f" in "' + half.conf + '") printf "# file: %s\\nsecurity.capability=0x0100\\n\\n" "$f";; esac\n');
+    fs.writeFileSync(fakeSet, '#!/bin/sh\necho "setfattr: Operation not permitted" >&2\nexit 1\n');
+    fs.chmodSync(fakeGet, 0o755); fs.chmodSync(fakeSet, 0o755);
     r = hook(half, 'deactivate');
     ok('deactivate with aapd restored but aapd.conf\'s write failing: refused, aapd.conf\'s backup kept', r.code === 1 && sha(half.bin) === sha(SRC) &&
         sha(half.conf) !== sha(SRCCONF) && fs.existsSync(half.conf + '.woc-orig') && /not undone/.test(JSON.stringify(r.result.aa)), r.out);
-    fs.rmdirSync(half.conf + '.woc-tmp');
+    fs.unlinkSync(fakeGet); fs.unlinkSync(fakeSet);
     r = hook(half, 'deactivate');
     ok('deactivate once aapd.conf can be written: restored byte-exact', r.code === 0 && sha(half.bin) === sha(SRC) && sha(half.conf) === sha(SRCCONF), r.out);
     var norec = patchdUnit();

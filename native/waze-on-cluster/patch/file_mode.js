@@ -19,6 +19,8 @@
  */
 var fs = require('fs');
 var path = require('path');
+var cp = require('child_process');
+var crypto = require('crypto');
 
 var EXEC = 0o755;
 var READ = 0o644;
@@ -78,40 +80,107 @@ function writeAll(fd, buf) {
     for (var off = 0; off < buf.length;) off += fs.writeSync(fd, buf, off, buf.length - off, off);
 }
 
-/* target replaced by buf with want's mode and owner: a temporary file
- * beside it, created afresh, written, its owner and mode set and checked,
- * fsynced, renamed over target, then target and its folder checked and
- * synced. inPlace: when the rename fails, target is rewritten in place
- * instead, its owner and mode set the same way. Throws when any step fails;
- * up to the rename target is untouched. */
-function replace(target, buf, want, inPlace) {
-    var tmp = target + '.woc-tmp', fd;
+function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+
+function fsyncDir(dir) {
+    var fd;
+    try { fd = fs.openSync(dir, 'r'); } catch (e) { return; }
+    try { fs.fsyncSync(fd); } catch (e) {} finally { fs.closeSync(fd); }
+}
+
+/* Temp files of earlier writes cut short (a power loss, a kill): the legacy
+ * fixed name (anything on it: a file, a link; a folder cannot be removed
+ * and is left) and per-process names whose process is gone. */
+function dropStaleTemps(target) {
+    var dir = path.dirname(target), base = path.basename(target) + '.woc-tmp', names = [];
+    try { names = fs.readdirSync(dir); } catch (e) { return; }
+    names.forEach(function (n) {
+        if (n !== base && n.indexOf(base + '.') !== 0) return;
+        var pid = parseInt(n.slice(base.length + 1), 10);
+        if (n !== base && pid > 0 && pid !== process.pid) {
+            try { process.kill(pid, 0); return; } catch (e) { if (e.code !== 'ESRCH') return; }
+        }
+        unlinkQuiet(path.join(dir, n));
+    });
+}
+
+/* Extended attributes of a file (file capabilities, security labels), by
+ * getfattr when the system has it: { attrs: [{ name, value }] }, or
+ * { unknown: reason }. Node 8 has no xattr API. */
+function readXattrs(file) {
+    var r;
+    try { r = cp.spawnSync('getfattr', ['-d', '-m', '-', '-e', 'hex', '--absolute-names', file], { encoding: 'latin1', timeout: 5000 }); }
+    catch (e) { return { unknown: e.message }; }
+    if (r.error) return { unknown: r.error.code === 'ENOENT' ? 'no getfattr' : r.error.message };
+    if (r.status !== 0) return { unknown: 'getfattr exited ' + r.status };
+    var attrs = [];
+    String(r.stdout).split('\n').forEach(function (l) {
+        var m = /^([^#=\s][^=]*)=(0x[0-9a-fA-F]*)$/.exec(l.trim());
+        if (m) attrs.push({ name: m[1], value: m[2] });
+    });
+    return { attrs: attrs };
+}
+
+/* Copy target's extended attributes to tmp. Throws when it has some that
+ * cannot be copied or do not read back from tmp; says (note) when they
+ * cannot be read at all. */
+function copyXattrs(target, tmp, note) {
+    var x = readXattrs(target);
+    if (x.unknown) { note('extended attributes of ' + target + ' not checked (' + x.unknown + ')'); return; }
+    if (!x.attrs.length) return;
+    note(target + ' carries extended attributes: ' + x.attrs.map(function (a) { return a.name; }).join(', ') + '; copying them');
+    x.attrs.forEach(function (a) {
+        var r = cp.spawnSync('setfattr', ['-n', a.name, '-v', a.value, tmp], { encoding: 'latin1', timeout: 5000 });
+        if (r.error || r.status !== 0)
+            throw new Error('cannot copy extended attribute ' + a.name + ' (' + (r.error ? r.error.message : String(r.stderr).trim()) + ')');
+    });
+    var y = readXattrs(tmp);
+    var miss = x.attrs.filter(function (a) { return !y.attrs || !y.attrs.some(function (b) { return b.name === a.name && b.value === a.value; }); });
+    if (miss.length) throw new Error('extended attributes not preserved: ' + miss.map(function (a) { return a.name; }).join(', '));
+}
+
+/* target replaced by buf with want's mode and owner, atomically and only
+ * so: a per-process temporary file beside it, created afresh ('wx+', one
+ * descriptor for everything, so a target mode without owner write does not
+ * stop a caller that is not root), written, its owner and mode set (owner
+ * first: a chown clears set-id bits and file capabilities), target's
+ * extended attributes copied after that and read back, fsynced, its bytes
+ * read back and compared by SHA-256, renamed over target, then target and
+ * its folder checked and synced. A rename that fails is NOT answered by
+ * rewriting target in place: the write is refused, target is as it was and
+ * the temporary file is gone. Throws (message ends "; <target> unchanged")
+ * when any step fails; up to the rename target is untouched.
+ * opts.note(text) hears the extended-attribute notes. */
+function replace(target, buf, want, opts) {
+    var note = opts && typeof opts.note === 'function' ? opts.note : function () {};
+    dropStaleTemps(target);
+    var tmp = target + '.woc-tmp.' + process.pid, fd = null;
+    function fail(why) {
+        if (fd !== null) { try { fs.closeSync(fd); } catch (e) {} fd = null; }
+        unlinkQuiet(tmp);
+        throw new Error(why + '; ' + target + ' unchanged');
+    }
     unlinkQuiet(tmp);
-    fd = fs.openSync(tmp, 'wx', 0o600);
     try {
+        fd = fs.openSync(tmp, 'wx+', 0o600);
         writeAll(fd, buf);
-        setOn(fd, tmp, want);
-    } catch (e) {
-        fs.closeSync(fd);
-        unlinkQuiet(tmp);
-        throw e;
-    }
-    fs.closeSync(fd);
+    } catch (e) { fail('writing ' + tmp + ': ' + e.message); }
+    try { setOn(fd, tmp, want); } catch (e) { fail('setting owner/mode of ' + tmp + ': ' + e.message); }
+    try { copyXattrs(target, tmp, note); } catch (e) { fail(e.message); }
+    try { fs.fsyncSync(fd); }   /* the bytes (and attributes) must be on disk before the rename */
+    catch (e) { fail('fsync ' + tmp + ': ' + e.message); }
+    var back = Buffer.alloc(buf.length + 1), got = 0, n;
     try {
-        fs.renameSync(tmp, target);
-    } catch (e) {
-        unlinkQuiet(tmp);
-        if (!inPlace) throw e;
-        fd = fs.openSync(target, 'r+');
-        try {
-            writeAll(fd, buf);
-            fs.ftruncateSync(fd, buf.length);
-            setOn(fd, target, want);
-        } finally { fs.closeSync(fd); }
-    }
+        while (got < back.length && (n = fs.readSync(fd, back, got, back.length - got, got)) > 0) got += n;
+    } catch (e) { fail('reading back ' + tmp + ': ' + e.message); }
+    if (got !== buf.length || sha256(back.slice(0, got)) !== sha256(buf)) fail('temp file verification failed');
+    try { fs.closeSync(fd); } catch (e) { fd = null; fail('closing ' + tmp + ': ' + e.message); }
+    fd = null;
+    try { fs.renameSync(tmp, target); }
+    catch (e) { fail('rename ' + tmp + ' -> ' + target + ' failed (' + e.message + '); not rewritten in place'); }
     var why = mismatch(target, want);
     if (why) throw new Error(target + ': ' + why + ' after the write');
-    try { var d = fs.openSync(path.dirname(target), 'r'); try { fs.fsyncSync(d); } finally { fs.closeSync(d); } } catch (e) {}
+    fsyncDir(path.dirname(target));
 }
 
 /* target's owner and mode made want, its bytes as they are. Throws when it

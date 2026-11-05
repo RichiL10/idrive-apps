@@ -1561,27 +1561,113 @@ test('the boot step restores a patched carplay on a unit whose variant it cannot
 
 /* ---- the remount lock and the watcher service ---- */
 
-test('remount lock: mutual exclusion and stale break', () => {
+/* Kiro test change (S2): upstream broke ANY lock older than STALE_MS, whatever
+ * its holder; the lock now goes only with its holder (pid gone), after HUNG_MS
+ * for a live one, or after STALE_MS when it names no pid. Cases ported from the
+ * 0.7.10 fork, plus EPERM (a holder we may not signal is alive), the timeout
+ * of acquire and release by the holder only. */
+test('remount lock: mutual exclusion; broken only when its holder is gone (or holds no pid and is old)', () => {
     const lockPath = path.join(ROOT, 'stale.lock');
-    const env = { WOC_REMOUNT_LOCK: process.env.WOC_REMOUNT_LOCK, WOC_REMOUNT_LOCK_STALE_MS: process.env.WOC_REMOUNT_LOCK_STALE_MS };
+    const env = { WOC_REMOUNT_LOCK: process.env.WOC_REMOUNT_LOCK, WOC_REMOUNT_LOCK_STALE_MS: process.env.WOC_REMOUNT_LOCK_STALE_MS,
+        WOC_REMOUNT_LOCK_HUNG_MS: process.env.WOC_REMOUNT_LOCK_HUNG_MS };
     process.env.WOC_REMOUNT_LOCK = lockPath;
     process.env.WOC_REMOUNT_LOCK_STALE_MS = '50';
+    delete process.env.WOC_REMOUNT_LOCK_HUNG_MS;   /* the default, 10 min */
     const key = require.resolve('../remount_lock.js'), cached = require.cache[key];
     delete require.cache[key];
+    const realKill = process.kill;
     try {
         const lock = require('../remount_lock.js');
         assert.strictEqual(lock.tryAcquire(), true, 'first acquire');
         assert.strictEqual(lock.tryAcquire(), false, 'held: second acquire fails');
         lock.release();
         assert.strictEqual(lock.tryAcquire(), true, 'reacquire after release');
+
+        /* An old lock whose holder still runs (this process) is kept, however
+         * old: a holder that works longer than expected is never cut short. */
+        const old = Date.now() / 1000 - 10;
+        fs.utimesSync(lockPath, old, old);
+        assert.strictEqual(lock.tryAcquire(), false, 'an old lock held by a live pid is not broken');
+        assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid), 'the holder keeps it');
+
+        /* ...up to HUNG_MS (10 min): a live holder past it is taken as hung and
+         * its lock broken, so recovery is not kept out until the next boot. */
+        const hung = Date.now() / 1000 - 11 * 60;
+        fs.utimesSync(lockPath, hung, hung);
+        assert.strictEqual(lock.tryAcquire(), true, 'a lock held by a live pid for over 10 min is broken and retaken');
+        lock.release();
+        assert.strictEqual(lock.tryAcquire(), true, 'reacquire after the hung lock');
+        lock.release();
+
+        /* A lock whose holder is gone is broken at once, whatever its age. */
+        const dead = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+        fs.writeFileSync(lockPath, dead.stdout + ' 2026-01-01T00:00:00.000Z\n');
+        assert.strictEqual(lock.tryAcquire(), true, 'a lock of a pid that is gone is broken and retaken');
+        assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(process.pid));
+        lock.release();
+
+        /* A holder we may not signal (EPERM) exists: its lock is kept; only ESRCH means gone. */
+        fs.writeFileSync(lockPath, '4242 someone\n');
+        fs.utimesSync(lockPath, old, old);
+        process.kill = (pid, sig) => { if (pid === 4242) { const e = new Error('not permitted'); e.code = 'EPERM'; throw e; } return realKill.call(process, pid, sig); };
+        assert.strictEqual(lock.tryAcquire(), false, 'a lock whose holder answers EPERM is alive and kept');
+        process.kill = (pid, sig) => { if (pid === 4242) { const e = new Error('no such process'); e.code = 'ESRCH'; throw e; } return realKill.call(process, pid, sig); };
+        assert.strictEqual(lock.tryAcquire(), true, 'the same lock once the pid is gone (ESRCH) is broken');
+        process.kill = realKill;
+        lock.release();
+
+        /* Another holder's lock is not released by us. */
         fs.writeFileSync(lockPath, '999999 someone\n');
         lock.release();
         assert(fs.existsSync(lockPath), 'another holder\'s lock is not released');
-        const old = Date.now() / 1000 - 10;
+        fs.unlinkSync(lockPath);
+
+        /* No pid in it: broken only once older than STALE_MS. */
+        fs.writeFileSync(lockPath, '');
+        assert.strictEqual(lock.tryAcquire(), false, 'a fresh lock with no pid yet is kept');
         fs.utimesSync(lockPath, old, old);
-        assert.strictEqual(lock.tryAcquire(), true, 'stale lock broken');
+        assert.strictEqual(lock.tryAcquire(), true, 'an old lock with no pid is broken');
+        lock.release();
+        fs.writeFileSync(lockPath, 'not-a-pid text\n');
+        fs.utimesSync(lockPath, old, old);
+        assert.strictEqual(lock.tryAcquire(), true, 'an old lock with garbage for a pid is broken');
         lock.release();
     } finally {
+        process.kill = realKill;
+        try { fs.unlinkSync(lockPath); } catch (e) {}
+        require.cache[key] = cached;
+        Object.keys(env).forEach((k) => { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; });
+    }
+});
+
+test('remount lock: acquire waits for a live holder up to its timeout, then gives up without breaking the lock; the HUNG_MS override applies', async () => {
+    const lockPath = path.join(ROOT, 'wait.lock');
+    const env = { WOC_REMOUNT_LOCK: process.env.WOC_REMOUNT_LOCK, WOC_REMOUNT_LOCK_STALE_MS: process.env.WOC_REMOUNT_LOCK_STALE_MS,
+        WOC_REMOUNT_LOCK_HUNG_MS: process.env.WOC_REMOUNT_LOCK_HUNG_MS };
+    process.env.WOC_REMOUNT_LOCK = lockPath;
+    process.env.WOC_REMOUNT_LOCK_STALE_MS = '50';
+    process.env.WOC_REMOUNT_LOCK_HUNG_MS = '8000';
+    const key = require.resolve('../remount_lock.js'), cached = require.cache[key];
+    delete require.cache[key];
+    try {
+        const lock = require('../remount_lock.js');
+        const holder = cp.spawn(process.execPath, ['-e', 'setTimeout(function () {}, 20000)'], { stdio: 'ignore' });
+        try {
+            fs.writeFileSync(lockPath, holder.pid + ' 2026-01-01T00:00:00.000Z\n');
+            const old = Date.now() / 1000 - 5;   /* older than STALE_MS, younger than the HUNG_MS override */
+            fs.utimesSync(lockPath, old, old);
+            const t0 = Date.now();
+            const got = await new Promise((r) => lock.acquire(350, r));
+            assert.strictEqual(got, false, 'a live holder is waited for, not overtaken');
+            assert(Date.now() - t0 >= 300, 'it waited for its timeout');
+            assert.strictEqual(fs.readFileSync(lockPath, 'utf8').split(' ')[0], String(holder.pid), 'the holder still has the lock');
+            const hung = Date.now() / 1000 - 9;   /* older than the override */
+            fs.utimesSync(lockPath, hung, hung);
+            assert.strictEqual(await new Promise((r) => lock.acquire(350, r)), true, 'past the HUNG_MS override a live holder is taken as hung');
+            lock.release();
+        } finally { holder.kill('SIGKILL'); }
+    } finally {
+        try { fs.unlinkSync(lockPath); } catch (e) {}
         require.cache[key] = cached;
         Object.keys(env).forEach((k) => { if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; });
     }

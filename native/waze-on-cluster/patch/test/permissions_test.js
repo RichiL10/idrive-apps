@@ -37,7 +37,7 @@ function statusRestorable(want) {
 try {
     fs.writeFileSync(preload, "process.umask(0o077);\n" +
         "if (process.env.WOC_TEST_BUSY === '1') { var fs = require('fs'), rename = fs.renameSync;" +
-        " fs.renameSync = function(a, b) { if (/\\.woc-tmp$/.test(a)) { var e = new Error('busy'); e.code = 'EBUSY'; throw e; } return rename(a, b); }; }\n");
+        " fs.renameSync = function(a, b) { if (/\\.woc-tmp(\\.\\d+)?$/.test(a)) { var e = new Error('busy'); e.code = 'EBUSY'; throw e; } return rename(a, b); }; }\n");
     fs.writeFileSync(target, original);
     fs.chmodSync(target, 0o755);
     var owner = fs.statSync(target);
@@ -81,14 +81,22 @@ try {
         assert.strictEqual(mode(target), 0o755);
         success(run('revert', true));
     });
-    check('busy-rename fallback repairs permissions on apply and revert', function () {
+    check('a busy rename refuses apply and revert (S1: no in-place fallback); the target, its mode and its folder are as they were, and a mode repair needs no rename', function () {
+        var before = fs.readFileSync(target), ino = fs.statSync(target).ino;
         fs.chmodSync(target, 0o700);
-        success(run('apply', true, true));
-        assert.strictEqual(mode(target), 0o755);
+        var r = run('apply', true, true);
+        assert.notStrictEqual(r.status, 0, r.stdout + r.stderr);
+        assert(/not rewritten in place/.test(r.stderr) && /unchanged/.test(r.stderr), r.stderr);
+        assert(fs.readFileSync(target).equals(before));
+        assert.strictEqual(fs.statSync(target).ino, ino);
+        assert.strictEqual(mode(target), 0o700);
+        assert.deepStrictEqual(fs.readdirSync(dir).filter(function (n) { return /\.woc-tmp/.test(n); }), []);
+        /* the original's bytes with a wrong mode: apply's repair and revert's repair set the mode in place, no rename */
         fs.chmodSync(target, 0o700);
         success(run('revert', true, true));
         assert.strictEqual(mode(target), 0o755);
         assert(fs.readFileSync(target).equals(original));
+        assert.strictEqual(fs.statSync(target).ino, ino);
     });
     check('a firmware replacement is not eligible for permissions-only recovery', function () {
         var other = synthetic.build({ pad: 16 }).buf;

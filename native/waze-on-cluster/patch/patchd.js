@@ -162,6 +162,11 @@ function roTmo(ms) { return hookDeadline ? Math.max(1000, Math.min(ms, hookDeadl
 /* A user's change waits this long for the shared remount lock, then gives
  * up: nothing writes / without it. */
 var OP_LOCK_WAIT_MS = parseInt(process.env.WOC_OP_LOCK_WAIT_MS, 10) || 15000;
+/* What the app shows when the lock stays held (S2): a boot-recovery restore
+ * or another change owns it; the lock goes with its holder (remount_lock.js),
+ * so a retry after a couple of minutes finds it free. Keep the wording: the
+ * app maps it to its "lock busy" text (it matches /another change to \/ is running/). */
+var LOCK_BUSY_REASON = 'another change to / is running (a boot-recovery restore or another write); nothing changed, try again in two minutes';
 
 var clients = [];
 var logLines = [];
@@ -1183,7 +1188,7 @@ function operate(target, label, fn) {
     lock.acquire(OP_LOCK_WAIT_MS, function (got) {
         if (!got) {
             busy = null;
-            var why = 'another change to / is running; try again';
+            var why = LOCK_BUSY_REASON;
             log(label + ': ' + why);
             if (target === 'aa') { aaError = why; status(null, { state: 'error', reason: why }); } else status({ state: 'error', reason: why });
             quitWhenIdle();
@@ -1504,7 +1509,7 @@ function oneShot(which) {
     try { ensureDir(path.dirname(SOCK)); } catch (e) { result.status = e.message; finish(1); return; }
     lock.acquire(20000, function (got) {
         if (!got) {
-            result.status = 'the remount lock stayed held; nothing changed';
+            result.status = 'the remount lock stayed held (a boot-recovery restore may be running); nothing changed, try again in two minutes';
             log(which + ': ' + result.status);
             finish(1);
             return;
