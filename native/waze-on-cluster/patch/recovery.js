@@ -205,16 +205,23 @@ var SYSTEMCTL = process.env.WOC_SYSTEMCTL || 'systemctl';
 var RECORDS = process.env.WOC_RESTART_RECORDS || '/var/opt/waze-on-cluster/restart-records';
 var RECORD_MAX = 64 * 1024;
 var RECORD_BOOTS = 5;
+var RECORD_ENTRIES = 200;
+var RECORD_DIR_BYTES = 4096;
 
 /* Copies t's restart records into dir as <n>-<id>-<who>.xml (n counts the
  * boots that kept one, so the order needs no clock: this step runs before
  * the head unit sets it), each read past RECORD_MAX, VIN-scrubbed and then
- * cut to RECORD_MAX as Save logs does (logs_extra.js), 0640 in a 2770 folder
- * of group systemd-journal (group_dir.js; opts its uid and group file, for
- * tests), a temporary file made new and renamed into place. Drops those of
- * all but the newest RECORD_BOOTS boots and stray temporary files; returns
- * how many it copied. Without a record it writes nothing; if the folder
- * cannot be made private it throws before writing. */
+ * cut to RECORD_MAX as Save logs does (logs_extra.js), 0640 in a 2750 folder
+ * of group systemd-journal, root's to write (group_dir.js; opts its uid and
+ * group file, for tests), a temporary file made new and renamed into place;
+ * a name already there that is not a regular file of that owner, not writable
+ * by the group, is replaced, not trusted. Drops those of all but the newest
+ * RECORD_BOOTS boots and stray temporary files; returns how many it copied.
+ * Without a record it writes nothing; if the folder cannot be made private it
+ * throws before writing. A folder with more than RECORD_ENTRIES entries (or
+ * one too big to hold them, Node 8 having no bounded read of a folder) is not
+ * listed: this step runs before the CarPlay decision and a synchronous walk of
+ * a huge folder would hold it up. Nothing is kept that boot. */
 function keepRestartRecords(t, dir, id, opts) {
     if (!t.restartInfo.some(exists)) return 0;
     var extra = require('./logs_extra.js'), found = [];
@@ -223,10 +230,13 @@ function keepRestartRecords(t, dir, id, opts) {
         if (src) found.push({ who: path.basename(path.dirname(f)), buf: extra.redact(src.text, RECORD_MAX, src.more) });
     });
     if (!found.length) return 0;
-    require('./group_dir.js').groupDir(dir, 'systemd-journal', opts);
+    var o = opts || {}, uid = o.uid || 0;
+    require('./group_dir.js').groupDir(dir, 'systemd-journal', Object.assign({}, o, { mode: 0o2750 }));
     id = /^[0-9A-Za-z-]+$/.test(id || '') ? id : 'unknown';
+    var names = fs.lstatSync(dir).size > RECORD_DIR_BYTES ? null : fs.readdirSync(dir);
+    if (!names || names.length > RECORD_ENTRIES) { log('restart records not kept: ' + dir + ' holds more than ' + RECORD_ENTRIES + ' entries'); return 0; }
     var kept = [];
-    fs.readdirSync(dir).forEach(function (name) {
+    names.forEach(function (name) {
         if (/\.xml\.tmp$/.test(name)) { fs.unlinkSync(path.join(dir, name)); return; }
         var m = /^(\d+)-([0-9A-Za-z-]+)-[a-z]+\.xml$/.exec(name);
         if (m) kept.push({ name: name, n: Number(m[1]), boot: m[2] });
@@ -235,7 +245,10 @@ function keepRestartRecords(t, dir, id, opts) {
     var n = mine ? mine.n : kept.reduce(function (max, k) { return Math.max(max, k.n); }, 0) + 1, copied = 0;
     found.forEach(function (r) {
         var name = n + '-' + id + '-' + r.who + '.xml', dest = path.join(dir, name);
-        if (exists(dest)) return;
+        var had = null;
+        try { had = fs.lstatSync(dest); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        if (had && had.isFile() && had.uid === uid && !(had.mode & 0o022)) return;
+        if (had) fs.unlinkSync(dest);
         fs.writeFileSync(dest + '.tmp', r.buf, { mode: 0o640, flag: 'wx' });
         fs.chmodSync(dest + '.tmp', 0o640);
         fs.renameSync(dest + '.tmp', dest);
@@ -840,7 +853,7 @@ function Recovery(opts) {
     this._repairModes = opts.repairModes || function (cb) { repairModes(t, 0, cb); };
     /* Whether a process runs the target's own file: the run is of the file
      * the record describes, not of one a change replaced. */
-    var runsTarget = this._runsTarget = opts.runsTarget || function () { return lock.inUse(t.target); };
+    var runsTarget = this._runsTarget = opts.runsTarget || function () { return lock.inUse(t.target, false); };
     this._prove = opts.prove || function (cb) { proveRecord(t, runsTarget, cb); };
     this._probe = opts.probe || function (cb) { probeTarget(t, cb); };
     this._systemState = opts.systemState || realSystemState;
@@ -929,7 +942,11 @@ Recovery.prototype._save = function (st) {
     return true;
 };
 
-Recovery.prototype._armed = function (st) { return !!st.arm && st.arm.boot === this.bootId; };
+/* Armed in this boot: the same id, which must be one (boot_id.js gives ''
+ * when it cannot read it). An arm kept from a boot whose id cannot be
+ * compared with this one's counts as a prior boot, and no trial is proved in
+ * a boot with no id. */
+Recovery.prototype._armed = function (st) { return /^[0-9A-Za-z-]+$/.test(this.bootId || '') && !!st.arm && st.arm.boot === this.bootId; };
 Recovery.prototype._thisBoot = function (rec) { return !!rec && rec.boot === this.bootId; };
 
 /* The boot-time decision. First an original that lacks the access its

@@ -342,6 +342,35 @@ test('a first patch on trial that runs healthy a minute is recorded proven; then
     assert.strictEqual((await bootUp(w, 'D')).step.action, 'restored', 'two do');
 });
 
+test('a boot with no readable boot id never proves a trial, and an arm kept from such a boot counts as a prior boot', async () => {
+    const wasId = process.env.WOC_BOOT_ID;
+    /* '' is what boot_id.js reads when the file cannot be read; a Recovery given '' asks it */
+    process.env.WOC_BOOT_ID = path.join(os.tmpdir(), 'woc-no-such-boot-id');
+    for (const id of ['', 'not an id', '../x']) {
+        const w = makeWorld();
+        w.runs = true;
+        w.install('carplay', 'trial');
+        const { watcher } = await bootUp(w, id);
+        w.now.advance(61000);
+        await tick(watcher);
+        await whenRestored(watcher);
+        assert.deepStrictEqual(recordOf(w), { patched: true, proven: false, trial: true }, JSON.stringify(id) + ': not recorded proven');
+        assert(w.logs.some((l) => /this boot is not clean \(not armed\)/.test(l)), w.logs.join('\n'));
+        w.logs.length = 0;
+        const next = await bootUp(w, id);   /* the id repeats, or cannot be read again: the arm is of an earlier boot */
+        assert(w.logs.some((l) => /failed patched boots and crashes/.test(l)), JSON.stringify(id) + ': the earlier arm is tallied: ' + w.logs.join('\n') + JSON.stringify(next.step));
+    }
+    if (wasId === undefined) delete process.env.WOC_BOOT_ID; else process.env.WOC_BOOT_ID = wasId;
+    const w = makeWorld();
+    w.runs = true;
+    w.install('carplay', 'trial');
+    const { watcher } = await bootUp(w, 'A');
+    w.now.advance(61000);
+    await tick(watcher);
+    await whenRestored(watcher);
+    assert.strictEqual(recordOf(w).proven, true, 'a valid id still proves it');
+});
+
 test('a patch on trial is not recorded proven for a run of another file (a change waits for the next start)', async () => {
     const w = makeWorld();
     w.runs = false;
@@ -2126,7 +2155,7 @@ test('the carplay boot step keeps recmgr\'s and crashhandler\'s restart records 
     assert.strictEqual(fs.readFileSync(path.join(keep, '1-boot-1-recmgr.xml'), 'utf8'), '<restartInfo vin="<VIN>">recmgr</restartInfo>\n');
     const big = fs.readFileSync(path.join(keep, '1-boot-1-crashhandler.xml'), 'utf8');
     assert(Buffer.byteLength(big) <= recovery.RECORD_MAX && big.indexOf('WBA8E9') < 0 && /\.\.\. \(cut at \d+ bytes\)\n$/.test(big), big.slice(-100));
-    assert.strictEqual(fs.statSync(keep).mode & 0o7777, 0o2770, 'the folder as the kept journal\'s');
+    assert.strictEqual(fs.statSync(keep).mode & 0o7777, 0o2750, 'the folder: root writes, the group reads');
     listed().forEach((n) => assert.strictEqual(fs.statSync(path.join(keep, n)).mode & 0o777, 0o640, n));
     /* a second run in the same boot adds nothing */
     assert.strictEqual(keepNow('boot-1'), 0);
@@ -2176,7 +2205,48 @@ test('kept restart records: a boot id that is no safe name is "unknown", a recor
     assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'keep me');
     assert.deepStrictEqual(fs.readdirSync(keep).sort(), ['1-unknown-recmgr.xml', '2-boot-2-recmgr.xml']);
 });
-test('a boot step out of time puts / back read-only and releases the lock before it exits', () => {
+test('kept restart records: the folder is the group\'s to read only, a name planted in it is replaced, and a folder of more than 200 entries is left alone', () => {
+    const w = makeWorld();
+    w.install('carplay', 'original');
+    const sin = path.join(w.dir, 'sin'), keep = path.join(w.dir, 'var', 'restart-records');
+    const groups = path.join(w.dir, 'group');
+    fs.writeFileSync(groups, 'systemd-journal:x:' + process.getgid() + ':\n');
+    const opts = { uid: process.getuid(), groupFile: groups };
+    const keepNow = (id) => recovery.keepRestartRecords(w.T.carplay, keep, id, opts);
+    fs.writeFileSync(path.join(sin, 'recmgr', 'restartInfo.xml'), '<r>real</r>\n');
+    /* a folder the group could write (as an earlier version made it) is closed again */
+    fs.mkdirSync(keep, { recursive: true });
+    fs.chmodSync(keep, 0o2770);
+    /* names a group member planted: a link, a file the group can write, a folder */
+    const victim = path.join(w.dir, 'victim');
+    fs.writeFileSync(victim, 'keep me');
+    fs.symlinkSync(victim, path.join(keep, '1-boot-1-recmgr.xml'));
+    assert.strictEqual(keepNow('boot-1'), 1);
+    assert.strictEqual(fs.statSync(keep).mode & 0o7777, 0o2750);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'keep me', 'not written through');
+    const dest = path.join(keep, '1-boot-1-recmgr.xml');
+    assert(fs.lstatSync(dest).isFile() && fs.readFileSync(dest, 'utf8') === '<r>real</r>\n', 'the link replaced by the record');
+    fs.writeFileSync(dest, 'forged');
+    fs.chmodSync(dest, 0o660);
+    assert.strictEqual(keepNow('boot-1'), 1, 'a file the group can write is not trusted');
+    assert.strictEqual(fs.readFileSync(dest, 'utf8'), '<r>real</r>\n');
+    assert.strictEqual(fs.statSync(dest).mode & 0o777, 0o640);
+    assert.strictEqual(keepNow('boot-1'), 0, 'our own file stays');
+    fs.unlinkSync(dest);
+    fs.mkdirSync(dest);
+    assert.throws(() => keepNow('boot-1'), 'a folder in its place is refused');
+    fs.rmdirSync(dest);
+    /* a folder of more than 200 entries is not listed: nothing kept, no throw, one log line */
+    for (let i = 0; i < 400; i++) fs.writeFileSync(path.join(keep, 'x'.repeat(40) + i + '.junk'), '');
+    const before = fs.readdirSync(keep).length;
+    const out = [], write = process.stdout.write;
+    process.stdout.write = function (s) { out.push(String(s)); return true; };
+    let kept;
+    try { kept = keepNow('boot-2'); } finally { process.stdout.write = write; }
+    assert.strictEqual(kept, 0);
+    assert.strictEqual(fs.readdirSync(keep).length, before, 'nothing written or removed');
+    assert(out.filter((l) => /restart records not kept: .* more than 200 entries/.test(l)).length === 1, out.join(''));
+});test('a boot step out of time puts / back read-only and releases the lock before it exits', () => {
     const w = makeWorld();
     w.install('carplay', 'unproven');
     fs.writeFileSync(w.T.carplay.state, JSON.stringify({ fails: 1, unknown: 0, arm: null }));
@@ -2319,6 +2389,52 @@ test('the carplay patcher records each write: on trial, proven once run healthy,
     fs.writeFileSync(tgt, unprovenCarplay(fs.readFileSync(CARPLAY_BIN)));
     patcher(['apply', '--panel', 'high', '--unproven', '--yes']);
     assert.deepStrictEqual([record.current(tgt).patched, record.current(tgt).proven], [true, false]);
+});
+
+test('woc-patch.sh says so, loudly, and exits non-zero when / does not go read-only again; a patcher failure keeps its own status', () => {
+    const w = makeWorld(), script = path.join(__dirname, '..', 'woc-patch.sh'), bin = path.join(w.dir, 'fakebin'), log = path.join(w.dir, 'mount.log');
+    fs.mkdirSync(bin);
+    const fake = (name, body) => fs.writeFileSync(path.join(bin, name), '#!/bin/sh\n' + body + '\n', { mode: 0o755 });
+    fake('sync', 'exit 0');
+    const run = (roWorks, nodeRc) => {
+        fake('mount', 'echo "$*" >> ' + log + '\ncase "$*" in *remount,ro*) exit ' + (roWorks ? 0 : 32) + ' ;; esac\nexit 0');
+        fake('node', 'exit ' + nodeRc);
+        fs.writeFileSync(log, '');
+        const r = cp.spawnSync('sh', [script, 'revert'], { encoding: 'utf8', timeout: 20000, env: Object.assign({}, process.env, { PATH: bin + path.delimiter + process.env.PATH }) });
+        return { status: r.status, err: r.stderr, out: r.stdout, mounts: fs.readFileSync(log, 'utf8').trim().split('\n') };
+    };
+    const NOT_RO = /error: \/ is still read-write: a running file may hold it; restart the head unit/;
+    let r = run(true, 0);
+    assert.deepStrictEqual([r.status, NOT_RO.test(r.err), r.mounts], [0, false, ['-o remount,rw /', '-o remount,ro /']], r.err + r.out);
+    r = run(false, 0);
+    assert(r.status !== 0 && NOT_RO.test(r.err), 'a failed remount,ro is an error: ' + r.status + ' ' + r.err);
+    assert(/Reverted/.test(r.out), 'the change itself was made');
+    r = run(false, 3);
+    assert(r.status === 3 && NOT_RO.test(r.err), 'the patcher\'s own status is kept: ' + r.status + ' ' + r.err);
+    r = run(true, 3);
+    assert(r.status === 3 && !NOT_RO.test(r.err), r.status + ' ' + r.err);
+    assert.strictEqual(cp.spawnSync('sh', ['-n', script]).status, 0, 'sh -n');
+});
+
+test('two writers of one patch record (the watcher, woc-patch.sh) each have their own temporary file: neither renames the other\'s', () => {
+    const w = makeWorld();
+    w.install('carplay', 'trial');
+    const tgt = w.T.carplay.target, dir = path.dirname(tgt), rename = fs.renameSync;
+    let inner = 0;
+    fs.renameSync = function (from, to) {
+        /* the other writer runs whole between this one's temporary file and its rename */
+        if (!inner++) record.write(tgt, { patched: true, proven: true });
+        return rename.apply(fs, arguments);
+    };
+    try { record.write(tgt, { patched: true, proven: false, trial: true }); } finally { fs.renameSync = rename; }
+    assert.deepStrictEqual(recordOf(w), { patched: true, proven: false, trial: true }, 'the last rename wins, whole');
+    assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => /\.tmp$/.test(n)), [], 'no temporary file left');
+    /* a name another process left is never written through */
+    const mine = record.recordPath(tgt) + '.' + process.pid + '.', victim = path.join(w.dir, 'victim');
+    fs.writeFileSync(victim, 'keep me');
+    for (let i = 1; i < 50; i++) try { fs.symlinkSync(victim, mine + i + '.tmp'); } catch (e) {}
+    try { record.write(tgt, { patched: true, proven: true }); } catch (e) { /* the planted name may be the next one */ }
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'keep me');
 });
 
 /* The aapd patcher on copies of aapd and aapd.conf in w, with a coding of

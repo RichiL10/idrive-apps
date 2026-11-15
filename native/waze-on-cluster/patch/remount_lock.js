@@ -266,24 +266,30 @@ var PROC = process.env.WOC_PROC || '/proc';
 function hex2(n) { return (n < 16 ? '0' : '') + n.toString(16); }
 /* A process runs the inode `st` (a stat of it, the file maybe unlinked
  * since): its exe is the inode, or it maps it, as a binary translator
- * (Rosetta in the emulator) runs one, its exe being the translator. */
-function runs(st) {
+ * (Rosetta in the emulator) runs one, its exe being the translator.
+ * Unless unknown is false it fails closed: a process that cannot be read (any
+ * error but "it is gone": ENOENT, ESRCH) counts as running the inode, as does an
+ * unreadable /proc. Keeping a name never stops / going read-only; removing one
+ * can. A caller that takes "runs" as proof of health passes false. */
+function gone(e) { return e.code === 'ENOENT' || e.code === 'ESRCH'; }
+function runs(st, unknown) {
+    var bad = unknown !== false;
     var mapped = ' ' + hex2((st.dev >> 8) & 0xfff) + ':' + hex2((st.dev & 0xff) | ((st.dev >> 12) & 0xfff00)) + ' ' + st.ino + ' ';
     var pids = [];
-    try { pids = fs.readdirSync(PROC).filter(function (n) { return /^\d+$/.test(n); }); } catch (e) {}
+    try { pids = fs.readdirSync(PROC).filter(function (n) { return /^\d+$/.test(n); }); } catch (e) { return bad && !gone(e); }
     return pids.some(function (pid) {
         try { var x = fs.statSync(path.join(PROC, pid, 'exe')); if (x.ino === st.ino && x.dev === st.dev) return true; } catch (e) {}
-        try { return fs.readFileSync(path.join(PROC, pid, 'maps'), 'latin1').indexOf(mapped) >= 0; } catch (e) { return false; }
+        try { return fs.readFileSync(path.join(PROC, pid, 'maps'), 'latin1').indexOf(mapped) >= 0; } catch (e) { return bad && !gone(e); }
     });
 }
 
-function inUse(file) {
-    try { return runs(fs.statSync(file)); } catch (e) { return false; }
+function inUse(file, unknown) {
+    try { return runs(fs.statSync(file), unknown); } catch (e) { return unknown !== false && !gone(e); }
 }
 
 function holds(link, target) {
     var a, b;
-    try { a = fs.statSync(link); } catch (e) { return false; }
+    try { a = fs.statSync(link); } catch (e) { return !gone(e); }
     try { b = fs.statSync(target); } catch (e) { b = null; }
     return !(b && a.ino === b.ino && a.dev === b.dev) && inUse(link);
 }

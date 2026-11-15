@@ -395,7 +395,7 @@ uptime, and what a start the head unit reset needs explained
   the crash handler's restart records, which each deletes at its start. The
   carplay boot step (`waze-on-cluster-boot.service`, root, before carplay)
   copies each it finds into `/var/opt/waze-on-cluster/restart-records/`
-  (group `systemd-journal`, 2770, files 0640, as the kept journal), named by
+  (group `systemd-journal`, 2750, files 0640: root writes, the group reads), named by
   the boot that found it and numbered in boot order (the clock is not yet
   set then). Each record is read past 64 KiB, VIN-scrubbed and then cut to
   64 KiB as below; those of the last 5 boots are kept. With no record it
@@ -591,7 +591,9 @@ Its sites:
 `verify`, `revert [--force]`, and `apply high|mid` with `--avb` (the app's
 sink), no flag (`udp://127.0.0.1:20557`), `--capture` (FIFO) or `--sink
 <url>`, plus `--res WxH|stock`, `--safe WxH+X+Y|full` and `--unproven`. It
-remounts `/` read-write only for the write. **Never `systemctl stop` or
+remounts `/` read-write only for the write, and says on stderr (and exits
+non-zero) when `/` does not go read-only again: restart the head unit. It does
+not take patchd's lock: do not run it while the app is patching. **Never `systemctl stop` or
 `restart` carplay**: CarPlay dumps core on SIGTERM, which power-cycles the
 head unit, and so does any other failed CarPlay end; with the drop-in
 loaded, a SIGKILL is a clean exit.

@@ -25,6 +25,12 @@
 # script does NOT stop or start carplay (recmgr and MainApp timing are the
 # unit's to manage); it prints how. The running carplay keeps the old binary
 # until then, so nothing changes mid-session.
+#
+# This script does NOT take patchd's remount lock and does not keep the
+# running binary named: do not run it while the app is patching or reverting
+# (patchd, recovery.js), or while a patchd write may be pending. If / does not
+# go read-only again (a running file may hold it) it says so on stderr and
+# exits non-zero: restart the head unit.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -48,6 +54,24 @@ activation() {
 }
 
 cmd=${1:-}; [ $# -gt 0 ] && shift || true
+
+# On any exit: / read-only again. A remount that does not take is an error,
+# said aloud, and the exit status is never 0 then.
+back_to_ro() {
+    rc=$?
+    trap - EXIT
+    sync
+    if ! "$MOUNT" -o remount,ro / 2>/dev/null; then
+        echo "error: / is still read-write: a running file may hold it; restart the head unit" >&2
+        [ "$rc" -ne 0 ] || rc=1
+    fi
+    exit "$rc"
+}
+read_write_window() {
+    trap 'exit 130' INT TERM HUP
+    trap back_to_ro EXIT
+    "$MOUNT" -o remount,rw /
+}
 
 case "$cmd" in
   status)  exec "$NODE" "$PATCHER" status --target "$TARGET" ;;
@@ -81,8 +105,7 @@ case "$cmd" in
       shift
     done
     # Remount / read-write only for the write window; restore read-only on exit.
-    trap 'sync; "$MOUNT" -o remount,ro / 2>/dev/null || true' EXIT INT TERM HUP
-    "$MOUNT" -o remount,rw /
+    read_write_window
     # shellcheck disable=SC2086
     "$NODE" "$PATCHER" apply --panel "$panel" $capture $res $safe $unproven --target "$TARGET" --yes
     echo
@@ -92,8 +115,7 @@ case "$cmd" in
   revert)
     # Pass through extra flags (e.g. --force to restore over another carplay
     # build; the patcher refuses that without it).
-    trap 'sync; "$MOUNT" -o remount,ro / 2>/dev/null || true' EXIT INT TERM HUP
-    "$MOUNT" -o remount,rw /
+    read_write_window
     "$NODE" "$PATCHER" revert --target "$TARGET" --yes "$@"
     echo
     echo "Reverted. $(activation)"

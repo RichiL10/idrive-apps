@@ -257,6 +257,15 @@ Record state, failed starts needed, action (`THRESHOLD`, `recovery.js`):
 | no usable backup and crashing (any of the above) | the same count | persistent failed mark (S4), binary left as it is |
 | a boot with a failed start or crash before the healthy run | none | a trial stays a trial |
 
+A record written by 0.8.9 or earlier is trusted as proven: those versions wrote `proven: true` straight after applying a proven build, and 0.8.10 cannot tell that from a patch that did run healthy. A patch from those versions that never ran healthy is therefore not put on trial. Remove the patch and apply it again to get the trial. (The owner's unit never had 0.8.9, so this is documentation only.)
+
+Fix round after the four reviews of the merge:
+- Boot id: `_armed` (`recovery.js`) is false when the boot id is empty or not `[0-9A-Za-z-]+` (`boot_id.js` returns `''` on a read failure). No trial is proven then, and an arm kept from a boot whose id cannot be compared counts as a prior boot. A changed `/proc/stat` btime is not used: the head unit sets its clock after boot, which moves btime within one boot and would tally a healthy boot as a prior one.
+- Patch record: each write uses its own temporary file (`<record>.<pid>.<n>.tmp`, created with `wx`), because the watcher and `woc-patch.sh` write without a common lock.
+- Restart records: `keepRestartRecords` makes the folder 2750 (root writes; the group `systemd-journal` reads; `group_dir.js` takes `opts.mode`), replaces a name that is not a regular file of root's or is group-writable, and does not list a folder of more than 200 entries or bigger than 4096 bytes (Node 8 has no bounded directory read). Readers: `logs_extra.js` snapshot (`logs-fw.service`, root) and `collect-logs.sh` (root) only read. A folder that once grew past 4096 bytes stays that size on ext4, so retention then stays off until the folder is recreated.
+- Held names (`remount_lock.js`): `runs`, `inUse` and `holds` fail closed. A process whose `maps` cannot be read for any reason but ENOENT/ESRCH, or an unreadable `/proc`, counts as running the file, so `staleHeld`, `settleHeld`, `freeHeld` and `dropUnusedRunning` keep the name. The recovery watcher's health check (`runsTarget`) passes `unknown = false`, since there "runs" is proof, not a reason to keep. Cost: with a stuck, unreadable process and a differing `.woc-running`, the boot restore defers ("processes run both"), not skips. No process can newly start a replaced inode through a held name: nothing executes a `.woc-running*` path, and the target's path names the new inode; the file the change replaces is named under an extra name before the write (`holdTarget`) and checked after (`runsStale`). What was real is only the unreadable-process case.
+- `woc-patch.sh` is not rewritten: its exit trap reports a `/` that stays read-write on stderr and exits non-zero. It does not take patchd's lock.
+
 ## 0.8.10, crash evidence for a head unit that restarts in a loop (upstream issue #122)
 
 Ported from upstream d67ea05, dcd61a7, 3f6047e, 5de507e (waze-on-cluster 0.9.8, 0.9.9), adapted to our tree.
