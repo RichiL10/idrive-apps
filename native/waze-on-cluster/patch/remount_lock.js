@@ -284,12 +284,12 @@ function runs(st, unknown) {
 }
 
 function inUse(file, unknown) {
-    try { return runs(fs.statSync(file), unknown); } catch (e) { return unknown !== false && !gone(e); }
+    try { return runs(fs.statSync(file), unknown); } catch (e) { return false; }
 }
 
 function holds(link, target) {
     var a, b;
-    try { a = fs.statSync(link); } catch (e) { return !gone(e); }
+    try { a = fs.statSync(link); } catch (e) { return false; }
     try { b = fs.statSync(target); } catch (e) { b = null; }
     return !(b && a.ino === b.ino && a.dev === b.dev) && inUse(link);
 }
