@@ -313,6 +313,32 @@
             }
           ]
         },
+        "31": {
+          "type": "checkBox",
+          "name": "wocMapShown",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Show map",
+                "type": "Text"
+              },
+              "eParam_RowSelected": {
+                "value": false,
+                "type": "Bool"
+              }
+            }
+          ]
+        },
         "35": {
           "type": "checkBox",
           "name": "wocGuide",

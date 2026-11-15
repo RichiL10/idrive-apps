@@ -9,9 +9,11 @@
  * header row. CarPlay and Android Auto have the same rows: Status, Patch,
  * Remove patch; Android Auto adds Zoom with Zoom out and Zoom in, and the
  * Hide phone's turn card checkbox. General: Cluster map (the shared render's
- * map), the Hide BMW's turn box checkbox (the render's setting; a press asks
+ * map), the Show map checkbox (the render's switch that takes the map off
+ * the cluster and back, with no reconnect; a press asks the render to flip
+ * it), the Hide BMW's turn box checkbox (the render's setting; a press asks
  * the render to flip it), Logs, Restart head unit and the Restart row. Info
- * rows read "Name: Value"; every on/off setting is a Hide checkbox. Every row
+ * rows read "Name: Value"; the on/off settings are checkboxes. Every row
  * stays on the page; one that cannot act now is greyed, and while patchd
  * runs any operation every operation is. The restart's two rows, the last
  * ones, are the only rows shown and hidden, so no other row moves: the
@@ -68,6 +70,7 @@ const AA_ZOOM_NAME = 'wocAaZoom';
 const AA_ZOOM_OUT_NAME = 'wocAaZoomOut';
 const AA_ZOOM_IN_NAME = 'wocAaZoomIn';
 const AA_CARD_NAME = 'wocAaCard';
+const MAP_SHOWN_NAME = 'wocMapShown';
 const GUIDE_NAME = 'wocGuide';
 const HEAD_GENERAL_NAME = 'wocHeadGeneral';
 const CAPTURE_NAME = 'wocCapture';
@@ -178,7 +181,7 @@ class WazeClusterApp extends OnlineApp {
             return Promise.reject(new Error(`uiDescription has no ${STATE_NAME} or ${LOGS_STATE}`));
         }
         const names = [STATUS_NAME, MAP_NAME, RESTART_STATUS_NAME, ENABLE_NAME, DISABLE_NAME, AA_STATUS_NAME, AA_ENABLE_NAME, AA_DISABLE_NAME, AA_ZOOM_NAME,
-            AA_ZOOM_OUT_NAME, AA_ZOOM_IN_NAME, AA_CARD_NAME, RESTART_NAME, GUIDE_NAME, HEAD_GENERAL_NAME, CAPTURE_NAME, CAPTURE_STATUS,
+            AA_ZOOM_OUT_NAME, AA_ZOOM_IN_NAME, AA_CARD_NAME, RESTART_NAME, MAP_SHOWN_NAME, GUIDE_NAME, HEAD_GENERAL_NAME, CAPTURE_NAME, CAPTURE_STATUS,
             LOGS_NAME, LOGS_SAVE, LOGS_STATUS, LOGS_QR, LOGS_URL].concat(LOGS_ROW_NAMES);
         names.forEach((name) => { this._components[name] = rhmi.getByName(name); });
         const missing = names.filter((name) => !this._components[name]);
@@ -197,6 +200,11 @@ class WazeClusterApp extends OnlineApp {
             this._control.toggleCard();
         });
         this._bind(RESTART_NAME, () => this._control.requestRestart());
+        this._bind(MAP_SHOWN_NAME, () => {
+            /* as for the turn box: the render's answer decides the tick */
+            delete this._written[`selected:${MAP_SHOWN_NAME}`];
+            this._control.toggleMapShown();
+        });
         this._bind(GUIDE_NAME, () => {
             /* the HMI ticks or unticks the box itself; the render's answer
              * decides what it shows */
@@ -467,6 +475,9 @@ class WazeClusterApp extends OnlineApp {
         this._setVisibleComp(RESTART_NAME, c.restartNeeded() || c.restartRequested());
         this._write(RESTART_STATUS_NAME, restartText);
         this._setVisibleComp(RESTART_STATUS_NAME, restartText !== '');
+        this._setEnabled(MAP_SHOWN_NAME, c.canToggleMapShown());
+        this._write(MAP_SHOWN_NAME, t('Show map'));
+        this._setSelected(MAP_SHOWN_NAME, c.canToggleMapShown() && c.mapShown());
         const hide = c.hideGuidance();
         const unavailable = c.guidanceUnavailable();
         this._setEnabled(GUIDE_NAME, hide !== null && !unavailable);

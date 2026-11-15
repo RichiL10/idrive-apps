@@ -435,6 +435,43 @@ not `<target>`'s own file:
 
 It never outlives its process by more than one head-unit start.
 
+A process runs a file when its `exe` is that file or when `/proc/<pid>/maps`
+maps it (a binary translator, as the emulator's Rosetta, runs a binary so,
+its `exe` the translator).
+
+Every file a process runs keeps a name through a change (Kiro test build, as
+upstream waze-on-cluster 0.9.2). For the length of a change,
+`<target>.woc-running.1` and `.2` link the file the change replaces when the
+link above already names another running file (a second change before the
+start), and, while `patchd` puts the running file back, the file the change
+wrote. A crash restart in that time may start the service from either one.
+After the change each name that links a file nothing runs goes; a running
+file is kept, renamed to `<target>.woc-running` when that name is free, so no
+file a process runs is left without a name and `/` goes read-only again. The
+names are removed and handed over like the link above. When every name is
+taken by a running file, nothing is written (the change is refused, `/` stays
+read-only); when none is free for the file a change wrote, the running file
+is not put back over it: the written one stays at `<target>` and the change
+is handled as any other (it waits for the start).
+
+A change that puts the running bytes back still waits when the service
+started meanwhile from the file the change replaced (that file stays named;
+`patchd` does not restart the service). When it started from the file the
+change wrote, before the put-back, that file stays named: CarPlay runs the
+reverted bytes and nothing waits; aapd may have read aapd.conf before the
+revert reached it, so Android Auto's removal waits for the start.
+
+A patcher that fails after writing a file leaves the change waiting (the
+pending marker) only while a process runs a file other than the one now on
+disk, or, for aapd, runs it but read aapd.conf before that changed; the
+service is not restarted for it. Otherwise nothing waits and the status reads
+what is on disk.
+
+An undo without a backup of ours writes nothing: this build never rebuilds a
+file from its own bytes (upstream's rebuild of a proven build, and its
+limit to files with an edit of ours in them, are not in this build), so a
+file another tool changed is left as it is.
+
 ### Install-time activation
 
 The deploy tool (`mgu-deploy` 0.7.0 and later) runs `patchd.js activate` as
@@ -805,7 +842,13 @@ oneshot wanted by `multi-user.target`, `Before=carplay.service`, which
 previous start's shutdown record, `restart-requested`, the other service's
 state, whether our backup exists, the patch record, a `stat` of the
 binary and, with no shutdown record, a `stat` of the two restart records,
-and nothing else; it reads the binary only to restore it.
+and nothing else; it reads the binary only to restore it. Before its decision
+the carplay step also copies the two restart records' text, when it finds any,
+into `/var/opt/waze-on-cluster/restart-records/` for Save logs (`keepRestartRecords`:
+each record read past 64 KiB, VIN-scrubbed, cut to 64 KiB, mode 0640 in a 2770
+folder of group `systemd-journal`, the last 5 boots kept). That copy decides
+nothing, never follows a link, and when it fails the step logs a line and goes
+on.
 
 A start counts as failed only on evidence of a crash. The evidence is the
 restart record recmgr or crashhandler writes when it asks for a head-unit

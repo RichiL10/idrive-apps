@@ -31,7 +31,10 @@
  * or is refused. The capture's texts. The turn box switch: hidden by default, each toggle one guide command to the
  * render and the state as the render reports it, nothing known or sent
  * while closed or with a render that has no switch, nothing sent while the
- * cluster renderer holds the box shown.
+ * cluster renderer holds the box shown. The map switch (Show map): ticked as the render says,
+ * each toggle one map command, Off in the map line while it is off, kept by the render across
+ * a service restart, greyed and silent while no patch is in effect, with a render that does not
+ * say (no map_shown) and while closed.
  * The Logs page's client (src/logs_control.js): the socket absent before the
  * logs service runs, Save logs sending one save and the list, the address
  * and the status following the service, its errors, and closing.
@@ -200,6 +203,78 @@ test('a render without the switch: not known, nothing sent', async (render, patc
     c.toggleGuidance();
     await sleep(50);
     assert.deepStrictEqual(render.received, []);
+    c.close();
+});
+
+test('the map switch: toggled through the render, Off in the map line, kept by the render across a restart', async (render, patch) => {
+    const c = control();
+    c.open();
+    await until('connected', () => c.connectedRender() && c.connectedPatch());
+    patch.announce('patched', 'high', null);
+    render.stream(true);
+    await until('showing', () => c.mapText().startsWith('Cluster map: Showing'));
+    assert.deepStrictEqual([c.mapShown(), c.canToggleMapShown()], [true, true]);
+    c.toggleMapShown();
+    await until('off', () => c.mapShown() === false);
+    assert.deepStrictEqual(render.received, [{ cmd: 'map', shown: 0 }]);
+    assert.strictEqual(c.mapText(), 'Cluster map: Off');
+    assert.strictEqual(c.canToggleMapShown(), true, 'still switchable: it is how the map comes back');
+    assert.strictEqual(c.hideGuidance(), true, 'the turn box switch is untouched');
+    /* the service restarts: the connection drops, nothing is known until
+     * it answers, and it says what it kept */
+    render.dropClients();
+    await until('dropped', () => c.mapShown() === null || c.connectedRender() === false);
+    await until('reconnected, off as kept', () => c.mapShown() === false);
+    assert.strictEqual(c.mapText(), 'Cluster map: Off');
+    assert.deepStrictEqual(render.received, [{ cmd: 'map', shown: 0 }], 'the app sent nothing again');
+    c.toggleMapShown();
+    await until('on', () => c.mapShown() === true);
+    assert.deepStrictEqual(render.received[1], { cmd: 'map', shown: 1 });
+    await until('showing again', () => c.mapText().startsWith('Cluster map: Showing'));
+    c.close();
+    assert.strictEqual(c.mapShown(), null, 'closed: not known');
+    assert.strictEqual(c.canToggleMapShown(), false);
+    c.toggleMapShown();
+    await sleep(50);
+    assert.strictEqual(render.received.length, 2, 'nothing sent while closed');
+});
+
+test('the map switch: greyed and silent with no patch in effect or a patch change waiting', async (render, patch) => {
+    const c = control();
+    c.open();
+    await until('connected', () => c.connectedRender() && c.connectedPatch());
+    patch.announce('original', null, null);
+    await until('not patched', () => c.statusText() === 'Status: Not patched');
+    assert.deepStrictEqual([c.mapShown(), c.canToggleMapShown()], [true, false]);
+    c.toggleMapShown();
+    patch.pending = 'apply';
+    patch.announce('unknown', null, null, 'deferred');
+    await until('pending', () => c.statusText() === 'Status: Patched after restart');
+    assert.strictEqual(c.canToggleMapShown(), false);
+    c.toggleMapShown();
+    await sleep(50);
+    assert.deepStrictEqual(render.received, []);
+    c.close();
+});
+
+test('the map switch: a render that does not say (a service before it): not known, greyed, the map line as before, nothing sent', async (render, patch) => {
+    render.shown = null;
+    const c = control();
+    c.open();
+    await until('connected', () => c.connectedRender() && c.connectedPatch());
+    patch.announce('patched', 'high', null);
+    await until('patched', () => c.statusText() === 'Status: Patched' && c.mapText() === 'Cluster map: Waiting for the phone');
+    assert.deepStrictEqual([c.mapShown(), c.canToggleMapShown()], [null, false]);
+    render.stream(true);
+    await until('showing', () => c.mapText().startsWith('Cluster map: Showing'));
+    c.toggleMapShown();
+    await sleep(50);
+    assert.deepStrictEqual(render.received, []);
+    /* a map_shown that is not 0 or 1 is not taken */
+    render.shown = 2;
+    render.announce('idle', null);
+    await until('status with 2', () => c.renderStatus && c.renderStatus.map_shown === 2);
+    assert.deepStrictEqual([c.mapShown(), c.canToggleMapShown(), c.mapText()], [null, false, 'Cluster map: Waiting for the phone']);
     c.close();
 });
 
@@ -486,6 +561,7 @@ test('a head unit that refuses the tool: not supported in both sections, also pa
     const NOT = 'not supported on this car (head unit: unknown variant is not supported (no hwvariant= on the kernel command line))';
     const D = [150, 400, 10];
     render.hide = null;
+    render.shown = null;
     render.guideDisabled = 1;
     const c = control();
     c.open();
@@ -498,6 +574,7 @@ test('a head unit that refuses the tool: not supported in both sections, also pa
     assert.deepStrictEqual([c.canEnable(), c.canDisable(), c.canEnableAa(), c.canDisableAa()], [false, false, false, false]);
     assert.strictEqual(c.mapText(), 'Cluster map: Off');
     assert.strictEqual(c.hideGuidance(), null, 'the turn box row is greyed');
+    assert.strictEqual(c.canToggleMapShown(), false, 'and the map switch');
     /* A patch still on disk until boot recovery restores it: still not
      * supported, Remove patch offered, the map unavailable. */
     patch.res = SIZE;
@@ -518,6 +595,7 @@ test('a head unit that refuses the tool: not supported in both sections, also pa
     patch.pending = null;
     c.enableMap();
     c.toggleGuidance();
+    c.toggleMapShown();
     await sleep(50);
     assert.strictEqual(patch.count('apply'), 0);
     assert.deepStrictEqual(render.received, []);

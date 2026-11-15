@@ -117,7 +117,7 @@ function ro() { return /\bro\b/.test(fs.readFileSync(MOUNTS, 'utf8')); }
 function disk() { return sha(fs.readFileSync(TGT)); }
 function marker() { try { return JSON.parse(fs.readFileSync(PENDING, 'utf8')); } catch (e) { return null; } }
 function mountCalls() { try { return fs.readFileSync(MOUNT_LOG, 'utf8'); } catch (e) { return ''; } }
-function sidecars(t) { return [t + '.woc-orig', t + '.woc-orig.json', record.recordPath(t), t + '.woc-running', t + '.woc-tmp']; }
+function sidecars(t) { return [t + '.woc-orig', t + '.woc-orig.json', record.recordPath(t), t + '.woc-running', t + '.woc-running.1', t + '.woc-running.2', t + '.woc-tmp']; }
 function relink() { try { fs.unlinkSync(EXE); } catch (e) {} fs.linkSync(TGT, EXE); }
 
 /* The stock proven build in place, nothing of ours beside it, carplay running it. */
@@ -130,7 +130,7 @@ function reset() {
 }
 /* The next head-unit start: carplay runs the file on disk, the markers are gone. */
 function headUnitStart() {
-    [PENDING, TGT + '.woc-running'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
+    [PENDING, TGT + '.woc-running', TGT + '.woc-running.1', TGT + '.woc-running.2'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
     relink();
 }
 
@@ -423,6 +423,14 @@ function hookCases() {
         ok('coding 9, an earlier release\'s patch not started (' + c[0] + '): its record on trial, carplay as it was, / read-only', r.code === 0 && disk() === before &&
             view(TGT) === TRIAL && (marker() !== null) === c[1] && ro() && /recorded on trial/.test(r.out), JSON.stringify([r.result, view(TGT)]) + r.out);
     });
+    /* The replaced file a running carplay holds may be kept under one of the other names a change gives it (.1, .2). */
+    earlierRelease(false);
+    fs.renameSync(TGT + '.woc-running', TGT + '.woc-running.1');
+    before = disk();
+    car.coding(9);
+    r = hook('activate');
+    ok('coding 9, an earlier release\'s patch whose replaced file runs under another name: its record on trial too', r.code === 0 && disk() === before && view(TGT) === TRIAL && ro(),
+        JSON.stringify([r.result, view(TGT)]) + r.out);
     earlierRelease(true);
     var recBefore = fs.readFileSync(RECORD, 'utf8');
     car.coding(9);

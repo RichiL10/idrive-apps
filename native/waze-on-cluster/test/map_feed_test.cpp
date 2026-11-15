@@ -47,7 +47,15 @@
  *   hands over a picture the same as the last) keeps a static map showing
  *   past stall_ms; nothing reaches the renderer while the layer is hidden,
  *   and shown again it draws the newest picture first; after the renderer
- *   restarts, and on another target, repeats alone bring the picture. */
+ *   restarts, and on another target, repeats alone bring the picture;
+ * - the app's switch for the map (set_shown): off from showing hides the
+ *   layer, the slots go and the stock map and the turn box come back, the
+ *   status idle with its reason, and nothing is sent whatever frames or
+ *   repeats come; on again, the newest frame is drawn first and the hold is
+ *   back; off before the layer exists or before the first frame the map
+ *   stays hidden and shows with the first frame once on; off across a
+ *   renderer restart and across the stream ending and starting again the
+ *   layer stays hidden, and on while the stream is not live waits for it. */
 #include <poll.h>
 #include <signal.h>
 #include <unistd.h>
@@ -319,6 +327,157 @@ static void only_what_is_needed()
     r.pump(1500, &f2);
     r.drawing("panel", f2, &drawn);
     ok("another target: repeats alone bring the picture", r.st().state == "showing" && r.st().target == "panel" && drawn);
+}
+
+/* The app's switch for the map: off the cluster at once, back with the newest frame. */
+static void map_switch()
+{
+    const std::vector<uint8_t> f1 = atlas(1), f2 = atlas(2), f3 = atlas(3);
+    bool drawn = false, newest = false;
+
+    Rig r(false, 6000, true);
+    r.repeats = true;
+    r.port.stock_map(0x100, 0x01000101);
+    r.port.stock_map(0x105, kBox);
+    r.pump(2000, &f1);
+    ok("map switch: showing, the turn box held",
+       r.st().state == "showing" && r.st().shown && r.in_box_slot(kGuide) == 1 && r.in_box_slot(kBox) == 3);
+    const int releases = r.port.releases;
+    r.feed->set_shown(false);
+    r.pump(2500, &f1);
+    const crs::SlotInfo *stock = r.port.row(0x100, 0x01000101);
+    ok("map switch: off from showing, the layer hidden, the slot released, the stock map back",
+       !r.map_layer()->params.visible && r.port.releases > releases && !r.port.row(0x100, 0x010004f0) && stock &&
+           stock->map_status == 1);
+    ok("map switch: off, the hold released, BMW's turn box shown again",
+       r.in_box_slot(kGuide) == -1 && r.in_box_slot(kBox) == 1);
+    ok("map switch: off, the status is idle with its reason and says the map is off",
+       r.st().state == "idle" && r.st().reason == MapFeed::kOff && !r.st().shown && !r.st().stream_reason);
+    ok("map switch: off, the stream's reason does not replace it", r.feed->status("decode", "Stream lost").reason == MapFeed::kOff);
+    const unsigned long long off_at = r.received();
+    const int requests = r.port.requests;
+    r.pump(3000, &f2);   /* new pictures */
+    r.pump(3000, &f2);   /* and repeats of one */
+    ok("map switch: nothing reaches the renderer while off, frames or repeats, and the slot is not asked for",
+       r.received() == off_at && r.port.requests == requests && !r.map_layer()->params.visible);
+    r.feed->set_shown(false);
+    r.pump(200, &f2);
+    ok("map switch: off again changes nothing", r.st().state == "idle" && r.received() == off_at);
+    r.feed->set_shown(true);
+    bool first_drawn = false;
+    for (int step = 0; step < 300 && !first_drawn; step++) {
+        r.pump(5);
+        first_drawn = r.drawing("map", f2, &newest);
+    }
+    ok("map switch: on again, the newest frame is what it draws first", first_drawn && newest);
+    r.pump(2000, &f2);
+    ok("map switch: on again, showing, shown in the status, the turn box held again, the slots asked for again",
+       r.st().state == "showing" && r.st().shown && r.map_layer()->params.visible && r.in_box_slot(kGuide) == 1 &&
+           r.in_box_slot(kBox) == 3 && r.port.requests > requests);
+
+    /* off before the layer is made */
+    Rig b(false, 6000);
+    b.feed->set_shown(false);
+    b.pump(100, &f1);
+    ok("map switch: off before the renderer is reached, the layer is made hidden",
+       b.map_layer() && !b.map_layer()->params.visible && b.st().state == "idle" && b.st().reason == MapFeed::kOff);
+    b.pump(2000, &f1);
+    ok("map switch: and stays hidden with frames, the slot never asked for", b.port.requests == 0 && b.received() == 0);
+    b.feed->set_shown(true);
+    b.pump(1500, &f1);
+    b.drawing("map", f1, &drawn);
+    ok("map switch: on, the held frame shows", b.st().state == "showing" && b.port.requests == 1 && drawn);
+
+    /* off before the first frame */
+    Rig e(false, 6000);
+    e.pump(100);
+    e.feed->set_shown(false);
+    e.pump(500);
+    e.feed->set_shown(true);
+    e.pump(500);
+    ok("map switch: off and on before the first frame: idle, nothing asked for",
+       e.st().state == "idle" && e.st().reason.empty() && e.port.requests == 0);
+    e.pump(1500, &f1);
+    e.drawing("map", f1, &drawn);
+    ok("map switch: the first frame afterwards shows", e.st().state == "showing" && drawn);
+    Rig e2(false, 6000);
+    e2.pump(100);
+    e2.feed->set_shown(false);
+    e2.pump(2000, &f1);
+    ok("map switch: off before the first frame, the first frame held and nothing asked for",
+       e2.st().state == "idle" && e2.port.requests == 0 && !e2.map_layer()->params.visible);
+    e2.feed->set_shown(true);
+    e2.pump(1500);
+    e2.drawing("map", f1, &drawn);
+    ok("map switch: on, that frame shows without another one", e2.st().state == "showing" && drawn);
+
+    /* the renderer restarting while off */
+    Rig c(false, 6000);
+    c.pump(1500, &f1);
+    c.feed->set_shown(false);
+    c.pump(2000, &f2);
+    c.svc.reset();
+    c.pump(100, &f2);
+    c.start();
+    c.pump(3000, &f3);
+    ok("map switch: off across a renderer restart: the layer made again hidden, idle, nothing asked for",
+       c.map_layer() && !c.map_layer()->params.visible && c.st().state == "idle" && c.st().reason == MapFeed::kOff &&
+           c.port.requests == 1 && c.received() == 0);
+    c.feed->set_shown(true);
+    c.pump(1500, &f3);
+    c.drawing("map", f3, &newest);
+    ok("map switch: then on: the newest frame shows", c.st().state == "showing" && newest);
+    c.svc.reset();
+    c.pump(100, &f3);
+    c.feed->set_shown(false);
+    c.pump(16000, &f3);
+    ok("map switch: off while the renderer is gone: idle, not an error", c.st().state == "idle" && !c.st().shown);
+    c.start();
+    c.pump(3000, &f3);
+    ok("map switch: the renderer back: hidden", c.map_layer() && !c.map_layer()->params.visible &&
+                                                 c.st().state == "idle");
+    c.feed->set_shown(true);
+    c.pump(1500, &f3);
+    ok("map switch: and on again: showing", c.st().state == "showing");
+
+    /* the stream ending and coming back while off */
+    Rig s(false, 6000);
+    s.pump(1500, &f1);
+    s.feed->set_shown(false);
+    s.pump(1000, &f1);
+    s.feed->set_stream(false, false, Picture::Shown);
+    s.pump(2000, &f1);
+    ok("map switch: the stream lost while off: idle, off", s.st().state == "idle" && !s.st().shown &&
+                                                            s.st().reason == MapFeed::kOff);
+    s.feed->set_stream(true, false, Picture::Shown);
+    s.pump(2000, &f2);
+    ok("map switch: the stream back while off: still hidden, nothing asked for",
+       !s.map_layer()->params.visible && s.st().state == "idle" && s.port.requests == 1);
+    s.feed->set_stream(false, false, Picture::Shown);
+    s.feed->set_shown(true);
+    s.pump(1000, &f2);
+    ok("map switch: on while the stream is not live: hidden, idle, no reason of the app's",
+       !s.map_layer()->params.visible && s.st().state == "idle" && s.st().reason.empty() && s.st().shown);
+    s.feed->set_stream(true, false, Picture::Shown);
+    s.pump(1500, &f2);
+    s.drawing("map", f2, &newest);
+    ok("map switch: the stream live: shown with the newest frame", s.st().state == "showing" && newest);
+    s.feed->set_stream(true, true, Picture::Blank);
+    s.feed->set_shown(false);
+    s.feed->set_stream(true, false, Picture::Shown);
+    s.pump(500, &f2);
+    ok("map switch: frozen, then off, then not frozen: hidden", !s.map_layer()->params.visible && s.st().state == "idle");
+
+    StatusLog sl;
+    FeedStatus a;
+    a.state = "showing";
+    a.target = "map";
+    int64_t t = 2000000;
+    ok("map switch: status log: showing", sl.due(a, t));
+    a.state = "idle";
+    a.reason = MapFeed::kOff;
+    ok("map switch: status log: off is logged", sl.due(a, t + 100));
+    ok("map switch: status log: not again", !sl.due(a, t + 200));
 }
 
 int main()
@@ -604,6 +763,7 @@ int main()
 
     guide_hold();
     only_what_is_needed();
+    map_switch();
     std::printf(failures ? "%d FAILED\n" : "all ok\n", failures);
     return failures ? 1 : 0;
 }

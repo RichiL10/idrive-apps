@@ -4,8 +4,9 @@
  * `waze-on-cluster run`) and the tool (README.md "Using it").
  *
  *   owner -> tool  {"cmd":"start","target":"sail"|"map"|"panel"|"hud"}
- *                  {"cmd":"guide","hide":0|1}  BMW's turn box hidden or not (guide_setting.h)
- *   tool -> owner  {"ev":"status",...,"hide_bmw_guidance":0|1,"guide_disabled":0|1}
+ *                  {"cmd":"guide","hide":0|1}  BMW's turn box hidden or not (state_settings.h)
+ *                  {"cmd":"map","shown":0|1}   the map on the cluster, or off it (state_settings.h)
+ *   tool -> owner  {"ev":"status",...,"hide_bmw_guidance":0|1,"map_shown":0|1,"guide_disabled":0|1}
  *                  {"ev":"log","line":...}
  *
  * One connection is the owner; a second one is told "busy" and closed. */

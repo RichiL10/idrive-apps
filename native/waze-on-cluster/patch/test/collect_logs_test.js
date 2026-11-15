@@ -1,0 +1,260 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Robert Nisipeanu
+/* The evidence logs_extra.js adds to the Save logs archive, from a stand-in
+ * unit (WOC_LOGS_ROOT) whose files hold fake secrets: a GitHub token, a Wi-Fi
+ * passphrase, a private key, a VIN and its short form, and a position.
+ * collect-logs.sh runs from a copy of the installed folder (the script beside
+ * the patch tools). Not root: the root-only part comes from the firewall
+ * unit's snapshot; as root it takes it itself. Either way the archive holds
+ * the patch records, the aapd recovery's state, the coding's variant, the
+ * aapd status, the deploy tool's versions and state, the restart records,
+ * recmgr's crash table and the list of kept core dumps, each at most 64 KiB,
+ * and none of the secrets or VINs. */
+'use strict';
+var assert = require('assert');
+var cp = require('child_process');
+var fs = require('fs');
+var os = require('os');
+var path = require('path');
+
+var extra = require('../logs_extra.js');
+var SCRIPT = path.join(__dirname, '..', '..', 'tools', 'collect-logs.sh');
+var dir = fs.mkdtempSync(path.join(os.tmpdir(), 'woc-collect-'));
+var bin = path.join(dir, 'bin');
+fs.mkdirSync(bin);
+var i;
+
+/* The scrub itself: what it replaces and what it leaves. */
+(function () {
+    var VIN = 'WBA8E9C50GK123456';
+    var cases = [
+        ['<crashID>' + VIN + '</crashID>', '<crashID><VIN></crashID>'],
+        ['vin=' + VIN.toLowerCase() + ';', 'vin=<VIN>;'],
+        [VIN, '<VIN>'],
+        [VIN + '\n' + VIN, '<VIN>\n<VIN>'],
+        ['K123456 and GK12345', '<VIN> and <VIN>'],
+        ['(GK12345)', '(<VIN>)'],
+        ['id' + VIN + 'x', 'id<VIN>x'],
+        ['5UXTR9C5XJ1234567', '<VIN>'],
+        ['WMWXU3C53B1234567', '<VIN>'],
+        ['1HGCM82633A004352', '<VIN>']
+    ];
+    cases.forEach(function (c) { assert.strictEqual(extra.scrub(c[0]), c[1], c[0]); });
+    /* not VINs: all letters, all digits, a hex id, a time stamp, a longer run, a plain word */
+    ['ABCDEFGHJKLMNPRST', '12345678901234567', '3f2a9c1d7e8b4a60b5c4d3e2f1a09182', '20261108204714_000_carplay', '2026-11-08T20:47:14Z',
+        'ABCDEFGHJKLMNPRSTUVWXYZ', 'restartInfo', '1234567', 'KI_KOMBI_VARIANT 7', '0x1d43eb'].forEach(function (s) {
+        assert.strictEqual(extra.scrub(s), s, s);
+    });
+    console.log('ok   scrub: 17- and 7-character VINs (also lower case, and inside a run for a BMW or MINI maker code); ids, times and words stay');
+})();
+
+/* journalctl prints a VIN into the unit journals (a file the scrub step meets
+ * last); sqlite3 comes below, per case. */
+fs.writeFileSync(path.join(bin, 'journalctl'), '#!/bin/sh\ncase " $* " in *" -u carplay "*) echo "carplay[7]: vin WBA8E9C50GK123456 short GK12345 ok";; esac\nexit 0\n', { mode: 0o755 });
+var ENV = Object.assign({}, process.env, { PATH: bin + ':' + process.env.PATH });
+var SECRETS = ['ghp_FAKEtoken0123456789abcdefghijklmnop', 'hunter2-wifi-passphrase', 'BEGIN PRIVATE KEY', 'WBA8E9C50GK123456',
+    'GK12345', '48.137154', '11.576124', 'CORE-DUMP-BYTES'];
+var U = path.join(dir, 'unit'), CUR = path.join(dir, 'current'), SNAP = path.join(dir, 'snapshot');
+function mk(rel, text) {
+    var f = path.join(U, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, text);
+    return f;
+}
+fs.mkdirSync(CUR);
+fs.copyFileSync(SCRIPT, path.join(CUR, 'collect-logs.sh'));
+fs.readdirSync(path.join(__dirname, '..')).filter(function (n) { return /\.js$/.test(n); }).forEach(function (n) {
+    fs.copyFileSync(path.join(__dirname, '..', n), path.join(CUR, n));
+});
+mk('usr/bin/carplay.woc-patch.json', '{"patched":true,"proven":true,"trial":false,"ino":5,"size":3484912,"mtime":1794170822000}\n');
+mk('usr/bin/aapd.woc-patch.json', '{"patched":false,"proven":true,"ino":6,"size":7367952,"mtime":1794170823000}\n');
+mk('var/opt/waze-on-cluster/aa-boot-recovery.json', '{"fails":1,"unknown":0,"arm":null,"prev":"b1","starts":null,"ended":null}\n');
+/* the coding image: KI_KOMBI_VARIANT 7, a VIN elsewhere in it */
+var coding = Buffer.alloc(0x1030);
+coding[0x28] = 0x09;
+coding[0x2c + 0x75a] = 7 << 1;
+coding.write('WBA8E9C50GK123456', 0x100);
+mk('dev/shm/rawcodingdata', coding);
+/* the deploy tool: its version, the tools, state.json with what must stay out (and past 64 KiB) */
+fs.mkdirSync(path.join(U, 'var/opt/mgu-deploy/versions/0.8.9'), { recursive: true });
+fs.symlinkSync('versions/0.8.9', path.join(U, 'var/opt/mgu-deploy/current'));
+['waze-on-cluster@0.9.7', 'cluster-render@0.4.3'].forEach(function (t) {
+    var id = t.split('@')[0], v = t.split('@')[1];
+    mk('var/opt/' + id + '/versions/' + v + '/component.json', JSON.stringify({ id: id, kind: 'tool', version: v, token: 'ghp_FAKEtoken0123456789abcdefghijklmnop' }));
+    fs.symlinkSync('versions/' + v, path.join(U, 'var/opt', id, 'current'));
+});
+var stash = [];
+for (i = 0; i < 6000; i++) stash.push({ path: '/var/opt/x/' + i });
+mk('var/opt/mgu-deploy/state.json', JSON.stringify({
+    tools: { 'waze-on-cluster': { version: '0.9.7', firmware: 'S18A-23-07-550', token: 'ghp_FAKEtoken0123456789abcdefghijklmnop' } },
+    apps: { robertn_store: { uid: 12001, version: '1.4.0', passphrase: 'hunter2-wifi-passphrase' } },
+    pending_reboot: [{ id: 'waze-on-cluster', reason: 'new units', boot: 'boot-now' }, { id: 'cluster-render', reason: 'done', boot: 'boot-old' }],
+    lastBounceAt: 1794170000,
+    vin: 'WBA8E9C50GK123456', position: { lat: 48.137154, lon: 11.576124 }, data_stash: stash }));
+assert(fs.statSync(path.join(U, 'var/opt/mgu-deploy/state.json')).size > 100 * 1024, 'the state is longer than a file may be in the archive');
+mk('var/opt/mgu-deploy/config.json', '{"token":"ghp_FAKEtoken0123456789abcdefghijklmnop"}\n');
+mk('var/opt/mgu-updater/credentials/token-0a1b2c3d', 'ghp_FAKEtoken0123456789abcdefghijklmnop\n');
+mk('var/opt/mgu-updater/sources.json', '{"wifi":{"psk":"hunter2-wifi-passphrase"},"key":"-----BEGIN PRIVATE KEY-----"}\n');
+/* BMW's records: restart records, recmgr's database, kept core dumps */
+mk('var/opt/public/sin/recmgr/restartInfo.xml', '<RestartInfo><name>carplay</name><crashID>WBA8E9C50GK123456-carplay</crashID>' +
+    '<vin7>GK12345</vin7><resets>3</resets></RestartInfo>\n');
+mk('var/opt/public/sin/crashhandler/restartInfo.xml', '<RestartInfo>' + 'x'.repeat(200000) + '</RestartInfo>\n');
+var DB = mk('var/opt/public/sin/recmgr/recmgr_stats.db', 'SQLite format 3\0');
+fs.utimesSync(DB, 1794298365, 1794298365);
+/* restart records the boot step kept, and what is not one of them */
+mk('var/opt/waze-on-cluster/restart-records/1-boot-old-recmgr.xml', '<RestartInfo><crashID>WBA8E9C50GK123456</crashID></RestartInfo>\n');
+mk('var/opt/waze-on-cluster/restart-records/1-boot-old-crashhandler.xml', '<RestartInfo><name>carplay</name></RestartInfo>\n');
+mk('var/opt/waze-on-cluster/restart-records/notes.xml', 'ghp_FAKEtoken0123456789abcdefghijklmnop');
+mk('var/opt/waze-on-cluster/restart-records/2-boot-old-recmgr.xml.tmp', 'ghp_FAKEtoken0123456789abcdefghijklmnop');
+mk('boot_id', 'boot-now\n');
+mk('var/opt/public/sin/crashhandler/coredumps/20261108204714_000_carplay/core.gz', 'CORE-DUMP-BYTES');
+mk('var/opt/public/sin/crashhandler/coredumps/20261108204714_000_carplay/context_WBA8E9C50GK123456.txt', 'CORE-DUMP-BYTES');
+mk('var/opt/public/sin/dlt-cdh/core.1794170822.carplay.4222.gz', 'CORE-DUMP-BYTES');
+for (i = 0; i < 130; i++) mk('var/opt/kerneldump/dump-' + i, 'CORE-DUMP-BYTES');
+/* sqlite3: records its arguments; rows as the firmware's would print them */
+var SQL_ARGS = path.join(dir, 'sqlite-args');
+fs.writeFileSync(path.join(bin, 'sqlite3'), '#!/bin/sh\nprintf "%s\\n" "$@" > ' + SQL_ARGS + '\n' +
+    'printf "CrashKey|Timestamp|Name|CrashID|LC\\n2|2026-11-05 06:53:00|carplay|WBA8E9C50GK123456-7|41\\n1|2026-11-05 06:51:00|carplay|c1|40\\n"\n', { mode: 0o755 });
+
+var XENV = Object.assign({}, ENV, { WOC_LOGS_ROOT: U, WOC_LOGS_SNAPSHOT: SNAP, WOC_BOOT_ID: path.join(U, 'boot_id') });
+var asRoot = process.getuid && process.getuid() === 0;
+if (!asRoot) {
+    fs.mkdirSync(SNAP);
+    cp.execFileSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'snapshot', SNAP], { env: XENV });
+}
+var out = path.join(dir, 'out-extra');
+fs.mkdirSync(out);
+var archive = cp.execFileSync('sh', [path.join(CUR, 'collect-logs.sh'), '-o', out], { env: XENV, encoding: 'utf8' }).trim();
+cp.execFileSync('tar', ['-xzf', archive, '-C', out]);
+var A = path.join(out, path.basename(archive).replace(/\.tar\.gz$/, ''));
+function get(n) { return fs.readFileSync(path.join(A, n), 'utf8'); }
+
+assert.strictEqual(get('patch-record-carplay.json'), fs.readFileSync(path.join(U, 'usr/bin/carplay.woc-patch.json'), 'utf8'));
+assert.strictEqual(get('patch-record-aapd.json'), fs.readFileSync(path.join(U, 'usr/bin/aapd.woc-patch.json'), 'utf8'));
+assert.strictEqual(get('aa-boot-recovery.json'), fs.readFileSync(path.join(U, 'var/opt/waze-on-cluster/aa-boot-recovery.json'), 'utf8'));
+assert.strictEqual(get('coding.txt'), 'KI_KOMBI_VARIANT 7\n');
+assert(/^target: +\/usr\/bin\/aapd$|^error: /m.test(get('aapd-status.txt')), get('aapd-status.txt'));
+assert.strictEqual(get('deploy.txt'), 'mgu-deploy 0.8.9\ntools installed (/var/opt/<id>/current):\n  tool cluster-render 0.4.3\n' +
+    '  tool waze-on-cluster 0.9.7\nstate.json:\n  tool waze-on-cluster 0.9.7 firmware S18A-23-07-550\n  app robertn_store 1.4.0\n' +
+    '  pending restart: waze-on-cluster - new units\n  last bounce: 2026-11-08T20:33:20Z\n');
+assert.strictEqual(get('restartInfo-recmgr.xml'), '<RestartInfo><name>carplay</name><crashID><VIN>-carplay</crashID>' +
+    '<vin7><VIN></vin7><resets>3</resets></RestartInfo>\n');
+var big = fs.statSync(path.join(A, 'restartInfo-crashhandler.xml')).size;
+assert(big <= 64 * 1024, 'capped: ' + big);
+assert.strictEqual(get('restartInfo-crashhandler.xml').match(/\(cut at/g).length, 1, 'one note for the cut');
+assert(/^<RestartInfo>x+\n\.\.\. \(cut at 65472 bytes\)\n$/.test(get('restartInfo-crashhandler.xml')));
+assert.strictEqual(get('restart-record-1-boot-old-recmgr.xml'), '<RestartInfo><crashID><VIN></crashID></RestartInfo>\n');
+assert.strictEqual(get('restart-record-1-boot-old-crashhandler.xml'), '<RestartInfo><name>carplay</name></RestartInfo>\n');
+assert.deepStrictEqual(fs.readdirSync(A).filter(function (n) { return /^restart-record-/.test(n); }).sort(),
+    ['restart-record-1-boot-old-crashhandler.xml', 'restart-record-1-boot-old-recmgr.xml'], 'only the files the boot step names');
+assert.strictEqual(get('recmgr-crashes.txt'), '-- /var/opt/public/sin/recmgr/recmgr_stats.db, modified 2026-11-10T08:12:45Z\n' +
+    '-- Crash, newest first (at most 200)\n' +
+    'CrashKey|Timestamp|Name|CrashID|LC\n2|2026-11-05 06:53:00|carplay|<VIN>-7|41\n1|2026-11-05 06:51:00|carplay|c1|40\n');
+var sqlArgs = fs.readFileSync(SQL_ARGS, 'utf8').split('\n');
+assert.strictEqual(sqlArgs[1], 'file:' + path.join(U, 'var/opt/public/sin/recmgr/recmgr_stats.db') + '?mode=ro', 'opened read-only');
+assert(/^SELECT /.test(sqlArgs[2]) && !/UserID/.test(sqlArgs[2]) && /LIMIT 200;$/.test(sqlArgs[2]), sqlArgs[2]);
+var dumps = get('core-dumps.txt').split('\n');
+assert(dumps.indexOf('-- /var/opt/public/sin/crashhandler/coredumps') >= 0 && dumps.indexOf('-- /var/opt/public/sin/dlt-cdh') >= 0);
+assert(dumps.some(function (l) { return /Z  20261108204714_000_carplay\/context_<VIN>\.txt$/.test(l); }), 'two levels, the VIN in a name hidden');
+assert(dumps.some(function (l) { return /Z  core\.1794170822\.carplay\.4222\.gz$/.test(l); }));
+assert(dumps.indexOf('-- /var/opt/kerneldump (the newest 100 of 130)') >= 0, 'at most 100 a folder');
+assert.strictEqual(dumps.filter(function (l) { return / {2}dump-\d+$/.test(l); }).length, 100);
+/* the VIN scrub reaches every file, the unit journals too */
+assert.strictEqual(get('journal-carplay.txt'), 'carplay[7]: vin <VIN> short <VIN> ok\n');
+var everything = fs.readdirSync(A).map(get).join('\n');
+SECRETS.forEach(function (x) { assert(everything.indexOf(x) < 0, 'the archive holds ' + x); });
+/* the files logs_extra writes keep to the cap, whatever the source */
+fs.readdirSync(A).filter(function (n) { return /^(restart|patch-record|aa-boot|coding|deploy|recmgr-crashes|core-dumps)/.test(n); }).forEach(function (n) {
+    assert(fs.statSync(path.join(A, n)).size <= 64 * 1024, n);
+});
+console.log('ok   the archive adds the patch records, aapd recovery, coding, aapd status, deploy state, restart records, ' +
+    'recmgr crashes and core-dump names (' + (asRoot ? 'as root' : 'from the snapshot') + '), capped, no secret or VIN');
+
+/* a VIN across the cap is scrubbed whole before the cut */
+var edge = path.join(dir, 'edge');
+fs.mkdirSync(edge);
+mk('var/opt/public/sin/crashhandler/restartInfo.xml', 'y'.repeat(65472 - 8) + ' WBA8E9C50GK123456 ' + 'y'.repeat(300));
+cp.execFileSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'snapshot', edge], { env: XENV });
+var cut = fs.readFileSync(path.join(edge, 'restartInfo-crashhandler.xml'), 'utf8');
+assert(cut.indexOf('WBA8E9') < 0 && / <VIN/.test(cut) && /\(cut at 65472 bytes\)\n$/.test(cut), cut.slice(-120));
+/* a source past what is read that scrubbing shrinks under the cap still says it was cut */
+mk('var/opt/public/sin/crashhandler/restartInfo.xml', new Array(5000).join('WBA8E9C50GK123456 '));
+var edge2 = path.join(dir, 'edge2');
+fs.mkdirSync(edge2);
+cp.execFileSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'snapshot', edge2], { env: XENV });
+var shrunk = fs.readFileSync(path.join(edge2, 'restartInfo-crashhandler.xml'), 'utf8');
+assert(shrunk.length < 30000 && shrunk.indexOf('WBA') < 0 && /\n\.\.\. \(cut at \d+ bytes\)\n$/.test(shrunk), shrunk.slice(-80));
+console.log('ok   a VIN across the cap is scrubbed before the cut; a shrunk source still says it was cut');
+
+/* sqlite3 that hangs is killed at 2 s; a missing database or folder is left out */
+fs.writeFileSync(path.join(bin, 'sqlite3'), '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 });
+var snap2 = path.join(dir, 'snap2');
+fs.mkdirSync(snap2);
+var t0 = Date.now();
+cp.execFileSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'snapshot', snap2], { env: XENV });
+assert(Date.now() - t0 < 6000, 'bounded: ' + (Date.now() - t0) + ' ms');
+assert(/\(sqlite3 killed after 2000 ms\)\n$/.test(fs.readFileSync(path.join(snap2, 'recmgr-crashes.txt'), 'utf8')));
+cp.execFileSync('rm', ['-rf', path.join(U, 'var/opt/public/sin/recmgr'), path.join(U, 'var/opt/kerneldump')]);
+var snap3 = path.join(dir, 'snap3');
+fs.mkdirSync(snap3);
+cp.execFileSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'snapshot', snap3], { env: XENV });
+assert.deepStrictEqual(fs.readdirSync(snap3).sort(), ['core-dumps.txt', 'restartInfo-crashhandler.xml']);
+assert(fs.readFileSync(path.join(snap3, 'core-dumps.txt'), 'utf8').indexOf('kerneldump') < 0);
+console.log('ok   a hung sqlite3 is killed at 2 s; what is absent is left out');
+
+/* fail closed: a link is never followed, a path that is no folder is a line, not a crash; the crash table is a
+ * capped file whatever the rows */
+var snap4 = path.join(dir, 'snap4');
+fs.mkdirSync(snap4);
+var secret = mk('secret-target', 'ghp_FAKEtoken0123456789abcdefghijklmnop');
+fs.unlinkSync(path.join(U, 'var/opt/public/sin/crashhandler/restartInfo.xml'));
+fs.symlinkSync(secret, path.join(U, 'var/opt/public/sin/crashhandler/restartInfo.xml'));
+fs.writeFileSync(path.join(U, 'var/opt/public/sin/recmgr'), 'not a folder');
+var rr = cp.spawnSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'snapshot', snap4], { env: XENV, encoding: 'utf8' });
+assert.strictEqual(rr.status, 0, rr.stderr);
+assert(!fs.existsSync(path.join(snap4, 'restartInfo-crashhandler.xml')), 'a link is no record');
+assert.strictEqual(fs.readFileSync(path.join(snap4, 'restartInfo-recmgr.xml'), 'utf8'), '(failed: ENOTDIR)\n');
+assert(fs.readdirSync(snap4).every(function (n) { return fs.readFileSync(path.join(snap4, n), 'utf8').indexOf('ghp_') < 0; }));
+console.log('ok   a link is never followed; an odd path is a line in the file, never a failure');
+
+/* the folder scan stops at SCAN_MAX entries and says so */
+var many = path.join(U, 'var/opt/public/sin/gcd');
+fs.mkdirSync(many, { recursive: true });
+for (i = 0; i < 5100; i++) fs.writeFileSync(path.join(many, 'g' + i), '');
+var snap5 = path.join(dir, 'snap5');
+fs.mkdirSync(snap5);
+cp.execFileSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'snapshot', snap5], { env: XENV });
+var gcd = fs.readFileSync(path.join(snap5, 'core-dumps.txt'), 'utf8').split('\n');
+assert(gcd.indexOf('-- /var/opt/public/sin/gcd (the first 5000 entries looked at) (the newest 100 of 5000)') >= 0, gcd.filter(function (l) { return /gcd/.test(l); }).join('|'));
+console.log('ok   a folder of thousands of entries is cut at 5000 looked at, 100 listed');
+
+/* scrub <dir>: every file, a link removed, a file too large replaced by a line */
+var sd = path.join(dir, 'scrub');
+fs.mkdirSync(sd);
+fs.writeFileSync(path.join(sd, 'a.txt'), 'x WBA8E9C50GK123456 y\n');
+fs.writeFileSync(path.join(sd, 'clean.txt'), 'nothing here\n');
+fs.symlinkSync(secret, path.join(sd, 'link'));
+fs.writeFileSync(path.join(sd, 'huge.txt'), Buffer.alloc(9 * 1024 * 1024, 0x61));
+rr = cp.spawnSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'scrub', sd], { env: XENV, encoding: 'utf8' });
+assert.strictEqual(rr.status, 0, rr.stderr);
+assert.strictEqual(fs.readFileSync(path.join(sd, 'a.txt'), 'utf8'), 'x <VIN> y\n');
+assert.strictEqual(fs.readFileSync(path.join(sd, 'clean.txt'), 'utf8'), 'nothing here\n');
+assert(!fs.existsSync(path.join(sd, 'link')), 'the link is gone');
+assert.strictEqual(fs.readFileSync(secret, 'utf8'), 'ghp_FAKEtoken0123456789abcdefghijklmnop', 'its target is not touched');
+assert.strictEqual(fs.readFileSync(path.join(sd, 'huge.txt'), 'utf8'), '(left out: larger than 8388608 bytes)\n');
+console.log('ok   scrub <dir>: VINs replaced in every file, a link removed, a file too large left out with a line');
+
+/* a scrub that fails stops the archive: nothing is packed that was not scrubbed */
+var CUR2 = path.join(dir, 'current2');
+fs.mkdirSync(CUR2);
+fs.readdirSync(CUR).forEach(function (n) { fs.copyFileSync(path.join(CUR, n), path.join(CUR2, n)); });
+fs.writeFileSync(path.join(CUR2, 'logs_extra.js'), 'if (process.argv[2] === "scrub") process.exit(1);\n');
+var out2 = path.join(dir, 'out-fail');
+fs.mkdirSync(out2);
+rr = cp.spawnSync('sh', [path.join(CUR2, 'collect-logs.sh'), '-o', out2], { env: XENV, encoding: 'utf8' });
+assert.strictEqual(rr.status, 1, rr.stdout + rr.stderr);
+assert(/could not scrub/.test(rr.stderr) && fs.readdirSync(out2).length === 0, 'no archive: ' + fs.readdirSync(out2));
+console.log('ok   a failed scrub: no archive is written');
+
+try { fs.rmSync ? fs.rmSync(dir, { recursive: true, force: true }) : null; } catch (e) { /* left in tmp */ }

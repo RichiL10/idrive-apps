@@ -48,7 +48,7 @@ VERSION := $(shell sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' component.json)
 # The capture, decode and map feed (own files), the kit's atlas, packing and
 # geometry, and the shared renderer's client.
 WOC_SRC = src/main.cpp src/refused.cpp src/video_producer.cpp src/freeze_watch.cpp src/alt_screen.cpp src/map_feed.cpp src/control.cpp src/h264_source.cpp \
-          src/guide_setting.cpp \
+          src/state_settings.cpp \
           src/udp_source.cpp src/avb_source.cpp src/framing_probe.cpp src/rtp_h264.cpp \
           src/decoder_msdk.cpp src/nal_reader.cpp src/stream_health.cpp $(KIT)/map_geometry.cpp $(KIT)/yuv_atlas.cpp \
           $(KIT)/block_pack.cpp
@@ -61,7 +61,7 @@ CPP_TESTS = $(BUILD)/host/nal_reader_test $(BUILD)/host/rtp_h264_test $(BUILD)/h
 		$(BUILD)/host/map_feed_test $(BUILD)/host/keyframe_wait_test $(BUILD)/host/freeze_watch_test \
 		$(BUILD)/host/alt_screen_test $(BUILD)/host/packet_queue_test $(BUILD)/host/backlog_test \
 		$(BUILD)/host/stream_health_test $(BUILD)/host/source_crop_test \
-		$(BUILD)/host/map_rect_test $(BUILD)/host/guide_setting_test $(BUILD)/host/decoder_test \
+		$(BUILD)/host/map_rect_test $(BUILD)/host/state_settings_test $(BUILD)/host/decoder_test \
 		$(BUILD)/host/device_watch_test $(BUILD)/host/device_guard_test
 # The control socket is Linux's (accept4): built and run on Linux only (make test-x86).
 LINUX_TESTS = $(if $(filter Linux,$(shell uname -s)),$(BUILD)/host/refused_test)
@@ -95,6 +95,7 @@ test-node:
 	umask 077 && $(NODE) patch/test/recovery_test.js
 	umask 077 && $(NODE) patch/test/journal_keep_test.js
 	umask 077 && $(NODE) patch/test/logs_test.js
+	umask 077 && $(NODE) patch/test/collect_logs_test.js
 	umask 077 && $(NODE) patch/test/logs_fw_test.js
 	umask 077 && $(NODE) patch/test/units_test.js
 	umask 077 && $(NODE) patch/test/aapd_test.js
@@ -104,6 +105,7 @@ test-node:
 	umask 077 && $(NODE) patch/test/patchd_trial_test.js
 	umask 077 && $(NODE) patch/test/patchd_aa_off_test.js
 	umask 077 && $(NODE) patch/test/patchd_ro_test.js
+	umask 077 && $(NODE) patch/test/patchd_names_test.js
 	umask 077 && $(NODE) patch/test/remount_lock_test.js
 
 test-cpp: $(CPP_TESTS)
@@ -119,7 +121,7 @@ test-cpp: $(CPP_TESTS)
 	$(BUILD)/host/stream_health_test
 	$(BUILD)/host/source_crop_test
 	$(BUILD)/host/map_rect_test
-	$(BUILD)/host/guide_setting_test
+	$(BUILD)/host/state_settings_test
 	$(BUILD)/host/decoder_test
 	$(BUILD)/host/device_watch_test
 	$(BUILD)/host/device_guard_test
@@ -233,9 +235,11 @@ $(BUILD)/host/refused_test: test/refused_test.cpp src/refused.cpp src/refused.h 
 	$(CXX) $(CXXFLAGS) -Isrc -I$(CR)/src -o $@ test/refused_test.cpp src/refused.cpp src/control.cpp $(CR)/src/config.cpp \
 		$(CR)/src/log.cpp -lpthread
 
-$(BUILD)/host/guide_setting_test: test/guide_setting_test.cpp src/guide_setting.cpp src/guide_setting.h $(CR)/src/log.cpp
+$(BUILD)/host/state_settings_test: test/state_settings_test.cpp src/state_settings.cpp src/state_settings.h src/control.cpp \
+		src/control.h $(CR)/src/log.cpp
 	mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) -Isrc -I$(CR)/src -o $@ test/guide_setting_test.cpp src/guide_setting.cpp $(CR)/src/log.cpp -lpthread
+	$(CXX) $(CXXFLAGS) -Isrc -I$(CR)/src -o $@ test/state_settings_test.cpp src/state_settings.cpp src/control.cpp \
+		$(CR)/src/log.cpp -lpthread
 
 # ---- target binary (in Docker) --------------------------------------------
 target:

@@ -12,7 +12,9 @@
  * log backlog. Like the render, it maps on its own: stream(true) -> starting,
  * then showing the "Waze map" page at 30 updates/s; stream(false) -> idle. The map
  * stays when the connection closes. guide -> the status with the new
- * hide_bmw_guidance (none with `hide` null, as a tool before the switch).
+ * hide_bmw_guidance (none with `hide` null, as a tool before the switch);
+ * map -> the status with the new map_shown (none with `shown` null, as a
+ * tool before the switch), idle with the tool's reason while it is 0.
  *
  * FakePatch speaks the patch daemon protocol: on connect the log backlog and
  * the current state; apply -> busy, then patched with the asked panel;
@@ -35,6 +37,8 @@ const STEP_MS = 40;
 const BACKLOG = 60;
 const RENDER_PAGE = 'Waze map';
 const RENDER_FPS = '30 updates/s';
+/* The tool's reason (MapFeed::kOff) while the map is switched off. */
+const SWITCHED_OFF = 'Switched off in the app';
 
 class LineServer extends EventEmitter {
     constructor(path) {
@@ -119,6 +123,7 @@ class FakeRender extends LineServer {
         this.page = null;
         this.reason = null;
         this.hide = 1;
+        this.shown = 1;
         this.guideDisabled = 0;
         this._showTimer = null;
     }
@@ -140,6 +145,12 @@ class FakeRender extends LineServer {
 
     _status() {
         const s = { ev: 'status', state: this.state, target: this.target, page: this.page, reason: this.reason };
+        if (this.shown === 0) {
+            Object.assign(s, { state: 'idle', page: null, reason: SWITCHED_OFF });
+        }
+        if (this.shown !== null) {
+            s.map_shown = this.shown;
+        }
         if (this.hide !== null) {
             s.hide_bmw_guidance = this.hide;
             s.guide_disabled = this.guideDisabled;
@@ -170,6 +181,10 @@ class FakeRender extends LineServer {
         this.log(`control: ${JSON.stringify(msg)}`);
         if (msg.cmd === 'guide' && this.hide !== null && (msg.hide === 0 || msg.hide === 1)) {
             this.hide = msg.hide;
+            this._broadcast(this._status());
+        }
+        if (msg.cmd === 'map' && this.shown !== null && (msg.shown === 0 || msg.shown === 1)) {
+            this.shown = msg.shown;
             this._broadcast(this._status());
         }
     }

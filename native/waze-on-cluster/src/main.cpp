@@ -5,7 +5,7 @@
  * which draws it in a cluster slot. The service runs from boot, so it decodes
  * from the stream's first keyframe; the map goes up with the first non-blank
  * picture and comes down when the stream ends, freezes or stays blank
- * (map_feed.h, freeze_watch.h). The control socket
+ * (map_feed.h, freeze_watch.h), or when the app switches the map off. The control socket
  * reports its status and log to the Waze app.
  *
  *   waze-on-cluster [-c FILE] [-s key=value]...     serve the control socket
@@ -40,13 +40,13 @@
 #include "config.h"
 #include "control.h"
 #include "exit_watchdog.h"
-#include "guide_setting.h"
 #include "head_unit.h"
 #include "log.h"
 #include "block_pack.h"
 #include "map_feed.h"
 #include "map_geometry.h"
 #include "refused.h"
+#include "state_settings.h"
 #include "video_producer.h"
 #include "yuv_atlas.h"
 
@@ -81,30 +81,34 @@ std::string status_line(const FeedStatus &s)
            ",\"page\":" + json_escape(s.page) + ",\"reason\":" + json_escape(s.reason) +
            ",\"upload_cap_kb_per_s\":" + std::to_string(s.upload_cap_kb) +
            ",\"upload_reason\":" + json_escape(s.upload_reason) +
-           ",\"hide_bmw_guidance\":" + (s.guide_hold ? "1" : "0") +
+           ",\"hide_bmw_guidance\":" + (s.guide_hold ? "1" : "0") + ",\"map_shown\":" + (s.shown ? "1" : "0") +
            ",\"guide_disabled\":" + (s.guide_disabled ? "1" : "0") + "}";
 }
 
 class Server : public Control::Handler {
 public:
-    Server(MapFeed *feed, GuideSetting *guide) : feed_(feed), guide_(guide) {}
+    Server(MapFeed *feed, StateSettings *settings) : feed_(feed), settings_(settings) {}
     void set_control(Control *c) { control_ = c; }
 
     /* start picks the target the map goes to (`run`); the map itself comes
      * and goes with the stream. guide is the app's switch for BMW's turn
-     * box (guide_setting.h). */
+     * box, map the one that takes the map off the cluster (state_settings.h). */
     void on_command(const std::map<std::string, std::string> &msg) override
     {
         const std::string &cmd = msg.at("cmd");
         auto it = msg.find("target");
         auto hide = msg.find("hide");
+        auto shown = msg.find("shown");
         if (cmd == "start" && it != msg.end()) {
             log_info("start %s", it->second.c_str());
             if (!feed_->set_target(it->second))
                 log_warn("start: the cluster renderer has no target %s", it->second.c_str());
-        } else if (cmd == "guide" && hide != msg.end() && guide_->set(hide->second)) {
-            log_info("guide: BMW's turn box %s while the map shows", guide_->hide() ? "hidden" : "shown");
-            feed_->set_guide_hold(guide_->hide());
+        } else if (cmd == "guide" && hide != msg.end() && settings_->set_hide(hide->second)) {
+            log_info("guide: BMW's turn box %s while the map shows", settings_->hide() ? "hidden" : "shown");
+            feed_->set_guide_hold(settings_->hide());
+        } else if (cmd == "map" && shown != msg.end() && settings_->set_shown(shown->second)) {
+            log_info("map: %s on the cluster", settings_->shown() ? "shown" : "off");
+            feed_->set_shown(settings_->shown());
         } else {
             log_warn("control: unknown or malformed command %s", cmd.c_str());
         }
@@ -134,7 +138,7 @@ public:
 
 private:
     MapFeed *feed_;
-    GuideSetting *guide_;
+    StateSettings *settings_;
     Control *control_ = nullptr;
     uint64_t log_seq_ = 0;
     std::string last_;
@@ -206,13 +210,14 @@ int serve(const Config &cfg)
     int sig_fd = signalfd(-1, &sigs, SFD_CLOEXEC);
     if (sig_fd < 0) { log_error("signalfd: %s", strerror(errno)); return 1; }
 
-    GuideSetting guide(cfg.str("hide_bmw_guidance"), cfg.str("state_file"));
-    fc.guide_hold = guide.hide();
+    StateSettings settings(cfg.str("hide_bmw_guidance"), cfg.str("map_shown"), cfg.str("state_file"));
+    fc.guide_hold = settings.hide();
 
     std::string err;
     VideoProducer producer(vc);
     MapFeed feed(fc);
-    Server server(&feed, &guide);
+    feed.set_shown(settings.shown());
+    Server server(&feed, &settings);
     Control control(&server);
     server.set_control(&control);
     if (!control.listen(cfg.str("socket_path"), (unsigned)std::strtoul(cfg.str("socket_mode").c_str(), nullptr, 8),
@@ -455,6 +460,7 @@ void define_keys(Config *cfg)
     cfg->define("gpu_copy", "1");
     cfg->define("target", "map");
     cfg->define("hide_bmw_guidance", "1");
+    cfg->define("map_shown", "1");
     cfg->define("state_file", "/var/opt/waze-on-cluster/state/waze-on-cluster.state.conf");
     cfg->define("render_socket", "/dev/shm/cluster-render/render.sock");
     cfg->define("log_file", "/var/opt/waze-on-cluster/log/waze-on-cluster.log");

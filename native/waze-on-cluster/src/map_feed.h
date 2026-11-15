@@ -18,6 +18,11 @@
  * map sends a frame depends on the phone (one about every ten seconds,
  * another about 30 a second).
  *
+ * The app can also switch the map off (set_shown): the layer is then hidden
+ * exactly as when the stream is not live, whatever the stream does, while
+ * frames are still taken and the stream still tracked, so the map is back
+ * with the next frame when it is switched on. Nothing is sent while off.
+ *
  * Only what the renderer needs goes: a frame whose picture is the last one
  * again goes as a repeat (the client's), and nothing goes while the layer
  * is hidden or the renderer is not reachable. The newest frame not sent is
@@ -67,6 +72,7 @@ struct FeedStatus {
     std::string upload_reason;
     bool guide_hold = true;
     bool guide_disabled = false;   /* cluster-render's guard keeps the turn box's hold off */
+    bool shown = true;             /* the app's switch for the map (MapFeed::set_shown) */
 };
 
 /* Whether a status is worth a log line: its state, reason or target differs
@@ -91,6 +97,8 @@ class MapFeed {
 public:
     /* The reason while the stream is live and its picture blank. */
     static const char *const kWaiting;
+    /* The reason while the map is switched off. */
+    static const char *const kOff;
 
     explicit MapFeed(const FeedConfig &cfg);
 
@@ -100,6 +108,12 @@ public:
     bool set_target(const std::string &name);
     /* The layer's guide_hold from now on. */
     void set_guide_hold(bool hold);
+    /* Whether the map may show at all, from now on; on at the start. Off,
+     * the layer is hidden at once (the renderer lets the slot go, the stock
+     * map and the turn box come back, nothing is sent) and the status is
+     * idle; frames and the stream are still tracked, so the newest frame
+     * goes before the layer is visible again. */
+    void set_shown(bool shown);
 
     int fd() const { return client_.fd(); }
     bool wants_write() const { return client_.wants_write(); }
@@ -129,6 +143,10 @@ public:
 private:
     void make_layer();
     void count_second(int64_t now_ms);
+    /* The layer should be visible: the stream live, not frozen, with a picture, and the map not switched off. */
+    bool wanted() const { return shown_ && live_ && !frozen_ && picture_ == Picture::Shown; }
+    /* Makes the layer visible or hidden to match wanted(). */
+    void apply_visible();
     /* The layer is visible or about to be, on a connection. */
     bool sending() const;
     /* The newest picture to the layer: the held frame, else a repeat. */
@@ -144,6 +162,7 @@ private:
     std::vector<uint8_t> held_;   /* the newest frame, while held_new_ */
     bool held_new_ = false;       /* held_ is newer than anything the client has */
     uint64_t id_ = 0;             /* the newest frame's */
+    bool shown_ = true;           /* the app's switch */
     bool live_ = false, frozen_ = false;
     Picture picture_ = Picture::None;
     const char *stream_line_ = nullptr;   /* the stream's state as last logged */

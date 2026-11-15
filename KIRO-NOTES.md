@@ -31,6 +31,7 @@ Overrides go in `/var/opt/waze-on-cluster/waze-on-cluster.local.conf` and
 | iDrive 7 upload ceiling (Kiro S9c) | `upload_kb_per_s = 4500` (cluster-render.conf:261; upstream 5500) | `upload_kb_per_s = 5500` restores upstream (shared with iDrive 8) |
 | DCSM liveness gate (Kiro S9a) | `dcsm_liveness_ms = 3000` (iDrive 7 only) | `dcsm_liveness_ms = 0`; otherwise 1000..9000 |
 | Take-over allowlist (Kiro S9d) | `map_take_over_contents = 0x01000300` | empty list = take-over off |
+| Map on the cluster (0.8.10, Unreleased) | `map_shown = 1` (waze-on-cluster.conf) | `map_shown = 0`, or the app's Show map checkbox (no restart) |
 | Unproven-build confirmation (S3/S10) | always required | no switch (on purpose) |
 | Render restart cap (S5) | 30 starts per 600 s | edit the unit |
 | Target / panel | `target = map`, panel mode never on by default | unchanged from upstream |
@@ -107,6 +108,25 @@ Left as they are, on purpose:
   How to clear it: `mount -o remount,ro /`, then any change, a status read, a boot step or a watcher tick clears the
   marker; a head-unit start clears it too (tmpfs). A dead holder's lock does not outlive the process, the marker does.
 - Not on a car: the unit's `ExecStart=-` makes the boot step's exit 1 informational; CarPlay still starts after it.
+
+## 0.8.10, Unreleased: Show map (lane O)
+
+Built on this base, not ported: upstream's "Show on: Off" (idrive-apps PR #112, app 0.6.6) sits on the 0.9.0 machinery
+for where the map shows (cluster and HUD feeds, `map.state.conf`, per-profile settings), which this build does not have.
+Only the user feature is here: a switch that takes the map off the cluster and back with no CarPlay reconnect, patch
+change or head-unit restart.
+
+- Service: `{"cmd":"map","shown":0|1}`, `map_shown` in the conf and in the status; `MapFeed::set_shown` hides the layer
+  as when the stream is not live (slots released, stock map and BMW's turn box back, guide hold released, nothing sent)
+  while decoding and stream tracking go on; the newest frame goes before the layer is visible again.
+  Files: `src/map_feed.*`, `src/main.cpp`, `src/state_settings.*` (replaces `guide_setting.*`; one state file, both keys
+  written whole by temp file, fsync and rename; a bad or unreadable value is the safe one: map shown, turn box hidden).
+- App: the Show map checkbox (`wocMapShown`, id 31), greyed without `map_shown` in the status or with no patch in effect;
+  the map row reads `Cluster map: Off` while it is off. One new word, `Show map`, in all 32 locales.
+- Tests: `test/map_feed_test.cpp` (`map_switch`), `test/state_settings_test.cpp`, app `test_control.js`, `test_page.js`,
+  `test_i18n.js`.
+- Not verified on a car or head unit. Across a service restart the choice is read from the state file; across a renderer
+  restart the layer is made again hidden.
 
 ## NOT verified
 
@@ -218,7 +238,7 @@ What it does:
 - `carplay_patch.js` reads the cluster coding (`aapd_patch.js readCoding`, the same reader Android Auto uses; only `/dev/shm/rawcodingdata` is read, never aapd or aapd.conf). `status` prints `coding:`. `apply` on a coding that is not KI_KOMBI_VARIANT 7, or cannot be read, is refused without `--unproven`. `revert` never looks at the coding.
 - `patchd.js` reports such a car as upstream's Android Auto does ("not supported on this car (KI_KOMBI_VARIANT n)", "cluster coding unreadable") and sets `unproven: true`. S3 stays: a plain apply is refused before anything is remounted ("needs your confirmation"); only `{"unproven": true}` goes through. `patchd.js activate` (the install, and HIGH F's one re-apply) writes nothing on such a car and reports the conflict.
 - The first patch of a proven build is recorded `proven: false, trial: true`. Boot recovery restores it after ONE failed start. When carplay has run the target's own file for 60 s in a clean boot, the watcher records it proven (one write window, `/` read-only again after). A patch recorded proven without trial (an earlier release's, or the watcher's) stays proven across applies; its revert records `healthy: true`, so the next apply of that build is proven at once.
-- On a car coded otherwise than 7, an install puts the record of an earlier release's patch that has not started yet on trial (carplay's bytes are not touched).
+- On a car coded otherwise than 7, an install puts the record of an earlier release's patch that has not started yet on trial (carplay's bytes are not touched). "Not started" means: its apply is pending, or a process runs a file kept under any of the running names lane H added (`.woc-running`, `.1`, `.2`; `heldNames` in `patchd.js`).
 
 What differs from upstream:
 - S3: upstream's Patch button applies a non-7 car after `--unproven` from the app; ours is the same, but a plain apply is also refused in patchd before the remount, and the status carries `unproven`, so the app's confirm step (S10) asks. When the build is unproven AND the coding is not 7, one confirmation covers both and the refusal text names both (`BOTH_REASON`).
@@ -236,3 +256,46 @@ Record state, failed starts needed, action (`THRESHOLD`, `recovery.js`):
 | a patch of the backup's build the record does not describe | 2 | restored |
 | no usable backup and crashing (any of the above) | the same count | persistent failed mark (S4), binary left as it is |
 | a boot with a failed start or crash before the healthy run | none | a trial stays a trial |
+
+## 0.8.10, crash evidence for a head unit that restarts in a loop (upstream issue #122)
+
+Ported from upstream d67ea05, dcd61a7, 3f6047e, 5de507e (waze-on-cluster 0.9.8, 0.9.9), adapted to our tree.
+
+- `journal_keep.js`: the timer starts the keeper 10 s after boot; in the boot's first 120 s of uptime each append is
+  `fdatasync`ed through a read-only descriptor. Tests: `journal_keep_test.js` (sync order, preload that fakes the uptime),
+  `units_test.js` (OnBootSec 5..15).
+- `patch/logs_extra.js` (new, in `component.json`): `report` (patch records, aapd recovery state, coding variant, deploy
+  tool versions, kept restart records), `snapshot` (root: restart records, `recmgr_stats.db` through `sqlite3 mode=ro`,
+  core-dump names), `scrub`. `waze-on-cluster-logs-fw.service` runs `snapshot` before the logs service
+  (`ExecStartPre=-`, failure ignored). `tools/collect-logs.sh` runs `aapd_patch.js status`, `report`, copies the snapshot,
+  and scrubs the whole archive last. Tests: new `collect_logs_test.js` (in the Makefile).
+- `recovery.js`: `keepRestartRecords` in the carplay boot step, in its own function, called before `startBoot` and
+  wrapped in try/catch. Tests in `recovery_test.js`. `aapd_patch.js` now exports `readCoding` (one word).
+- Tightened against upstream: records and sources opened with `O_NOFOLLOW|O_NONBLOCK` and checked on the descriptor;
+  the temporary file is created with `wx`; the boot id used in a file name must be `[0-9A-Za-z-]+`; only files named like
+  the boot step's are archived from `restart-records/`; a BMW/MINI maker code VIN is replaced inside a longer run;
+  `state.json` is parsed up to 1 MiB (output stays whitelisted); the core-dump walk stops at 5000 entries; every file
+  of the archive, not only the new ones, passes the VIN scrub before packing, and no archive is written if that fails.
+- Not ported: anything needing mgu-deploy `runsInSafeMode` (upstream #126). Upstream marks the boot, aa-boot and recovery
+  units with it; ours are not marked, so in safe mode the boot step probably does not run and no restart record is kept (not tested). The wifi.txt part of upstream's
+  collect-logs.sh is another feature and is not here.
+- Not verified on a car: that the firmware's `sqlite3` accepts the `file:...?mode=ro` form and reads the database while
+  recmgr has it open in WAL mode; the table and column names (`Crash`, `Appl`, `CrashKey`, `AppID`) are upstream's.
+
+## 0.8.10, lane H: every running file keeps a name (port of upstream waze-on-cluster 0.9.2, dd89d64 and a89bbf0)
+
+Ported to our `patchd.js` / `remount_lock.js` (patch side only), with S1..S10 untouched:
+
+- `remount_lock.js` gains `runs(st)` (a process runs an inode when its `exe` is it or `/proc/<pid>/maps` maps it); `inUse` uses it. Acquire, break and guard rules are unchanged (S2).
+- `patchd.js`: `heldNames` (`.woc-running`, `.1`, `.2`), `holdTarget`, `settleHeld`, `staleHeld`, `sameStatAt`, `wroteAny`, `runsStale`. A change links the file it replaces under `.1` when `.woc-running` already names another running file, and the file it wrote under a free extra name while the running file is put back; afterwards each running file keeps a name, the rest go. `dropUnusedRunning` and the removal's `removeWhenUnused` cover all three names.
+- A patcher that fails after writing leaves the change waiting only when a process runs a stale file (binary other than the one on disk; for aapd also a start that read aapd.conf before it changed). With no name free for the written file the running file is not put back over it.
+- Tests: `patch/test/patchd_names_test.js` (new, 31 checks, no firmware needed): the three failure cases, the put-back cases, restart path, removal hand-over, Android Auto with `aa_enabled = 1`, `runs` with maps, CarPlay without a backup; crash-restart cases also in `patchd_patch_test.js` (needs CARPLAY_BIN, skipped here).
+
+Differences from upstream, on purpose:
+
+- Our `patchWith` keeps the order restart first, put-back only when no restart is allowed (upstream puts back first). The put-back logic therefore applies in that branch only. Upstream's `extraRun` (the `extra` hash kept in the pending marker) is an earlier upstream change we do not have; a waiting change's extra files are compared with their state at the start of this change, as in our base.
+- When the file a change replaces cannot be named (`.1` and `.2` hold running files) nothing is written and `/` stays read-only; upstream goes on. This follows the F5 rule: no write without a verified name.
+- `holdTarget` checks that the new name is the target's inode.
+- "Undo only what is ours" (dd89d64 in `aapd_patch.js`, `aapd_conf.js`, `carplay_patch.js`) limits upstream's rebuild of a proven file without a backup, which our base does not have (`stockOriginal` came with upstream 0.9.1). Without a backup our revert writes nothing, so the rule already holds; a test shows it for CarPlay. Not ported: the rebuild itself, the `aapd_test.js` / `undo_test.js` hunks that exercise it.
+- `recovery.js`: upstream 0.9.2 changes it only for aapd's stock hashes (aapd locator of 0.9.1); not ported. Recovery's own `.woc-running` handling is unchanged and does not use `.1` / `.2`.
+- Not run: nothing on a car, no firmware test (`patchd_patch_test.js`, `aapd_test.js`, `undo_test.js` skip without the binaries).
