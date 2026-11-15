@@ -373,6 +373,6 @@ function main() {
     else { process.stderr.write('usage: aapd_patch.js status|apply|revert [--target <aapd>] [--conf <aapd.conf>] [--coding <shm>] [--dpi <n>] [--card shown|hidden] [--yes] [--force] [--drop-backup]\n'); process.exit(2); }
 }
 
-module.exports = { EDITS: EDITS, CODING: CODING, KNOWN: KNOWN, trusted: trusted, binOther: binOther };
+module.exports = { EDITS: EDITS, CODING: CODING, KNOWN: KNOWN, trusted: trusted, binOther: binOther, readCoding: readCoding };
 
 if (require.main === module) main();

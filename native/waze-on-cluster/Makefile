@@ -95,6 +95,7 @@ test-node:
 	umask 077 && $(NODE) patch/test/recovery_test.js
 	umask 077 && $(NODE) patch/test/journal_keep_test.js
 	umask 077 && $(NODE) patch/test/logs_test.js
+	umask 077 && $(NODE) patch/test/collect_logs_test.js
 	umask 077 && $(NODE) patch/test/logs_fw_test.js
 	umask 077 && $(NODE) patch/test/units_test.js
 	umask 077 && $(NODE) patch/test/aapd_test.js

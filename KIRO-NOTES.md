@@ -227,3 +227,30 @@ Not covered: `MFXInitEx` failing with a hang / lost device in a GPU-copy session
 - R3-3 (fix5-p, not fixed): while a LIVE patchd owns the guard and the lock (its last `remount,ro` failed), the recovery watcher cannot take that lock, so a CarPlay start that is due after a crash waits (`_startAt` stays due, retried every tick). This needs a `remount,ro` that keeps failing and a CarPlay crash in the same window, so it is rare. It clears when a patchd change heals the guard, when `/` becomes read-only again (the next patchd status read or watcher tick sees it), or at a reboot; it can last until then. Service start is not a root write, but the lock is the only fence there is, and a second fence would add a state.
 - R3-2 (fix5-p, `remount_lock.js`): the lock records the holder's start time (field 22 of `/proc/<pid>/stat`, read once at acquire) after the pid and time. `holderGone` treats an owner whose pid runs but whose start time differs, or cannot be read (any pid but this process's), as dead, so a recycled pid no longer keeps a dead guard owner's lock; `breakable` and `healRo` then break it. The guard marker carries no start time of its own: the owner exemption only applies to a lock whose pid equals the marker's, and that lock carries it. A lock without the start time (older format, or unreadable at acquire) is judged by the pid alone, as before. Test: `remount_lock_test.js` (a fake `/proc` through `WOC_LOCK_PROC`).
 - R3-4 (fix5-p, `patchd.js readState`): the plain-apply precheck reads a FRESH status (`readState(cb, true)` waits for a read in flight and reads again, never the cache of an earlier or initial read) and accepts it only for `known: NO` or `known: yes` with an explicit `proven: yes|no`; output cut after `known: yes` is unreadable and the apply is refused before the remount. Other readers of `readState` are unchanged. The tests use `WOC_TEST_PATCHER` (only with `WOC_TEST`), a fake patcher whose status is cut and, in a second case, slow.
+
+
+
+## 0.8.10, crash evidence for a head unit that restarts in a loop (upstream issue #122)
+
+Ported from upstream d67ea05, dcd61a7, 3f6047e, 5de507e (waze-on-cluster 0.9.8, 0.9.9), adapted to our tree.
+
+- `journal_keep.js`: the timer starts the keeper 10 s after boot; in the boot's first 120 s of uptime each append is
+  `fdatasync`ed through a read-only descriptor. Tests: `journal_keep_test.js` (sync order, preload that fakes the uptime),
+  `units_test.js` (OnBootSec 5..15).
+- `patch/logs_extra.js` (new, in `component.json`): `report` (patch records, aapd recovery state, coding variant, deploy
+  tool versions, kept restart records), `snapshot` (root: restart records, `recmgr_stats.db` through `sqlite3 mode=ro`,
+  core-dump names), `scrub`. `waze-on-cluster-logs-fw.service` runs `snapshot` before the logs service
+  (`ExecStartPre=-`, failure ignored). `tools/collect-logs.sh` runs `aapd_patch.js status`, `report`, copies the snapshot,
+  and scrubs the whole archive last. Tests: new `collect_logs_test.js` (in the Makefile).
+- `recovery.js`: `keepRestartRecords` in the carplay boot step, in its own function, called before `startBoot` and
+  wrapped in try/catch. Tests in `recovery_test.js`. `aapd_patch.js` now exports `readCoding` (one word).
+- Tightened against upstream: records and sources opened with `O_NOFOLLOW|O_NONBLOCK` and checked on the descriptor;
+  the temporary file is created with `wx`; the boot id used in a file name must be `[0-9A-Za-z-]+`; only files named like
+  the boot step's are archived from `restart-records/`; a BMW/MINI maker code VIN is replaced inside a longer run;
+  `state.json` is parsed up to 1 MiB (output stays whitelisted); the core-dump walk stops at 5000 entries; every file
+  of the archive, not only the new ones, passes the VIN scrub before packing, and no archive is written if that fails.
+- Not ported: anything needing mgu-deploy `runsInSafeMode` (upstream #126). Upstream marks the boot, aa-boot and recovery
+  units with it; ours are not marked, so in safe mode the boot step probably does not run and no restart record is kept (not tested). The wifi.txt part of upstream's
+  collect-logs.sh is another feature and is not here.
+- Not verified on a car: that the firmware's `sqlite3` accepts the `file:...?mode=ro` form and reads the database while
+  recmgr has it open in WAL mode; the table and column names (`Crash`, `Appl`, `CrashKey`, `AppID`) are upstream's.
