@@ -52,6 +52,7 @@ Arrangement arrange(std::vector<StackItem> items)
         if (it.visible && (it.ready || it.prewarm)) {
             r.wanted = true;
             r.contend = r.contend || it.contend;
+            r.guide_hold = r.guide_hold && it.guide_hold;
         }
     }
     return r;

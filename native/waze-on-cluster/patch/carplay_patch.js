@@ -39,19 +39,35 @@
  *
  * The sites are found in each build by carplay_locate.js; a build where any
  * of them is not found, or reads as neither stock nor this patch, is refused.
- * The first edit of a build outside the proven list needs --unproven.
+ * The first edit of a build outside the proven list needs --unproven, and so
+ * does every apply on a car whose cluster coding is not the proven
+ * KI_KOMBI_VARIANT 7 or cannot be read (aapd_patch.js readCoding). apply
+ * is refused on a head unit that refuses our parts (head_unit.js), whatever
+ * the flags; revert works on any.
  * All four edits are reversible from a verified full backup of the original
  * binary.
  *
+ * The patch record (patch_record.js) says proven: true only for a proven
+ * build on a variant-7 car that has run patched healthy on this car. The
+ * first patch of such a build is recorded proven: false with trial: true, as
+ * is a proven build's patch applied while the coding cannot be read; boot
+ * recovery's watcher turns it into proven: true once carplay has run it
+ * healthy in a clean boot (recovery.js). A record that already says proven:
+ * true without trial (a patch that ran healthy, or one written before trial
+ * existed) keeps it across later applies, and a revert of such a patch
+ * records healthy: true, which the next apply of the same build takes as
+ * proven.
+ *
  * Node 8.16.2 on the unit, no dependencies.
  *
- *   carplay_patch.js status [--target <file>]
+ *   carplay_patch.js status [--target <file>] [--coding <shm>]
  *   carplay_patch.js probe  [<file>]
- *   carplay_patch.js apply  --panel high|mid [--sink <url> | --capture <fifo>] [--res WxH|stock] [--safe WxH+X+Y|full] [--target <file>] [--unproven] [--yes]
+ *   carplay_patch.js apply  --panel high|mid [--sink <url> | --capture <fifo>] [--res WxH|stock] [--safe WxH+X+Y|full] [--target <file>] [--coding <shm>] [--unproven] [--yes]
  *   carplay_patch.js revert [--target <file>] [--yes] [--drop-backup]
  *   carplay_patch.js verify [--target <file>]
  *
- * Default target /usr/bin/carplay. This edits the file by atomic rename, not
+ * Default target /usr/bin/carplay, coding $WOC_CODING or
+ * /dev/shm/rawcodingdata. This edits the file by atomic rename, not
  * the running process, which keeps the old binary until carplay next starts.
  * probe only reads.
  */
@@ -61,6 +77,9 @@ var fs = require('fs');
 var crypto = require('crypto');
 var path = require('path');
 var locator = require('./carplay_locate.js');
+var headUnit = require('./head_unit.js');
+var record = require('./patch_record.js');
+var fileMode = require('./file_mode.js');
 
 /* Builds proven as shipped, by GNU build-id. A first edit of one needs the
  * whole file to be the shipped one, and anything else counts as modified. A
@@ -72,6 +91,11 @@ var PROVEN = {
         sha256: 'ddb33e33161387c6479c391684b3d019b0de54ecfcee8d6877eca94aa62f3e50',
     },
 };
+/* WOC_TEST_PROVEN_BUILD=<build-id>:<sha256> (tests only, with WOC_TEST=1; the
+ * units set neither) lists one more build as proven, so the host tests can
+ * run the proven-build paths on a synthetic build. */
+var testBuild = process.env.WOC_TEST === '1' && /^([0-9a-f]{40}):([0-9a-f]{64})$/.exec(process.env.WOC_TEST_PROVEN_BUILD || '');
+if (testBuild) PROVEN[testBuild[1]] = { version: 'synthetic test build', sha256: testBuild[2] };
 
 /* The geometry `--panel high` advertises: the cluster's 1088x480 central map
  * area (138x61 mm of glass), which the render's texture covers pixel for
@@ -87,6 +111,36 @@ var EDITS = ['variant', 'sink', 'selfstart', 'res'];
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 function die(msg) { process.stderr.write('error: ' + msg + '\n'); process.exit(1); }
 function hex(n) { return '0x' + n.toString(16); }
+
+/* The cluster coding, read and judged as aapd_patch.js does: {variant} or
+ * {err}, and why it is not the proven one (null when it is). Loaded on use,
+ * so boot recovery, which loads this file for its backup check, does not
+ * load the Android Auto patcher. */
+function readCoding(file) { return require('./aapd_patch.js').readCoding(file); }
+function codingRefusal(cd) { return require('./aapd_patch.js').codingRefusal(cd); }
+
+/* The record of a patch that has run healthy on this car: a patch record
+ * saying proven without trial (the watcher's, or one written before trial
+ * existed), or a revert's record of such a patch. */
+function vetted(rec) {
+    return !!rec && (rec.healthy === true || (rec.patched === true && rec.proven === true && rec.trial !== true));
+}
+
+/* The record an apply writes (prior: the record before it; cd: the coding
+ * as readCoding read it). Proven only for a proven build on a car with the
+ * proven coding whose patch has run healthy here; the first patch of one is
+ * on trial, and so is a proven build's patch while the coding cannot be
+ * read, so a healthy run can prove it. A car coded otherwise, or a build
+ * outside the proven list, is unproven for good. */
+function applyRecord(prior, provenBuild, cd) {
+    if (provenBuild && !codingRefusal(cd)) return vetted(prior) ? { patched: true, proven: true } : { patched: true, proven: false, trial: true };
+    if (provenBuild && cd.err) return { patched: true, proven: false, trial: true };
+    /* trial: false only to end a trial: record.ensure compares the keys it is given, no others. */
+    return prior && prior.trial ? { patched: true, proven: false, trial: false } : { patched: true, proven: false };
+}
+
+/* The record a revert writes: a patch that ran healthy is remembered. */
+function revertRecord(prior) { return vetted(prior) ? { patched: false, healthy: true } : { patched: false }; }
 
 function backupPath(t) { return t + '.woc-orig'; }
 function metaPath(t) { return t + '.woc-orig.json'; }
@@ -212,12 +266,13 @@ function header(target, buf, c) {
     line('version', c.loc.version || 'unknown');
 }
 
-function cmdStatus(target) {
-    var buf = readTarget(target), c = classify(buf);
+function cmdStatus(target, codingFile) {
+    var buf = readTarget(target), c = classify(buf), cd = readCoding(codingFile);
     header(target, buf, c);
+    line('coding', cd.err ? 'unreadable (' + cd.err + ')' : 'KI_KOMBI_VARIANT ' + cd.variant);
     var p;
     try { p = restorePlan(target, buf, c); } catch (e) { p = { err: e.message }; }
-    line('restorable', p.err ? 'no (' + p.err + ')' : p.b.other ? 'no (another build: ' + p.b.other + ')' : !p.out.equals(buf) ? 'yes' : 'no');
+    line('restorable', p.err ? 'no (' + p.err + ')' : p.b.other ? 'no (another build: ' + p.b.other + ')' : !p.out.equals(buf) || modeOnly(target, buf, p) ? 'yes' : 'no');
     var bad = unrecognised(c);
     if (!c.ok) { line('known', 'NO — ' + c.reason); return; }
     /* A backup apply would refuse (another build's original, or
@@ -336,9 +391,9 @@ function otherBuild(cur, orig) {
 
 /* The backup, checked for a restore without the locator, so a binary any
  * version of this tool patched can be restored: its SHA-256 and GNU build-id
- * are the recorded ones (each when recorded). { buf, hash, meta, other } or
- * { err }; other says why `cur` is not the backup's build (which writing the
- * backup whole would replace), null when it is. */
+ * are the recorded ones (each when recorded). { buf, hash, meta (the record,
+ * or null), other } or { err }; other says why `cur` is not the backup's
+ * build (which writing the backup whole would replace), null when it is. */
 function trustedBackup(target, cur) {
     var orig, meta = null;
     try { orig = fs.readFileSync(backupPath(target)); } catch (e) { return { err: 'no backup' }; }
@@ -346,7 +401,7 @@ function trustedBackup(target, cur) {
     var hash = sha256(orig), id = locator.buildId(orig);
     if (meta && meta.sha256_original && meta.sha256_original !== hash) return { err: 'sha256 ' + hash + ' != recorded ' + meta.sha256_original };
     if (meta && meta.buildId && id && meta.buildId !== id) return { err: 'build-id ' + id + ' != recorded ' + meta.buildId };
-    return { buf: orig, hash: hash, meta: !!meta, other: otherBuild(cur, orig) };
+    return { buf: orig, hash: hash, meta: meta, other: otherBuild(cur, orig) };
 }
 
 /* What a revert of `cur` (classified as `c`) writes, without --force:
@@ -369,8 +424,12 @@ function restorePlan(target, cur, c) {
     return { b: b, bc: bc, regionWise: false, out: orig };
 }
 
-function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
+function cmdApply(target, panel, capture, sink, res, safe, yes, unproven, codingFile) {
+    var hu = headUnit.refused();
+    if (hu) die('refusing: ' + hu);
     if (panel !== 'high' && panel !== 'mid') die('--panel must be high or mid');
+    var coding = readCoding(codingFile), codingBad = codingRefusal(coding);
+    if (codingBad && !unproven) die('refusing: ' + codingBad + '; pass --unproven to patch it anyway');
     var wantRes = resFor(panel, res, safe);
     var sinkUrl = sinkUrlFor(capture, sink), slotLen = locator.SINK_STOCK.length;
     if (sinkUrl !== undefined && Buffer.byteLength(sinkUrl, 'latin1') > slotLen)
@@ -394,8 +453,10 @@ function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
         fs.writeFileSync(bakTmp, buf, { mode: 0o600 });
         fsyncFile(bakTmp);
         if (!fs.readFileSync(bakTmp).equals(buf)) { try { fs.unlinkSync(bakTmp); } catch (e) {} die('backup verification failed; no change made'); }
+        var origStat = fs.statSync(target);   /* the original's mode and owner, which every later write gives carplay */
         fs.writeFileSync(metaTmp, JSON.stringify({ target: path.resolve(target), version: label(c), buildId: c.loc.buildId,
-            sha256_original: sha256(buf), savedAt: new Date().toISOString() }, null, 2) + '\n', { mode: 0o600 });
+            sha256_original: sha256(buf), mode: origStat.mode & 0o7777, uid: origStat.uid, gid: origStat.gid,
+            savedAt: new Date().toISOString() }, null, 2) + '\n', { mode: 0o600 });
         fsyncFile(metaTmp);
         fs.renameSync(metaTmp, metaPath(target));
         fs.renameSync(bakTmp, bak);
@@ -439,7 +500,11 @@ function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
         put(resText, o, (wantRes ? resWant : orig).slice(o, o + 8));
     });
 
-    if (changed.length === 0) { process.stdout.write('nothing to do; already in the requested state\n'); return; }
+    var rec = applyRecord(record.current(target), !!PROVEN[loc.buildId], coding);
+    if (changed.length === 0) {
+        repairMode(target, yes);
+        process.stdout.write('nothing to do; already in the requested state\n'); record.ensure(target, rec); return;
+    }
 
     /* The edited image must read as exactly the requested state, at the same
      * sites, changed only in the edit regions, before it is written. */
@@ -458,6 +523,7 @@ function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
     writeInPlace(target, out);
     var after = readTarget(target);
     if (!after.equals(out)) die('post-write verification failed: ' + target + ' does not hold the edited bytes; restore from ' + bak);
+    record.ensure(target, rec);
     process.stdout.write('patched OK. sha256 now ' + sha256(after) + '\n');
     process.stdout.write('revert:  carplay_patch.js revert --target ' + target + ' --yes\n');
 }
@@ -472,18 +538,21 @@ function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
 function cmdRevert(target, yes, force, dropBackup) {
     function drop() {
         if (!dropBackup) return;
-        [bak, metaPath(target), bak + '.tmp', metaPath(target) + '.tmp'].forEach(function (f) {
+        [bak, metaPath(target), bak + '.tmp', metaPath(target) + '.tmp', record.recordPath(target)].forEach(function (f) {
             try { fs.unlinkSync(f); } catch (e) { if (e.code !== 'ENOENT') die('dropping ' + f + ': ' + e.message); }
         });
         process.stdout.write('backup dropped\n');
     }
-    var bak = backupPath(target);
+    var bak = backupPath(target), revRec = revertRecord(record.current(target));
     if (!fs.existsSync(bak)) die('no backup at ' + bak + '; cannot revert');
     var cur = readTarget(target), p;
     try { p = restorePlan(target, cur, classify(cur)); } catch (e) { p = { err: e.message }; }
     if (p.err) die('backup ' + bak + ' is not a verified original (' + p.err + '); refusing to restore it');
     var b = p.b, orig = b.buf;
-    if (cur.equals(orig)) { process.stdout.write('already at the original; nothing to do\n'); drop(); return; }
+    if (cur.equals(orig)) {
+        if (modeOnly(target, cur, p)) repairMode(target, yes);
+        process.stdout.write('already at the original; nothing to do\n'); record.ensure(target, revRec); drop(); return;
+    }
     /* Another build (a firmware update replaced carplay and left the old
      * backup behind): restoring would downgrade it. */
     if (b.other && !force) {
@@ -492,12 +561,13 @@ function cmdRevert(target, yes, force, dropBackup) {
             '\n  Pass --force only if you are sure this backup is the right original for it.');
     }
     var regionWise = p.regionWise && !force, out = regionWise ? p.out : orig;
-    if (regionWise && out.equals(cur)) { process.stdout.write('nothing to do: none of the edits is in it; other changes kept\n'); drop(); return; }
+    if (regionWise && out.equals(cur)) { process.stdout.write('nothing to do: none of the edits is in it; other changes kept\n'); record.ensure(target, revRec); drop(); return; }
     process.stdout.write('About to restore ' + (regionWise ? 'the edited regions of ' : '') + target + ' from ' + bak + ' (sha256 ' + b.hash + ')\n');
     if (!yes) die('pass --yes to proceed');
     writeInPlace(target, out);
     var after = readTarget(target), ca = regionWise ? classify(after) : null;
     if (!after.equals(out) || (ca && EDITS.some(function (e) { return !ca.ok || ca[e].state !== 'original'; }))) die('restore verification failed');
+    record.ensure(target, revRec);
     process.stdout.write(after.equals(orig) ? 'restored OK. sha256 now ' + b.hash + '\n'
         : 'restored the edited regions; changes outside them kept. sha256 now ' + sha256(after) + '\n');
     if (dropBackup) drop();
@@ -516,33 +586,55 @@ function cmdVerify(target) {
     var resOk = c.variant.panel !== 'high' || c.res.state === 'patched';
     var enabled = c.variant.state === 'patched' && c.selfstart.state === 'patched' && resOk;
     var partial = (c.variant.state === 'patched' || c.selfstart.state === 'patched' || c.res.state === 'patched') && !enabled;
-    if (partial) { process.stderr.write('FAIL: partially patched — variant ' + c.variant.state + ', self-start ' + c.selfstart.state + ', res ' + c.res.state + ' (enable applies all edits)\n'); process.exit(1); }
+    if (partial) { process.stderr.write('FAIL: partially patched — variant ' + c.variant.state + ', self-start ' + c.selfstart.state + ', res ' + c.res.state + ' (apply applies all edits)\n'); process.exit(1); }
     process.stdout.write('OK: variant ' + (c.variant.state === 'original' ? 'original' : 'IC_' + c.variant.panel.toUpperCase()) +
         ', sink ' + (c.sink.state === 'original' ? 'original (AVB 15)' : c.sink.url) +
         ', self-start ' + (c.selfstart.state === 'patched' ? 'on' : 'off') +
         ', res ' + (c.res.state === 'patched' ? c.res.res.w + 'x' + c.res.res.h : 'stock') + '\n');
 }
 
-/* Write by atomic rename so a crash mid-write cannot leave carplay half
- * patched; fall back to in-place rewrite on a cross-device/busy rename. The
- * caller remounts / read-write around this (deploy's remount window). */
 function fsyncFile(path) {
     var fd = fs.openSync(path, 'r+');
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
+/* carplay's mode and owner (file_mode.js): its original's, recorded with
+ * the backup, at least 0755. */
+function wantedMode(target) {
+    var meta = null;
+    try { meta = JSON.parse(fs.readFileSync(metaPath(target), 'utf8')); } catch (e) {}
+    return fileMode.wanted(target, meta, fileMode.EXEC);
+}
+
+/* Whether target holds exactly the verified pristine original but
+ * carplay.service's user cannot run it: a revert sets only its mode. */
+function modeOnly(target, cur, p) {
+    return !p.err && !p.b.other && cur.equals(p.b.buf) && !notPristine(p.bc || classify(p.b.buf), p.b.buf) && fileMode.lacks(target, fileMode.EXEC);
+}
+
+/* target given its original's mode and owner, with --yes, when
+ * carplay.service's user cannot run it. */
+function repairMode(target, yes) {
+    if (!fileMode.lacks(target, fileMode.EXEC)) return;
+    var want = wantedMode(target), fix = fileMode.mismatch(target, want);
+    if (!yes) die(target + ' has ' + fix + '; pass --yes to set them');
+    try { fileMode.repair(target, want); } catch (e) { die('setting ' + target + '\'s mode and owner: ' + e.message); }
+    process.stdout.write('set ' + target + '\'s mode and owner (it had ' + fix + ')\n');
+}
+
+/* Write by atomic rename ONLY (file_mode.js replace), so a crash or power
+ * loss mid-write cannot leave carplay half patched: a rename that fails
+ * leaves the target as it was and the write is refused, never rewritten in
+ * place (Kiro test change S1; upstream fell back to overwriting the live
+ * file). The temporary file gets carplay's mode and owner explicitly (its
+ * original's, recorded with the backup, at least 0755: what carplay.service's
+ * user needs), its extended attributes, an fsync and a SHA-256 read-back
+ * before the rename; the folder is fsynced after. The caller remounts /
+ * read-write around this (deploy's remount window). */
 function writeInPlace(target, buf) {
-    var tmp = target + '.woc-tmp';
-    var st;
-    try { st = fs.statSync(target); } catch (e) { st = { mode: 0o755 }; }
-    fs.writeFileSync(tmp, buf, { mode: st.mode & 0o777 });
-    fsyncFile(tmp);   /* the bytes must be on disk before the rename */
-    try { fs.renameSync(tmp, target); }
-    catch (e) {
-        try { fs.unlinkSync(tmp); } catch (e2) {}
-        var fd = fs.openSync(target, 'r+');
-        try { fs.writeSync(fd, buf, 0, buf.length, 0); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    }
+    try {
+        fileMode.replace(target, buf, wantedMode(target), { note: function (t) { process.stdout.write('note: ' + t + '\n'); } });
+    } catch (e) { die('writing ' + target + ': ' + e.message); }
 }
 
 function onlyRegionsDiffer(a, b, regions) {
@@ -564,6 +656,7 @@ function parseArgs(argv) {
         else if (t === '--drop-backup') a.dropBackup = true;
         else if (t === '--unproven') a.unproven = true;
         else if (t === '--target') a.target = argv[++i];
+        else if (t === '--coding') a.coding = argv[++i];
         else if (t === '--panel') a.panel = argv[++i];
         else if (t === '--capture') {
             /* A missing or flag-shaped value is an error, not "no capture". */
@@ -583,12 +676,15 @@ function main() {
     var a = parseArgs(process.argv.slice(2));
     var cmd = a._[0];
     var target = a.target || '/usr/bin/carplay';
-    if (cmd === 'status') cmdStatus(target);
+    var coding = a.coding || process.env.WOC_CODING || '/dev/shm/rawcodingdata';
+    if (cmd === 'status') cmdStatus(target, coding);
     else if (cmd === 'probe') cmdProbe(a.target || a._[1] || '/usr/bin/carplay');
-    else if (cmd === 'apply') cmdApply(target, a.panel, a.capture, a.sink, a.res, a.safe, a.yes, a.unproven);
+    else if (cmd === 'apply') cmdApply(target, a.panel, a.capture, a.sink, a.res, a.safe, a.yes, a.unproven, coding);
     else if (cmd === 'revert') cmdRevert(target, a.yes, a.force, a.dropBackup);
     else if (cmd === 'verify') cmdVerify(target);
-    else { process.stderr.write('usage: carplay_patch.js status|probe|apply|revert|verify [--target <file>] [--panel high|mid] [--capture <fifo> | --sink <url>] [--res WxH|stock] [--safe WxH+X+Y|full] [--unproven] [--yes] [--force] [--drop-backup]\n'); process.exit(2); }
+    else { process.stderr.write('usage: carplay_patch.js status|probe|apply|revert|verify [--target <file>] [--coding <shm>] [--panel high|mid] [--capture <fifo> | --sink <url>] [--res WxH|stock] [--safe WxH+X+Y|full] [--unproven] [--yes] [--force] [--drop-backup]\n'); process.exit(2); }
 }
 
-main();
+module.exports = { trustedBackup: trustedBackup, PROVEN: PROVEN };
+
+if (require.main === module) main();

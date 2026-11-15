@@ -95,6 +95,40 @@ std::string StreamHealth::waiting(int64_t now_ms, int64_t wall_ms, bool on)
            " s waiting";
 }
 
+std::string StreamHealth::overflow(int64_t now_ms, const char *what, uint32_t count)
+{
+    if (count == 0)
+        return std::string();
+    minute_.overflows += count;
+    if (!line_due(now_ms))
+        return std::string();
+    char line[192];
+    std::snprintf(line, sizeof line, "waze: the %s overran its size cap (%u dropped); resynchronising at the next start",
+                  what, count);
+    return line;
+}
+
+std::string StreamHealth::rtp_events(int64_t now_ms, uint32_t late, uint32_t stray, uint32_t streams, uint32_t idle_resets)
+{
+    if (late == 0 && stray == 0 && streams == 0 && idle_resets == 0)
+        return std::string();
+    minute_.late += late;
+    minute_.stray += stray;
+    minute_.streams += streams;
+    minute_.idle_resets += idle_resets;
+    if (rtp_lines_since_ms_ < 0 || now_ms - rtp_lines_since_ms_ >= 60000) {
+        rtp_lines_since_ms_ = now_ms;
+        rtp_lines_ = 0;
+    }
+    if (rtp_lines_++ >= kRtpLinesPerMinute)
+        return std::string();
+    char line[192];
+    std::snprintf(line, sizeof line,
+                  "waze: RTP: %u late or duplicate packets dropped, %u stray, %u new streams, %u resets after silence",
+                  late, stray, streams, idle_resets);
+    return line;
+}
+
 void StreamHealth::keyframe_wait(int64_t wall_ms, int64_t keyframe_wait_ms)
 {
     if (keyframe_wait_ms < kLostMs)
@@ -110,7 +144,7 @@ bool StreamHealth::lost() const
 
 std::string StreamHealth::reason() const
 {
-    return lost() ? "Stream lost — reconnect CarPlay" : std::string();
+    return lost() ? "Stream lost" : std::string();
 }
 
 std::string StreamHealth::detail() const

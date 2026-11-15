@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Robert Nisipeanu
 [Unit]
-Description=waze-on-cluster boot check: restore the original carplay before it starts if the map patch crash-loops
+Description=waze-on-cluster boot check: restore the original carplay before it starts if the map patch keeps the head unit from starting
 RequiresMountsFor=/var/opt
 After=local-fs.target
 # carplay.service (WantedBy=late.target, after multi-user.target) starts only
@@ -9,22 +9,21 @@ After=local-fs.target
 Before=carplay.service
 
 [Service]
-# Root, like patchd: at the crash threshold, or when it cannot save this
-# boot's record, it remounts / read-write only to run the vetted
-# carplay_patch.js revert of a restorable patch, then read-only again
-# (PATCH.md "Boot recovery"). Otherwise it counts the previous boot, arms this
-# one and exits in about a second.
+# Root, like patchd. It decides from small files (PATCH.md "Boot recovery"):
+# with nothing to do it exits in about the time Node takes to start; before
+# a patched carplay starts it records this boot. At the threshold, or when
+# it cannot save that record, it remounts / read-write only to write the
+# verified original back, then read-only again, in a second or two.
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=-/usr/bin/node /var/opt/waze-on-cluster/current/recovery.js boot
-# Below the threshold carplay waits about the time Node takes to start; a
-# restore takes seconds. Every command a restore runs is bounded, so it ends
-# within 91 s (recovery.js RESTORE_BOUND_MS), inside the start timeout: carplay
-# is held back 120 s at most, and only when those commands hang. A stop
-# mid-restore lets it finish, inside the stop timeout, so / is not left
-# writable; KillMode=mixed signals only the step, not its mount/revert children.
-TimeoutStartSec=120
-TimeoutStopSec=120
+ExecStart=-/usr/bin/node /var/opt/waze-on-cluster/current/recovery.js boot carplay
+# The step exits by 56 s whatever hangs (recovery.js BOOT_EXIT_MS: up to
+# 10 s for the other boot step's restore, RESTORE_BOUND_MS, then one try to
+# put / back read-only), inside the start timeout. A stop mid-restore lets it finish, inside the stop timeout,
+# so / is not left writable; KillMode=mixed signals only the step, not its
+# mount children.
+TimeoutStartSec=75
+TimeoutStopSec=75
 KillMode=mixed
 StandardOutput=journal
 StandardError=journal

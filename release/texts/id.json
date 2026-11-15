@@ -1,0 +1,14 @@
+{
+  "cluster-render": {
+    "title": "Perender panel instrumen",
+    "description": "Menggambar lapisan setiap aplikasi di panel instrumen dan HUD, berbagi slot layar dan satu kuota unggahan"
+  },
+  "waze-on-cluster": {
+    "title": "Waze di panel instrumen",
+    "description": "Menampilkan peta CarPlay atau Android Auto di panel instrumen: helper root menerapkan patch carplay dan aapd yang dapat dibatalkan di tempat masing-masing didukung, dan perekaman, yang berjalan sejak boot, mendekode H.264 peta lalu menggambarnya melalui perender panel instrumen selama stream mengalir"
+  },
+  "robertn_waze_cluster": {
+    "title": "Waze di panel instrumen",
+    "description": "Menampilkan peta Waze CarPlay di panel instrumen: aktifkan patch dari HMI dan peta mengikuti CarPlay"
+  }
+}

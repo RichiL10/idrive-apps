@@ -13,7 +13,8 @@
  * The target is wanted while any layer is visible and ready (it has
  * content), or visible and prewarm (it asks for the slot before its first
  * content, so that content shows at once). It contends with the stock HMI
- * while any wanting layer does (slots.h). */
+ * while any wanting layer does (slots.h), and lets the guide holds that
+ * follow it hold their slots unless a wanting layer has guide_hold false. */
 #ifndef CRS_STACK_H
 #define CRS_STACK_H
 
@@ -32,14 +33,14 @@ struct StackItem {
     Klass klass = Klass::Content;
     int z = 0;
     uint64_t seq = 0;   /* creation order */
-    bool visible = true, ready = false, exclusive = false, prewarm = false, contend = false;
+    bool visible = true, ready = false, exclusive = false, prewarm = false, contend = false, guide_hold = true;
 };
 
 struct Arrangement {
     std::vector<uint32_t> order;       /* every layer, bottom to top */
     std::vector<uint32_t> drawn;       /* visible, ready and not below a drawn exclusive layer */
     std::vector<uint32_t> suspended;   /* visible and ready, but below a drawn exclusive layer */
-    bool wanted = false, contend = false;
+    bool wanted = false, contend = false, guide_hold = true;
 };
 
 Arrangement arrange(std::vector<StackItem> items);

@@ -3,8 +3,9 @@
 /* What an RTP sequence gap (rtp_h264.h) was, and which access units began
  * after the latest loss.
  *
- * A gap is settled at the next NAL unit delivered: an SPS makes it a new
- * stream (the phone's stream restarted), anything else a loss. Gaps before
+ * A gap is settled at the next NAL unit delivered: a new SSRC or an SPS
+ * makes it a new stream (the phone's stream restarted), anything else a
+ * loss. Gaps before
  * that NAL unit add up. Each access unit is tagged with the losses settled
  * before its first NAL unit, so a frame decoded from it is after the latest
  * loss only if it began after it; the picture a gap cut short, delivered
@@ -33,6 +34,7 @@ public:
         } else {
             gap_.got = g.got;
             gap_.lost += g.lost;
+            gap_.new_ssrc = gap_.new_ssrc || g.new_ssrc;
         }
         source_ = source;
         dropped_ += dropped;
@@ -44,7 +46,7 @@ public:
         Outcome o = None;
         if (pending_) {
             pending_ = false;
-            o = type == 7 ? NewStream : Loss;
+            o = type == 7 || gap_.new_ssrc ? NewStream : Loss;
             if (o == Loss)
                 losses_++;
         }

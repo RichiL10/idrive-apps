@@ -10,7 +10,7 @@
  *   const cr = new ClusterRender('robertn_myapp');
  *   const badge = cr.image({ target: 'panel', klass: 'overlay', x: 1700, y: 40, w: 160, h: 64, iw: 160, ih: 64 });
  *   cr.on('layer', (ref, state, reason) => { ... });   // shown, waiting, suspended, stalled, hidden, error
- *   cr.on('target', (name, state, holder, reason) => { ... });
+ *   cr.on('target', (name, state, holder, reason, guideDisabled) => { ... });
  *   cr.on('budget', (capKb, maxKb, reason) => { ... });
  *   cr.on('ready', () => cr.pixels(badge, null, rgba));   // after every (re)connect
  *   cr.connect();
@@ -50,8 +50,8 @@ const FRAME_T = 0x46;   /* 'F' */
 const MESH_T = 0x4d;    /* 'M' */
 const MAX_DIRTY = 16;
 const BACKOFF_MS = [250, 500, 1000, 2000];
-const SET_KEYS = ['klass', 'z', 'x', 'y', 'w', 'h', 'visible', 'exclusive', 'prewarm', 'contend', 'opacity',
-    'rotate', 'sx', 'sy', 'px', 'py'];
+const SET_KEYS = ['klass', 'z', 'x', 'y', 'w', 'h', 'visible', 'exclusive', 'prewarm', 'contend', 'guide_hold',
+    'opacity', 'rotate', 'sx', 'sy', 'px', 'py'];
 const MESH_KEYS = ['projection', 'fov', 'ortho_h', 'near', 'far', 'cx', 'cy', 'cz', 'crx', 'cry', 'crz'];
 const UNIFORM_WIDTH = { float: 1, vec2: 2, vec3: 3, vec4: 4, mat4: 16 };
 
@@ -215,7 +215,7 @@ class ClusterRender extends EventEmitter {
         } else if (ev.ev === 'layer') {
             this.emit('layer', ev.ref, ev.state, ev.reason);
         } else if (ev.ev === 'target') {
-            this.emit('target', ev.target, ev.state, ev.holder, ev.reason);
+            this.emit('target', ev.target, ev.state, ev.holder, ev.reason, ev.guide_disabled === 1);
         } else if (ev.ev === 'budget') {
             this.emit('budget', ev.cap_kb_per_s, ev.max_kb_per_s, ev.reason);
         } else if (ev.ev === 'error') {
@@ -331,7 +331,7 @@ class ClusterRender extends EventEmitter {
     }
 
     /* opts: target, klass, z, x, y, w, h, visible, exclusive, prewarm,
-     * contend, opacity, rotate, sx, sy, px, py, then per kind (see
+     * contend, guide_hold, opacity, rotate, sx, sy, px, py, then per kind (see
      * PROTOCOL.md); an image's iw and ih default to its w and h; an
      * effect's time: true takes u_time from the renderer's clock. A mesh's:
      * projection, fov, ortho_h, near, far and its camera cx, cy, cz, crx,

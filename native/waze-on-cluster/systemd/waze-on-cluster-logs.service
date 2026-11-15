@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Robert Nisipeanu
+[Unit]
+Description=waze-on-cluster logs: Save logs, and the page a phone on the hotspot downloads them from
+RequiresMountsFor=/var/opt
+Requires=waze-on-cluster-logs.socket
+# The firewall rule and the archives' folder, root's part, run alongside it.
+Wants=waze-on-cluster-logs-fw.service
+After=waze-on-cluster-logs.socket waze-on-cluster-logs-fw.service
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+# Started by the app's connection; it exits by itself (logs.js). Unprivileged:
+# a dynamic user in systemd-journal, the group that reads the journal and owns
+# the folders. Nothing in it runs as root.
+DynamicUser=yes
+User=woc-logs
+SupplementaryGroups=systemd-journal
+NoNewPrivileges=yes
+UMask=0007
+ReadWritePaths=-/var/opt/waze-on-cluster/saved
+ExecStart=/usr/bin/node /var/opt/waze-on-cluster/current/logs.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+Nice=19
+IOSchedulingClass=idle
+CPUShares=64
+CPUQuota=50%
+MemoryLimit=160M
+TasksMax=32
+# No core dump goes to the crash handler, so a crash restarts this service
+# and never the head unit.
+LimitCORE=1
+StandardOutput=journal
+StandardError=journal

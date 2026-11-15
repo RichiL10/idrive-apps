@@ -1,0 +1,14 @@
+{
+  "cluster-render": {
+    "title": "Kombiinstrumentets renderare",
+    "description": "Ritar alla appars lager i kombiinstrumentet och på HUD:en och delar på visningsplatserna och en gemensam uppladdningsbudget"
+  },
+  "waze-on-cluster": {
+    "title": "Waze i kombiinstrumentet",
+    "description": "Visar CarPlay- eller Android Auto-kartan i kombiinstrumentet: en root-hjälpare tillämpar de reversibla carplay- och aapd-patcharna där var och en stöds, och inspelningen, som körs från start, avkodar kartans H.264-video och ritar den via kombiinstrumentets renderare så länge strömmen flödar"
+  },
+  "robertn_waze_cluster": {
+    "title": "Waze i kombiinstrumentet",
+    "description": "Visar CarPlay-Waze-kartan i kombiinstrumentet: aktivera patchen från HMI:n så följer kartan CarPlay"
+  }
+}

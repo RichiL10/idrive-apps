@@ -5,7 +5,9 @@
  * dlt-receive: a persistent connect failure (counted, bounded stderr, one log
  * line per streak), DLT data arriving (state, counters, the client's own
  * "~DLT~" lines kept apart from DLT data, routing into the rings), a run that
- * ends after data (per-run state reset), and a missing binary. Runs the real
+ * ends after data (per-run state reset), and a missing binary. The capture's
+ * state is asked each second while a client is connected, or a capture opens
+ * or is open, also through a failed status, and not otherwise. Runs the real
  * patchd.js on a temporary socket with a short retry delay. Every patchd it
  * starts is stopped when it exits, also on a failure or exception; it checks
  * that by running itself with an injected fault.
@@ -13,6 +15,8 @@
  *   node patchd_dlt_test.js
  */
 'use strict';
+
+require('./head_unit_env.js');   /* a HIGH head unit for every patcher and patchd this runs */
 
 var fs = require('fs');
 var os = require('os');
@@ -182,6 +186,91 @@ function faultRun(fault) {
     });
 }
 
+/* A fake capture service: answers each command with the state set, and
+ * counts the status requests; with delay, the next status is answered that
+ * many ms late with the state it had when asked. */
+function fakeCapture(sock) {
+    var f = { state: 'closed', statuses: 0, fail: 0, delay: 0 };
+    f.server = net.createServer(function (c) {
+        var buf = '';
+        c.on('error', function () {});
+        c.on('data', function (d) {
+            buf += d;
+            if (buf.indexOf('\n') < 0) return;
+            var cmd = JSON.parse(buf.slice(0, buf.indexOf('\n'))).cmd;
+            if (cmd === 'status') f.statuses++;
+            if (cmd === 'status' && f.fail > 0) { f.fail--; c.destroy(); return; }
+            if (cmd === 'start') f.state = 'opening';
+            var reply = JSON.stringify({ state: f.state }) + '\n';
+            if (cmd === 'status' && f.delay) {
+                var ms = f.delay;
+                f.delay = 0;
+                f.held = true;
+                setTimeout(function () { f.held = false; c.end(reply); }, ms);
+                return;
+            }
+            c.end(reply);
+        });
+    });
+    f.server.listen(sock);
+    return f;
+}
+
+/* A client on patchd's socket; resolves once connected, keeps its events. */
+function client(p) {
+    return new Promise(function (resolve) {
+        var c = net.connect(p.sock), events = [];
+        c.setEncoding('utf8');
+        c.on('data', function (d) { d.split('\n').filter(Boolean).forEach(function (l) { events.push(JSON.parse(l)); }); });
+        c.on('connect', function () { resolve({ c: c, events: events }); });
+        c.on('error', function () { resolve(null); });
+    });
+}
+
+async function capturePolls() {
+    var fake = fakeCapture(path.join(dir, 'capture.sock'));
+    var p = startPatchd('e', path.join(dir, 'no-such-dlt-receive'), { WOC_CAPTURE_SOCK: path.join(dir, 'capture.sock') });
+    for (var i = 0; i < 200 && !fs.existsSync(p.sock); i++) await sleep(25);
+    await sleep(3500);
+    ok('capture: asked once at start, then not while no client is connected and it is closed', fake.statuses === 1, fake.statuses);
+    var c = await client(p);
+    fake.statuses = 0;
+    await sleep(3200);
+    ok('capture: asked each second while a client is connected', fake.statuses >= 3, fake.statuses);
+    ok('capture: and the client told', c.events.filter(function (e) { return e.ev === 'capture'; }).length >= 3);
+    c.c.write('{"cmd":"capture-start"}\n');
+    await sleep(300);
+    c.c.destroy();
+    fake.state = 'open';
+    fake.statuses = 0;
+    await sleep(3200);
+    ok('capture: asked each second while it opens and is open, with no client', fake.statuses >= 3, fake.statuses);
+    fake.fail = 1;
+    await sleep(1500);
+    fake.statuses = 0;
+    await sleep(2200);
+    ok('capture: a status that fails while it is open keeps the asking going', fake.fail === 0 && fake.statuses >= 2, fake.statuses);
+    fake.state = 'closed';
+    await sleep(1500);
+    fake.statuses = 0;
+    await sleep(2500);
+    ok('capture: closed again, no longer asked', fake.statuses === 0, fake.statuses);
+    c = await client(p);
+    fake.delay = 800;
+    for (i = 0; i < 100 && !fake.held; i++) await sleep(20);
+    c.c.write('{"cmd":"capture-start"}\n');
+    await sleep(150);
+    c.c.destroy();
+    for (i = 0; i < 100 && fake.held; i++) await sleep(20);
+    fake.state = 'open';
+    fake.statuses = 0;
+    await sleep(2500);
+    ok('capture: a status asked before a start and answered after it does not stop the asking', fake.statuses >= 2, fake.statuses);
+    fake.state = 'closed';
+    p.child.kill('SIGTERM');
+    fake.server.close();
+}
+
 async function main() {
     /* The fault runs are separate processes with their own directories:
      * they run alongside the cases below, and end before the backoff case,
@@ -277,6 +366,8 @@ async function main() {
     ok('backoff: the delay grows with the streak', gaps.length >= 3 && gaps[1] > gaps[0] + 50 && gaps[2] > gaps[1] + 50, JSON.stringify(gaps));
     ok('backoff: the delay stays capped', Math.max.apply(null, gaps) <= BK_CAP + 400, JSON.stringify(gaps));
     b.child.kill('SIGTERM');
+
+    await capturePolls();
 
     /* A run that fails before patchd answers, after, or with an uncaught
      * exception still reports the failure and leaves no patchd behind. */

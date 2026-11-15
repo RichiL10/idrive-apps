@@ -5,7 +5,9 @@
  * and the MSDK/VAAPI decoder (decoder_msdk.h), and keeps the newest decoded
  * frame as a 4:2:0 atlas (yuv_atlas.h) with its levels rounded, for the map
  * feed (map_feed.h) to hand to the shared cluster renderer. Only the newest
- * frame waits: each decoded frame replaces one not yet taken.
+ * frame waits: each decoded frame replaces one not yet taken. A frame whose
+ * picture is the last one again (the decoder's `same`) waits as that: no
+ * atlas, and nothing at all while the last one is still to be taken.
  *
  * Decoder lifecycle (warm decoder). The phone sends SPS, PPS and an IDR only
  * when its stream starts (twice in the first second: the opening keyframe and
@@ -19,10 +21,9 @@
  *
  * Threads. The AVB bridge's callback and the UDP reader only copy each
  * datagram into a bounded queue (packet_queue.h, kQueuePackets or
- * kQueueBytes, about 4 s of the stream) and return, at nice kReceiveNice
- * where the unit allows it (LimitNICE in the service); one decode thread
- * depacketises and decodes them in order at the process's own priority. The
- * FIFO reader, a byte stream whose writer waits while the pipe is full,
+ * kQueueBytes, about 4 s of the stream) and return; one decode thread
+ * depacketises and decodes them in order. Every thread runs at the
+ * process's own priority. The FIFO reader, a byte stream whose writer waits while the pipe is full,
  * decodes on its own thread.
  *
  * Catch-up (backlog.h). Every frame must be decoded, since each refers to
@@ -30,7 +31,8 @@
  * each RTP timestamp's first packet; while a later frame's first packet is
  * still queued behind the packet being depacketised, a whole newer frame is
  * waiting, so the frames that packet completes are decoded without a
- * picture: no VPP, packing, level rounding, change sampling or hand-off.
+ * picture: no VPP, packing (with the level rounding), change sampling or
+ * hand-off.
  * The newest frame, with nothing complete behind it, gets the full output.
  * A decode slower than the stream thus skips pictures instead of falling
  * behind; the queue's waits, the frames skipped and a decoder that falls
@@ -57,6 +59,7 @@
 #include "freeze_watch.h"
 #include "frame_clock.h"
 #include "framing_probe.h"
+#include "device_guard.h"
 #include "gap_settler.h"
 #include "h264_source.h"
 #include "keyframe_wait.h"
@@ -77,10 +80,12 @@ struct VideoConfig {
     std::string drm_device;         /* MSDK VAAPI device, e.g. /dev/dri/renderD128 */
     uint32_t tex_width = 1088;      /* decode target: the map area's size, which the patch */
     uint32_t tex_height = 480;      /* advertises to the phone */
-    /* Low bits of each Y, U and V level rounded away (round_levels,
-     * yuv_atlas.h): at 2 a byte is at most 2 levels off and 0, 128 and 255
-     * stay exact. 0: exact. */
+    SourceCrop src_crop;            /* the part of a picture of its size that is the map */
+    /* Low bits of each Y, U and V level rounded away in the decoder's
+     * packing (round_levels, yuv_atlas.h): at 2 a byte is at most 2 levels
+     * off and 0, 128 and 255 stay exact. 0: exact. */
     uint32_t tex_level_bits = 2;
+    bool gpu_copy = true;           /* VPP's output copied to system memory on the GPU (decoder_msdk.h) */
     /* A frame decoded within this long is live, while the alternate
      * screen's connection cannot tell (alt_screen.h). */
     int stall_ms = 6000;
@@ -91,14 +96,14 @@ class VideoProducer {
 public:
     static const size_t kQueuePackets = 4096;
     static const size_t kQueueBytes = 6 << 20;
-    static const int kReceiveNice = -5;
 
     explicit VideoProducer(const VideoConfig &cfg);
     ~VideoProducer();
 
     /* The newest decoded frame not yet taken, swapped into *frame (its
-     * buffer comes back for the next one); false when there is none. */
-    bool take(std::vector<uint8_t> *frame, uint64_t *id);
+     * buffer comes back for the next one), or with *same the picture last
+     * taken again (*frame untouched); false when there is none. */
+    bool take(std::vector<uint8_t> *frame, uint64_t *id, bool *same);
     /* Every decoded frame the same blank picture while they keep coming,
      * after the stream showed a picture (freeze_watch.h). */
     bool frozen(int64_t now_ms) const;
@@ -123,6 +128,10 @@ public:
     bool stream_lost() const;
     /* Decode errors so far, and the last one's text in *last. */
     uint32_t decode_errors(std::string *last) const;
+    /* The GPU decoder failed DeviceWatch::kLimit sessions in a row
+     * (device_watch.h): the service should exit non-zero for systemd to
+     * restart it. Any thread. */
+    bool device_fatal() const { return device_.fatal(); }
     /* Readable once a frame waits to be taken. */
     int ready_fd() const { return ready_[0]; }
     size_t frame_bytes() const { return atlas_bytes_; }
@@ -165,9 +174,9 @@ private:
     /* Under decode_mutex_. */
     bool start_decoder(std::string *err);
     void decode(const uint8_t *data, size_t len, bool end_of_au);
-    /* Decoder callback: rounds the decoder's atlas in place, then swaps it
-     * with back_ under lock; a frame without a picture is only counted.
-     * Runs on the feeding thread inside decode(). */
+    /* Decoder callback: swaps the decoder's atlas with back_ under lock, or
+     * marks the last picture as due again; a frame without a picture is only
+     * counted. Runs on the feeding thread inside decode(). */
     void on_frame(const VideoFrame &f);
 
     VideoConfig cfg_;
@@ -187,6 +196,7 @@ private:
     bool decoding_ = false;          /* the decoder held a sequence after the last feed */
     const PacketQueue::Packet *packet_ = nullptr;   /* the datagram being depacketised */
     GapSettler gaps_;
+    DeviceGuard device_;             /* GPU session failures in a row (decode_mutex_); after decoder_ */
     int64_t raw_retry_ms_ = 0;       /* a raw feed's next decoder start attempt */
     int64_t source_retry_ms_ = 0;    /* retry_sources' next attempt */
 
@@ -195,10 +205,11 @@ private:
     mutable std::mutex frame_mutex_;
     std::vector<uint8_t> back_;
     bool back_dirty_ = false;
-    int ready_[2] = {-1, -1};        /* a byte written when back_ gets a frame not yet taken */
+    bool repeat_ = false;            /* the picture last taken is due again (back_dirty_ false) */
+    int ready_[2] = {-1, -1};        /* a byte written when a frame waits to be taken */
     uint32_t back_w_ = 0, back_h_ = 0;
     uint64_t back_id_ = 0;           /* its number in the decoder's lifetime */
-    Spread round_us_;                /* rounding's cost on the source thread (frame_mutex_) */
+    uint64_t same_total_ = 0;        /* pictures the same as the last (frame_mutex_) */
     ChangeSampler change_;           /* source thread */
     FreezeWatch freeze_;             /* frame_mutex_ */
     FrameTally tally_;               /* frame_mutex_ */

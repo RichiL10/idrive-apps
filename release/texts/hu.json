@@ -1,0 +1,14 @@
+{
+  "cluster-render": {
+    "title": "Műszerfal-megjelenítő",
+    "description": "Minden alkalmazás rétegeit megjeleníti a műszerfalon és a HUD-on, közösen használva a megjelenítési helyeket és egyetlen feltöltési keretet"
+  },
+  "waze-on-cluster": {
+    "title": "Waze a műszerfalon",
+    "description": "A CarPlay vagy Android Auto térképét a műszerfalon jeleníti meg: egy root segédprogram alkalmazza a visszavonható carplay és aapd javítást ott, ahol támogatott, a rögzítés pedig a rendszerindítástól fut, dekódolja a térkép H.264 adatfolyamát, és a műszerfal-megjelenítőn keresztül rajzolja ki, amíg az adatfolyam érkezik"
+  },
+  "robertn_waze_cluster": {
+    "title": "Waze a műszerfalon",
+    "description": "A CarPlay Waze-térképét a műszerfalra helyezi: kapcsolja be a javítást az autó kezelőfelületén, és a térkép követi a CarPlay-t"
+  }
+}

@@ -156,6 +156,27 @@ bool Dcsm2Link::start(const Options &o, std::string *err)
         }
     };
 
+    /* A render loop stalled for liveness_ms stops the heartbeats, so the
+     * KOMBI's watchdog drops a frozen map within about 10 s; they go again
+     * once the loop moves. Logged at each change. 0: the gate is off. */
+    liveness_.set_stall_ms(o.liveness_ms);
+    if (o.liveness_ms > 0) {
+        log_info("dcsm: heartbeats stop after %lld ms without render loop progress", (long long)o.liveness_ms);
+        client_->heartbeatGate = [this] {
+            const int64_t now = cld::now_ms();
+            HeartbeatGate::Change change = HeartbeatGate::None;
+            const bool alive = gate_.allow(now, &change);
+            if (change == HeartbeatGate::Stalled)
+                log_error("dcsm: render loop stalled for %lld ms: heartbeats stopped, so the KOMBI drops our content",
+                          (long long)liveness_.since(now));
+            else if (change == HeartbeatGate::Moving)
+                log_info("dcsm: render loop moving again: heartbeats resumed");
+            return alive;
+        };
+    } else {
+        log_info("dcsm: dcsm_liveness_ms 0: heartbeats do not stop for a stalled render loop");
+    }
+
     log_info("dcsm: waiting for Dcsm2");
     client_->start();
     loop_ = std::thread([this] { app_->start(); });

@@ -22,6 +22,36 @@ function compareVersions(a, b) {
     return 0;
 }
 
+/* A component's title and description in other languages (its "texts"),
+ * as mgu-store's updater reads them (native/mgu-updater/js/catalog.js):
+ * { "<code>": { "title": "...", "description": "..." } }, codes as the
+ * Store's languages (de, pt-BR, zh-TW). Anything else in it is left out;
+ * null when nothing is left. */
+const TEXT_CODE = /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$/;
+function textsOf(t) {
+    if (!t || typeof t !== 'object' || Array.isArray(t)) {
+        return null;
+    }
+    const out = {};
+    Object.keys(t).slice(0, 64).forEach((code) => {
+        const v = t[code];
+        if (!TEXT_CODE.test(code) || !v || typeof v !== 'object') {
+            return;
+        }
+        const e = {};
+        if (typeof v.title === 'string' && v.title.trim()) {
+            e.title = v.title.replace(/\s+/g, ' ').trim().slice(0, 80);
+        }
+        if (typeof v.description === 'string' && v.description.trim()) {
+            e.description = v.description.slice(0, 1000);
+        }
+        if (Object.keys(e).length) {
+            out[code] = e;
+        }
+    });
+    return Object.keys(out).length ? out : null;
+}
+
 /* Parses catalog text; throws with a reason when it is unusable. */
 function parse(text) {
     let catalog;
@@ -55,4 +85,4 @@ function parse(text) {
     return catalog;
 }
 
-module.exports = { parse, compareVersions, SEMVER };
+module.exports = { parse, compareVersions, textsOf, SEMVER };

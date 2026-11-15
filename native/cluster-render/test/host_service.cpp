@@ -38,6 +38,7 @@ int main(int argc, char **argv)
     TargetSpec m, p, h;
     m.name = "map"; m.slot = 0x100; m.scene_id = 0x010004f0; m.width = 1088; m.height = 480; m.linger_ms = 1500;
     m.take_over_stock = true;
+    m.take_over_contents = {0x01000300, 0x01000101};   /* the HMI's map and FakePort::steal's stock content */
     p.name = "panel"; p.slot = 0x203; p.scene_id = 0x01000400; p.width = 1920; p.height = 720; p.linger_ms = 3000;
     h.name = "hud"; h.slot = 0x323; h.scene_id = 0x01000400; h.width = 800; h.height = 480; h.linger_ms = 3000;
     sc.targets = {m, p, h};

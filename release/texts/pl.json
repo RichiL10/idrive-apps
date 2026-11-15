@@ -1,0 +1,14 @@
+{
+  "cluster-render": {
+    "title": "Renderer zestawu wskaźników",
+    "description": "Rysuje warstwy wszystkich aplikacji na zestawie wskaźników i wyświetlaczu HUD, dzieląc miejsca na ekranie i jeden wspólny budżet przesyłania"
+  },
+  "waze-on-cluster": {
+    "title": "Waze na zegarach",
+    "description": "Wyświetla mapę CarPlay lub Android Auto na zestawie wskaźników: pomocnik z uprawnieniami root stosuje odwracalne poprawki carplay i aapd tam, gdzie każda jest obsługiwana, a rejestracja działająca od uruchomienia dekoduje obraz H.264 mapy i rysuje go przez renderer zestawu wskaźników, gdy tylko płynie strumień"
+  },
+  "robertn_waze_cluster": {
+    "title": "Waze na zegarach",
+    "description": "Przenosi mapę Waze z CarPlay na zestaw wskaźników: włącz poprawkę w HMI, a mapa podąża za CarPlay"
+  }
+}

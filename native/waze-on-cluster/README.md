@@ -1,19 +1,23 @@
 # waze-on-cluster
 
-Shows the CarPlay instrument-cluster map (Waze, Apple Maps or Google Maps)
-on the instrument cluster of a BMW with an iDrive 7 head unit (MGU), which
-the stock software does not do. It runs as root tools on the head unit and is
+Shows the CarPlay instrument-cluster map (Waze, Apple Maps or Google Maps),
+or Android Auto's (Google Maps), on the instrument cluster of a BMW with an
+iDrive 7 head unit (MGU), which the stock software does not do. It runs as root tools on the head unit and is
 driven from the HMI by the companion app
 [robertn_waze_cluster](../../apps/robertn_waze_cluster).
 
-CarPlay sends the cluster map only as H.264 video, with no map data, so this
-is a video pipeline:
+Both send the cluster map only as H.264 video, with no map data, so this is
+a video pipeline:
 
 1. **Ungate the second display.** A reversible patch to
    `/usr/bin/carplay` makes `KI_KOMBI_VARIANT` 7 resolve to a supported
    cluster variant, makes CarPlay start the cluster stream itself, and
    advertises the size the map is shown at ([patch/PATCH.md](patch/PATCH.md)).
-2. **Capture.** CarPlay sends the stream as RTP to its stock media-bus sink,
+   Another to `/usr/bin/aapd` and `/etc/aapd.conf` does the same for Android
+   Auto (PATCH.md "Android Auto"). Each is applied only where it is
+   supported, and each on its own: one that cannot be applied leaves the
+   other as it is.
+2. **Capture.** The phone sends the stream as RTP to the stock media-bus sink,
    AVB stream `media_transport.avb_streaming.15`; the render joins it as an
    extra receiver, in-process. It also listens on a local UDP port and a FIFO,
    which other sink patches can point at.
@@ -21,48 +25,75 @@ is a video pipeline:
    thread depacketises RTP to H.264 Annex B (`src/rtp_h264.*`) and decodes it
    with the unit's Intel Media SDK / VAAPI on `/dev/dri/renderD128` to the
    picture's own Y, U and V planes, through any lost packets ("Losses").
+   The GPU also copies each picture out of its own memory (`gpu_copy`;
+   MSDK copies on the CPU without it).
 4. **Draw.** Each frame goes to the shared cluster renderer,
    [cluster-render](../cluster-render), as a
-   video layer (`src/map_feed.*`). The renderer owns the RAMSES participant,
-   the DCSM slots and one upload budget for all its clients.
+   video layer (`src/map_feed.*`): a picture that is the last one again,
+   byte for byte, as a repeat of a few bytes (not even packed), and nothing
+   while the map is hidden. The renderer owns the RAMSES participant, the
+   DCSM slots and one upload budget for all its clients.
 
 ## Install and remove
 
 Install the app `robertn_waze_cluster` from the catalog of
 [idrive-apps](https://github.com/robertnisipeanu/idrive-apps)
 through the [mgu Store](https://github.com/robertnisipeanu/mgu-store). The
-app requires this tool (0.6.0); this tool requires `cluster-render` 0.3.3 and
-`mgu-deploy` 0.7.0, the deploy tool version that runs activate and deactivate
-hooks. Requirements resolve across catalog sources.
+app requires this tool (0.8.10); this tool requires `cluster-render` 0.3.12 and
+`mgu-deploy` 0.7.11, the deploy tool version that runs activate and deactivate
+hooks and puts the tool's `recmgr` and `crashNames` names, `aapd` among
+them, on the lists. Requirements resolve across catalog sources.
 
-**Install.** The deploy tool runs `patchd.js activate` as root. On a proven
-carplay build, or one Enable map patched before, it writes the patch Enable
-map writes, keeps the running binary linked, and never stops,
+**Install.** The deploy tool runs `patchd.js activate` as root. On a car coded `KI_KOMBI_VARIANT` 7, with a proven
+carplay build, or one CarPlay's Patch button patched before, it writes the patch
+CarPlay's Patch button writes, keeps the running binary linked, and never stops,
 kills or restarts CarPlay. The Store shows a restart pending; the app shows
-`Patch pending — reboot to activate`. One head-unit start runs the patched
-CarPlay and starts this tool's services. The hook leaves CarPlay as it is,
-and the app says why and offers Enable map, when Disable map was used, when
+`Status: Patched after restart`. One head-unit start runs the patched
+CarPlay and starts this tool's services. A first patch on a car counts as
+untested until CarPlay has run it for a healthy minute: boot recovery restores
+it after one failed start until then, after two from then on (PATCH.md
+"Boot recovery"). The hook leaves CarPlay as it is,
+and the app says why and offers CarPlay's Patch button, on a car coded
+otherwise or whose coding cannot be read (a confirmation is asked first), when CarPlay's Remove patch button was used, when
 the patcher cannot find or recognise one of its edit sites in the binary or
 something else modified it, when the build is outside the proven list and
-Enable map has not patched it, or when `carplay.service` starts another program.
-An update brings an older patch of ours up to date.
+CarPlay's Patch button has not patched it, or when `carplay.service` starts another program.
+An update brings an older patch of ours up to date. The first install on a
+HIGH F head unit also applies the patch again where 0.8.2's boot recovery
+removed it, but not where boot recovery removed it after failed head-unit
+starts (PATCH.md "Supported head units").
+
+Android Auto is OFF in this Kiro test build (`aa_enabled = 0`, the default):
+the hook, `patchd` and boot recovery never read for writing or write
+`/usr/bin/aapd`, `/etc/aapd.conf` or their backups and markers, and the app
+shows the Android Auto section as `Off`. To turn it on, put `aa_enabled = 1`
+in `/var/opt/waze-on-cluster/waze-on-cluster.local.conf` and enable the
+`waze-on-cluster-aa-boot` unit. With it on, the same hook then writes the
+Android Auto patch, on the one proven aapd
+build and only on a car coded `KI_KOMBI_VARIANT` 7, and never stops or
+restarts aapd. On any other car or build it leaves aapd as it is, and the
+app's Android Auto line says `Not supported on this car` or `Untested
+Android Auto version`. Whatever happens to Android Auto, the install of the
+CarPlay patch goes ahead.
 
 **Remove.** In the Store, remove the app, then the tool (refused while the
 app is installed). `patchd.js deactivate` reverts only our byte regions,
-keeps other tools' edits and drops our backup; the deploy tool then removes
+keeps other tools' edits and drops our backup, and restores aapd and
+aapd.conf the same way; the deploy tool then removes
 this tool's services and files. The renderer and the deploy tool stay. The
-next head-unit start runs the original CarPlay. Details: PATCH.md
+next head-unit start runs the original CarPlay and aapd. Details: PATCH.md
 "Install-time activation".
 
 ## Using it
 
-On the app's page, **Enable map** asks the root patch daemon `patchd` to
-apply the patch and **Disable map** reverts it, which turns the feature off:
+On the app's page, CarPlay's **Patch** button asks the root patch daemon
+`patchd` to apply the patch and its **Remove patch** button reverts it, which
+turns the feature off:
 without the patch the phone sends no cluster stream. A change takes effect
 when CarPlay next starts. `patchd` restarts CarPlay at once (SIGKILL, then
 `systemctl start`) only where both of these keep that from restarting the
 head unit (PATCH.md "Activation"); otherwise the app shows **Restart head
-unit**, a normal system reboot:
+unit**, a normal head-unit restart through the Node State Manager:
 
 - recmgr loaded `carplay` in both restart lists at this boot. The deploy
   tool writes it into both sections at install and takes it out at removal;
@@ -85,22 +116,59 @@ stays as it is.
 On a fresh install the patched CarPlay first runs at the next head-unit
 start, which also loads the recmgr entry.
 
-**When CarPlay crashes.** A crash (a core dump, or a watchdog timeout) fails
-`carplay.service`, and the head unit restarts as above; neither the recmgr
-entry nor the drop-in prevents it. The recovery service records the crash
-at once, and a boot step that runs before CarPlay counts the crashed start
-and, at the second crash of the patched CarPlay with no crash-free
-head-unit start in between, restores the original binary before CarPlay
-starts, so CarPlay comes back without the map until Enable map. Where
-recmgr loaded the entry and the head unit stays up, the recovery service
-also restores at the second crash and starts CarPlay again, at most three
-times per head-unit start, 5 s, 15 s and 60 s after a crash. Details:
-PATCH.md "Boot recovery".
+**When the patch keeps the head unit from starting.** A CarPlay crash (a
+core dump, or a watchdog timeout) fails `carplay.service`, and the head
+unit restarts as above; neither the recmgr entry nor the drop-in prevents
+it. Another process the patch makes fail restarts it through recmgr. A boot
+step that runs before CarPlay records each start of the patched CarPlay,
+and the recovery service marks it healthy once CarPlay has run 60 s. The
+next boot step counts a start that was not healthy as failed only on
+evidence: a crash of CarPlay, or a restart recmgr or crashhandler
+recorded, whatever process it names. A switch-off after the healthy window,
+a restart asked for or a start CarPlay never ran in counts nothing; a start
+that ended with no record (a power cut, or a shutdown inside the window
+with no restart record) is unknown, and two of those in a row count one,
+the accepted cost of catching a loop whose records are lost. It restores
+the original binary before CarPlay starts after the first failed start for
+a build outside the proven list, a car not coded 7 and a first patch on trial, and for a proven one after the second
+with no healthy start between, in a second or two, deciding from small
+state files only. CarPlay comes back without the map, its Status row reads
+`Removed — head unit kept restarting`, and its Patch button applies the
+patch again.
+Where recmgr loaded the entry and the head unit stays up, the recovery
+service also restores at the threshold and starts CarPlay again, at most
+three times per head-unit start, 5 s, 15 s and 60 s after a crash.
+Details: PATCH.md "Boot recovery".
 
 To break a loop by hand: keep the phone from connecting (unplug it, or turn
 off its Wi-Fi and Bluetooth) so CarPlay has no session to crash in, then over
 SSH run `sh /var/opt/waze-on-cluster/current/woc-patch.sh revert` and
 restart the head unit.
+
+**Android Auto.** Android Auto's **Patch** and **Remove patch** buttons
+apply and revert its patch, **Zoom out** and **Zoom in** change the
+density the phone is told (150-400 dpi, 180 unless chosen; a lower one shows
+more map with smaller text), and **Hide phone's turn card** crops Google Maps'
+turn card off the top of the map, or puts it back. Each takes effect when
+aapd next starts:
+`patchd` restarts aapd at once (SIGKILL, then `systemctl start`) where
+recmgr loaded `aapd` in both restart lists at this boot, otherwise at the
+next head-unit start (**Restart head unit**). `aapd.service` has no
+`OnFailure=`, so no drop-in is needed. A crash or a SIGKILL of aapd that
+`patchd` did not send is followed by `systemctl start aapd.service` 5 s, 15
+s and 60 s later, at most three times per head-unit start, where recmgr
+loaded the entry, and aapd has its own boot recovery: the second failed
+start of the patched aapd with no healthy start between restores the
+original aapd and aapd.conf before aapd starts.
+
+The phone sends a 1280x720 picture with its map in the top 1280x564, the
+map area's shape; the decoder crops that part (`src_crop` in
+`waze-on-cluster.conf`) and scales it into the 1088x480 map area. With the
+turn card hidden the crop also cuts the card's rows, which grow with the
+density, so `patchd` passes that crop to the render
+(`/var/opt/waze-on-cluster/aa-crop.env`), and a turn-card change, or a
+density change while the card is hidden, takes effect at the next head-unit
+start.
 
 Set **Instrument cluster > Central display area** to **Map view**: the
 cluster shows the stock map, the Waze map replaces it while CarPlay's cluster
@@ -111,11 +179,62 @@ Assisted Driving View the cluster's own content takes the centre. After
 changing the setting, CarPlay may need reconnecting before the map returns:
 the change can freeze the phone's cluster stream (below).
 
+**BMW's turn box.** While the map shows, BMW's own CarPlay turn-by-turn box
+on the cluster stays hidden: the map's layer leaves cluster-render's guide
+hold on (cluster-render README "Guide hold"). The app's **Hide BMW's turn
+box** checkbox turns that off and on at once, with no restart: the app sends
+`{"cmd":"guide","hide":0|1}` on the control socket, the service sets the
+layer's `guide_hold` and keeps the choice in
+`/var/opt/waze-on-cluster/state/waze-on-cluster.state.conf` (`state_file`,
+written whole and renamed into place), which outlives restarts and updates
+and replaces `hide_bmw_guidance` (1) of the settings once the app has set it:
+until then the settings' value applies at every start, so an edit of
+`waze-on-cluster.local.conf` takes effect. The service makes the
+folder, owned by `hmi_5000`, at each start. A value other than 0 or 1, or a
+state file that does not read, hides the box, with a warning in the log; the
+same file keeps the choice of **Show map** (below).
+The status event carries the choice as `hide_bmw_guidance`, and
+`guide_disabled` 1 while cluster-render's mapping guard keeps the hold off
+(cluster-render README "Mapping guard"): the box then shows whatever the
+choice. With a
+cluster-render before 0.3.7, which has no `guide_hold`, the switch changes
+nothing.
+
+**Map on the cluster.** The app's **Show map** checkbox takes the map off the
+cluster and puts it back at once: no CarPlay reconnect, no patch change and no
+head-unit restart. The app sends `{"cmd":"map","shown":0|1}` on the control
+socket (a value other than 0 or 1 is refused with a warning). While the map is
+off its layer is hidden as when the stream is not live: the renderer lets the
+slot go, the stock map and BMW's turn box come back, the guide hold is released
+and nothing new is queued for the renderer. A frame already being written to
+the renderer's socket when the switch is made still completes (at most one
+frame), then the layer is hidden: the client has no way to cancel a frame
+under way. Capture, decoding and the stream's
+tracking go on, so the map is back with the next frame, drawn from the newest
+one, when it is switched on. The status event is `idle` with the reason
+"Switched off in the app" and carries the choice as `map_shown` (0 or 1; the
+app takes a service without it as not switchable). The choice is kept in the
+same state file as the turn box's. The file is rewritten whole (temporary
+file, sync, rename, then a sync of its folder) for either change, and holds a
+key only once the app has changed that key: operating Show map does not pin
+`hide_bmw_guidance`, nor the turn box checkbox `map_shown`, so the settings'
+value of a key the app never set keeps applying at every start. The app's
+choice replaces `map_shown` (1) of the settings. It
+survives a restart of the service and of the renderer: the map comes back up
+off and stays off until it is switched on. A value other than 0 or 1, or a
+state file that does not read, shows the map (and hides the box), with a warning
+in the log; a state file without a key (one from a version before `map_shown`
+has only `hide_bmw_guidance`) leaves the settings' value of that key. If the
+folder cannot be synced after the rename, the choice stays in effect and the
+log warns that it may not survive a power loss.
+
 Then connect the iPhone to CarPlay. Waze needs its server-side flag 1006 for
 the alternate display. The phone sends SPS, PPS and an IDR only at the start
-of a stream, so the render service runs from boot, joins the media bus at
-once (retrying every second until the AVB bridge is up), and decodes from the
+of a stream, so the render service runs from boot, and decodes from the
 stream's first SPS whether or not the map is shown. The app need not be open.
+It starts once BMW's media bus is up, after `ufipc_daemon.service` and
+`avbstreamhandler.service` (ordering only), and joins the bus at once,
+retrying every second while the bridge is not there.
 
 The map comes up at the stream's first non-blank picture in the native
 central-map slot `0x100` (scene `0x010004f0`, 1088x480), under the gauges,
@@ -138,10 +257,10 @@ Edit 3), before any navigation app draws on the cluster, and the phone sends
 a blank picture until one does: on the car about 100 blank frames in the
 first 2 s, then nothing; in the field the map came once a route started in
 Waze or Google Maps, and stayed after it ended. So the stock map stays until
-the first non-blank picture, and the app shows `Waiting for the phone's map
-— start navigation`. A picture that stays blank for `blank_ms` (10 s) after
-a map gives the slot back to the stock map; the app then shows the same
-line, or `Map frozen — reconnect CarPlay` when the blank frames keep coming
+the first non-blank picture, and the app shows `Cluster map: Waiting for
+the phone's map`. A picture that stays blank for `blank_ms` (10 s) after a map gives
+the slot back to the stock map; the app then shows the same
+line, or `Cluster map: Frozen` when the blank frames keep coming
 fast enough to be a frozen stream (see "A frozen stream" below). The next
 non-blank picture takes the slot again. A map always draws something, so a
 blank spell shorter than that keeps the map up, and the map never comes and
@@ -149,14 +268,14 @@ goes faster than once every `blank_ms`.
 
 While the map is up, a session the cluster ends (the stock map taking the
 slot back, a refusal, no answer) is started again after 2, 5, 10, 20, then
-every 30 s. The app shows `Starting map…` while the renderer starts, and a
+every 30 s. The app shows `Cluster map: Starting…` while the renderer starts, and a
 map error only when the renderer stays unreachable for 15 s.
 
 A frozen stream, frames still coming (on the car 15-21 a second) but all the
 same blank picture, is frozen after 10 s (`freeze_ms`, at least
 `freeze_min_fps` 3 a second): the stock map shows (in Off, an empty centre)
-and the app shows `Map frozen — reconnect CarPlay`, not `Waiting for the
-phone's map — start navigation`. The map is down while the stream is frozen
+and the app shows `Cluster map: Frozen`, not `Cluster map: Waiting
+for the phone's map`. The map is down while the stream is frozen
 or its picture has stayed blank for `blank_ms`, whichever comes first; with
 both at 10 s they come together. The map is back with the next non-blank
 picture. A stream that has shown no picture yet is frozen only after three
@@ -182,9 +301,9 @@ the render decodes through a lost packet:
   decode thread depacketises and decodes them in order. Past the queue's
   headroom the oldest packets are dropped, and counted. A slot keeps a
   buffer of at most 2 KB once its packet is out, so large datagrams leave
-  no memory behind. The receive threads run at nice -5 (the unit file's
-  `LimitNICE`), the decode thread at the service's nice 0. The FIFO reader, a byte stream that holds its
-  writer back, decodes on its own thread.
+  no memory behind. Every thread runs at the service's nice 0. The FIFO
+  reader, a byte stream that holds its writer back, decodes on its own
+  thread.
 - Every frame is decoded, since each builds on the one before, but only the
   newest gets a picture. While a later frame's first packet (a new RTP
   timestamp) is already queued, the frames decoded meanwhile skip the
@@ -216,7 +335,7 @@ the render decodes through a lost packet:
 - Decoding through a loss, the map shows and the status has no reason
   for it; `probe.txt`'s `stream:` line says `lost part of the stream at
   12:39:50; decoding through it` until that clean frame. The status's
-  `reason`, which the app shows, is `Stream lost — reconnect CarPlay`
+  `reason`, which the app shows, is `Stream lost`
   while the stream arrives with nothing decoded for 2 s (a render started
   mid-stream, or a loss the decoder does not decode through) and while the
   decoder has given up its sequence. The detail, with when that began, is
@@ -232,7 +351,7 @@ status.
 
 Once a second the render writes, in `/run/waze-on-cluster/` (mode 0644):
 `status.json`, the status the app shows (`state` idle, starting, showing,
-frozen or error; `page`; `reason`; the shared upload cap as `upload_cap_kb_per_s` and
+frozen or error, or unsupported on a head unit that refuses the tool; `page`; `reason`; the shared upload cap as `upload_cap_kb_per_s` and
 why as `upload_reason`, also in the app's status event); `probe.txt`, the
 sources, the depacketiser (`rtp: packets nals aus seq_gaps lost dropped bad`),
 the receive queue (`queue: N dropped, at most M of 4096 packets waiting, K KB
@@ -260,20 +379,156 @@ catch up, 1 changed, 0 corrupted; the last picture is not blank; 0 losses
 (0 packets), 0 dropped by the receive queue; packets waited 2.4 ms on
 average, 61 ms at most`.
 
-For a report, run as root on the unit
-`sh /var/opt/waze-on-cluster/current/collect-logs.sh`: it writes
-`/tmp/woc-logs-<UTC date and time>.tar.gz` and prints its path. The archive
-holds both tools' log files (cluster-render's too), the files in
-`/run/cluster-render/`, the render's `status.json` and `probe.txt`, boot
-recovery's counter and shutdown record, this boot's journal of the render,
-`patchd`, the boot step, the recovery service, cluster-render and carplay,
-the list of boots, `ls -l` of both tools' folders, their `*.local.conf`, the
-date and the uptime.
+For a report, use the app's **Logs** page (below), or run as root on the
+unit `sh /var/opt/waze-on-cluster/current/collect-logs.sh [-o <folder>]`:
+it writes `woc-logs-<UTC date and time>.tar.gz` into the folder (`/tmp` by
+default) and prints its path. The archive holds both tools' log files
+(cluster-render's too), the journal lines the journal service keeps, the
+files in `/run/cluster-render/`, the render's `status.json` and
+`probe.txt`, boot recovery's counter and shutdown record, this boot's
+journal of the render, `patchd`, the boot step, the recovery, capture,
+journal and logs services, cluster-render and carplay, the list of boots,
+`ls -l` of both tools' folders, their `*.local.conf`, the date and the
+uptime, and what a start the head unit reset needs explained
+(`patch/logs_extra.js`):
 
+- `patch-record-carplay.json`, `patch-record-aapd.json`: the patchers'
+  records (`*.woc-patch.json`); `aa-boot-recovery.json`: the aapd boot
+  recovery's counter;
+- `aapd-status.txt`: `aapd_patch.js status` (aapd's build, its edits, the
+  backups, the cluster coding), read-only; `coding.txt`: the cluster
+  coding's `KI_KOMBI_VARIANT`, the number only;
+- `deploy.txt`: the deploy tool's version, each tool installed with its
+  version (`/var/opt/<id>/current/component.json`: id, kind, version) and,
+  from the deploy tool's `state.json`, the tools' versions and firmware, the
+  apps' versions, the restarts pending in this boot and the last bounce;
+- `restart-record-<n>-<boot id>-<recmgr|crashhandler>.xml`: recmgr's and
+  the crash handler's restart records, which each deletes at its start. The
+  carplay boot step (`waze-on-cluster-boot.service`, root, before carplay)
+  copies each it finds into `/var/opt/waze-on-cluster/restart-records/`
+  (group `systemd-journal`, 2750, files 0640: root writes, the group reads), named by
+  the boot that found it and numbered in boot order (the clock is not yet
+  set then). Each record is read past 64 KiB, VIN-scrubbed and then cut to
+  64 KiB as below; those of the last 5 boots are kept. With no record it
+  writes nothing, and a failure only logs a line (the boot check goes on);
+- `restartInfo-recmgr.xml`, `restartInfo-crashhandler.xml`: the same
+  records, should they still be there when the Logs page opens;
+  `recmgr-crashes.txt`: the database file's modification time and the
+  newest 200 rows of recmgr's crash table (`recmgr_stats.db` `Crash`: key,
+  the application's name, crash id; recmgr leaves the rows' time empty and
+  their lifecycle 0), read by the firmware's `sqlite3` read-only
+  (`file:...?mode=ro`) and killed after 2 s; `core-dumps.txt`: the names and
+  times of what the crash handler and the kernel keep of crashes
+  (`coredumps/`, `gpu_hangs/`, `gcd/`, `dlt-cdh/`, `/var/opt/kerneldump`,
+  two levels deep, the newest 100 of the first 5000 entries of each), never
+  the files. These four are under `/var/opt/public`, which only root reads:
+  the logs service's firewall unit, root's, writes them to
+  `/run/waze-on-cluster-logs` (group `systemd-journal`, 2750, written whole
+  into a new folder and renamed into place) before the logs service starts,
+  so a Save logs has them as they were when the Logs page opened;
+  `collect-logs.sh` run as root reads them itself.
+
+Each of these files is at most 64 KiB. The one thing scrubbed from them is a
+VIN, replaced by `<VIN>`: a 17-character VIN (also one in a longer run when it
+starts with a BMW or MINI maker code, and one written as groups apart by single
+spaces or dashes, such as `WBA 5R71 070F K67620`); the last 7 characters of
+any VIN found in the archive, wherever they stand alone; and 7 letters and
+digits (with a digit) that follow `vin`, `fgnr`, `fahrgestell(nummer)` or
+`chassis`. A 7-character crash or build id with none of these stays. As the
+last step before packing, `collect-logs.sh` passes every file of the archive
+(the tools' logs and the journal's lines too) through the same replacement and
+renames a file whose name holds a VIN to `file-<n>`; a file over 8 MiB is
+replaced by a line saying so, and if that step fails, or `logs_extra.js` is
+missing, no archive is written. Tokens, passwords and keys are not scrubbed:
+they are kept out by not collecting the files they sit in, and what is copied
+as it is (the patch records, the restart records, a pending restart's reason)
+is copied without any search for them. Left out: the coding image itself,
+recmgr's `UserID` column (7 characters, a short VIN's size), the core dumps'
+and their context files' contents, every other field of the deploy tool's
+`state.json` and component manifests, and the deploy tool's and the updater's
+other files (their tokens, credentials, sources, config and backups). The
+archive is built in a private folder under `/tmp` and moved to its name when
+finished; the name must not be a folder or a link. Nothing is read from the
+network, and nothing is written but the archive, the snapshot folder and the
+kept restart records.
 Sockets: `/dev/shm/waze-on-cluster/ctl.sock` (the render's status and log,
-group `tm_oap_app`; a connection also starts the service) and
-`/dev/shm/waze-on-cluster/patch.sock` (`patchd`, `root:tm_oap_app`, 0660).
-The app's README lists both protocols.
+and the turn-box switch, group `tm_oap_app`; a connection also starts the
+service),
+`/dev/shm/waze-on-cluster/patch.sock` (`patchd`, `root:tm_oap_app`, 0660)
+and `/dev/shm/waze-on-cluster/logs.sock` (the logs service, group
+`tm_oap_app`; a connection starts it). The app's README lists the
+protocols.
+
+## Logs
+
+**The journal service** (`waze-on-cluster-journal.service`,
+`patch/journal_keep.js`) keeps the tools' part of the journal on
+`/var/opt`: the unit's journal is volatile and holds about four minutes on
+the car, where the navigation writes some 16,000 lines in that time. Its
+timer starts it 10 s after boot, so a start the head unit resets within
+its first minute still leaves its lines; it runs at the lowest CPU and I/O
+priority, no unit waits for it, and it is ordered against no head-unit unit.
+It reads what this boot logged so far, then follows this boot's lines of the
+waze-on-cluster services, cluster-render, carplay, recmgr and crashhandler,
+systemd's lines about them and their sockets, and the kernel's, and appends
+them every 2 s to
+`/var/opt/waze-on-cluster/journal/journal.log`, opening the file only for
+the write. In the boot's first 2 minutes each append is also synced to disk
+(`fdatasync`, through a read-only descriptor, so a remount of `/var/opt` to
+read-only never finds the file open for writing): a start reset without a
+shutdown keeps its lines up to the last 2 s before the reset. After that the
+file system's own commit makes them durable. Each line is at most 1 KiB: the time (UTC, µs), the unit, the
+program and its pid, the message. Past 384 KiB the file becomes
+`journal.log.1` and the older ones move up to `journal.log.9`: at most 10
+files and 3.75 MiB. The tools' lines (waze-on-cluster, cluster-render) and
+the others each have 128 KiB a minute, with a minute's worth in reserve, so
+a flood of one kind never pushes out the other; what comes faster is
+dropped and counted (`journal-keep: dropped N other lines (M KiB) over the
+rate limit`). That keeps at least the last 10 minutes whatever the units
+log: the rotated files always hold more than 3447 KiB, and 10 minutes let
+through at most 2816 KiB. What this boot logged before the start is written
+whole, within the files' caps (its newest lines when it is more), not
+limited. On the car these units wrote 189 lines in four
+minutes with the map up (about 7 KiB a minute; carplay logs to DLT), the
+tools' own log files at most 67 KiB in any 10 minutes over two days, and the
+kernel about 1,650 lines (140 KiB) in a boot's first minute, so the limit is
+met only by a fault flooding the journal, and the files hold hours. A start
+writes what this boot logged after the newest line the files hold, all of it
+when this boot has no such line, then follows from the last entry's journal
+cursor, as does a journalctl started again; nothing depends on the clock.
+
+**Save logs** on the app's Logs page asks the logs service
+(`waze-on-cluster-logs.service`, `patch/logs.js`) for an archive: with at
+least 64 MiB free on `/var/opt` it runs `collect-logs.sh -o
+/var/opt/waze-on-cluster/saved`. An archive over 16 MiB is deleted, then the
+oldest ones until at most 5 are left, together at most 20 MiB. One save
+runs at a time, at most one every 10 s.
+
+**Download.** The logs service serves the saved archives to a phone or a
+laptop on the car's Wi-Fi hotspot, at `http://<wlan_bridge's
+address>:8475/<token>/` (on the car `172.16.222.97`), which the Logs page
+shows as text and as a QR code. The page lists the archives, each a
+download. The token is 128 random bits, new at each start of the service;
+another path, a wrong token or another `Host` is refused, and 10 wrong
+tokens or 120 requests in a minute lock a client address out for the rest
+of it, which may download two archives at a time. It serves only GET and
+HEAD of the archives, no folder, link or other file.
+
+The logs service starts when the app opens the Logs page (its socket) and
+stops by itself 10 s after the page is closed, or 15 minutes after the last
+Save logs if that is later. It listens only on `wlan_bridge`'s address while
+it has one, checked every 5 s. It starts `waze-on-cluster-logs-fw.service`
+(root, `logs_fw.js`) first and stops it with itself (`BindsTo`): that makes
+`saved/`, removes any rule tagged `waze-on-cluster-logs` from the firewall's
+`ip filter input` chain and keeps one at its top, `iifname "wlan_bridge"
+tcp dport 8475 accept`, checked every 30 s and put back after a ruleset
+load, and removes it when it stops, however it stopped (`ExecStopPost`).
+From its second check on, a logs service neither running nor starting (its
+start limit refused it) ends it too, the rule removed. A unit without that
+chain gets none.
+
+Every OAP app is in `tm_oap_app` and can use the logs socket, as it can
+`patch.sock`; the token keeps out the other devices on the hotspot.
 
 ## Map size and upload
 
@@ -283,6 +538,10 @@ that, so the phone renders those pixels, the decoder passes them through
 unscaled and the texture maps onto the area one to one. In the whole-panel
 slot `0x203` the map is centred at (416, 120) with everything around it
 transparent. `tex_size` must equal the size the patch advertises.
+`src_crop` takes part of a picture of one size (a phone that draws its map
+in part of a larger picture) and scales it to `tex_size`; a picture of any
+other size is used whole. `map_rect` draws the map stretched into a rect of
+the current target instead of its map area.
 
 **Texture.** The planes are packed into one R8 atlas, Y in rows 0–479 and U
 and V side by side in rows 480–719 (783,360 B), which the renderer's shader
@@ -310,7 +569,8 @@ decoder skips the pictures of frames it is behind on ("Losses"). Real Waze
 sent up to about 16 frames a second on the car.
 
 **Upload budget.** The budget belongs to cluster-render and is shared by all
-its clients: a 5500 KB/s ceiling, stepping down by 500 KB/s to 2000 KB/s on
+its clients: a 4500 KB/s ceiling (Kiro test build; upstream has 5500),
+stepping down by 500 KB/s to 2000 KB/s on
 sustained congestion and recovering slowly. Set it with `upload_kb_per_s` in
 `/var/opt/cluster-render/cluster-render.local.conf`. This tool's own
 `upload_kb_per_s` and `upload_burst_ms` keys are accepted and ignored with a
@@ -333,7 +593,7 @@ build by its code and data and checks it before any write, so the patch
 applies to any carplay build in which every site is found exactly once and
 passes its cross-checks; a build where one does not is left alone, with the
 reason. The install patches only the proven build; another build is a conflict
-until Enable map (or `apply --unproven`) patches it once. `carplay_patch.js
+until CarPlay's Patch button (or `apply --unproven`) patches it once. `carplay_patch.js
 probe` (`woc-patch.sh probe`) shows where the sites are in a binary and
 whether it is patchable, without writing. The build the patch was proven on,
 carplay 22.28.3, also has to match its shipped SHA-256 before the first edit.
@@ -351,39 +611,123 @@ Its sites:
 `verify`, `revert [--force]`, and `apply high|mid` with `--avb` (the app's
 sink), no flag (`udp://127.0.0.1:20557`), `--capture` (FIFO) or `--sink
 <url>`, plus `--res WxH|stock`, `--safe WxH+X+Y|full` and `--unproven`. It
-remounts `/` read-write only for the write. **Never `systemctl stop` or
+remounts `/` read-write only for the write, and says on stderr (and exits
+non-zero) when `/` is not read-only again by `/proc/mounts`: restart the head unit. It does
+not take patchd's lock: do not run it while the app is patching. **Never `systemctl stop` or
 `restart` carplay**: CarPlay dumps core on SIGTERM, which power-cycles the
 head unit, and so does any other failed CarPlay end; with the drop-in
 loaded, a SIGKILL is a clean exit.
 `revert` restores any binary of the backup's build
 (`/usr/bin/carplay.woc-orig`), and refuses another build (a firmware update)
 unless given `--force`.
+Every write of carplay, aapd or aapd.conf (apply, revert, boot recovery's
+restore) gives the file its original's owner and mode, recorded with the
+backup, with at least 0755 for carplay and aapd and 0644 for aapd.conf, set
+explicitly on the new file and checked before it replaces the old one,
+whatever the umask it runs under. carplay and aapd run as their own users:
+a carplay left `0700` fails to start (`status=203/EXEC`) and the head unit
+restarts in a loop. An apply or revert that finds nothing to change, and
+boot recovery before the service starts, give a file the service's user
+cannot run or read its original's mode and owner.
+
+### If the app refuses a change
+
+The app can refuse an apply or a revert, or leave a patch in place that a
+boot should have restored, with a message such as "processes run both ... and
+... .woc-running" or "every name for a running ... is in use". Nothing was
+written and `/` stayed read-only. Restart the head unit and try again. If it
+persists, an unreadable process may be the cause: send the archive from
+Save logs (the kit's probe lists the processes it could not read). The
+full list of what the app does not handle, and what to do about each, is
+"Known limitations of 0.8.10" in `KIRO-NOTES.md`.
+
+## The Android Auto patch
+
+`patch/aapd_patch.js` (Node 8, no dependencies) edits `/usr/bin/aapd` and
+`/etc/aapd.conf` after a verified full backup of each. It applies only to
+aapd 22.39.3 as shipped (sha256 `6880f54c…`, every site checked by its
+anchor bytes on both sides) and the matching aapd.conf (sha256
+`9584c540…`), and only on a car coded `KI_KOMBI_VARIANT` 7, read from
+`/dev/shm/rawcodingdata` the way aapd reads it. Its edits (PATCH.md "Android
+Auto"):
+
+| Edit | What it does | Where |
+|---|---|---|
+| gate | `secondVideoEnabled()`: `KombiVariant <= 1` → `<= 2` | 1 B at `0x998c3` |
+| selfstart call | `onNewNavigationStatus()`'s `setNaviStreamStatus` call → `requestStream()` | rel32 at `0x1d43ec` |
+| selfstart guard | `requestStream()`'s `je` on a field never set → `jmp` | 6 B at `0x1d3f5d` |
+| screen | KombiVariant 2 reads the 12.3" profile, as 0 does | 16 B at `0x15b440` |
+| geometry | aapd.conf's 12.3" entry: a 1280x720 stream with the UI in its top 1280x564 (or whole with the turn card hidden), the chosen density, the safe area 592x432 at 336,84 | numbers in `KOMBI_DISPLAY` |
+
+`aapd_patch.js status | apply [--dpi n] [--card shown|hidden] | revert [--force] [--drop-backup]`
+with `--target`, `--conf` and `--coding` for copies. `revert` needs no
+anchors: each file's backup is trusted by its recorded SHA-256 and written
+over a file of its own build. **Never `systemctl stop` or `restart` aapd.**
 
 ## Safety
 
+- Every head-unit variant runs, HIGH F included (0.8.2 refused it).
+  Nothing of ours runs only where the variant cannot be read: a kernel
+  command line with no `hwvariant=`, or two that disagree (PATCH.md
+  "Supported head units"). There no patch is written, a patch already on
+  disk is restored at the next boot before carplay or aapd starts, and
+  this tool's capture and the cluster renderer stay idle; the app shows
+  `Status: Not supported on this car` in both sections.
 - The patch is the only change to a BMW binary. It is reversible and fully
   backed up, checks every edit site before writing, refuses a build where a
   site is not found or not recognised, is written by atomic rename, and
   takes effect at the next CarPlay start. Its first apply to a proven build
   (PATCH.md) also requires the whole file to be the shipped one; on any
-  other build it needs `--unproven` (Enable map passes it, the install does
-  not), and once its backup exists only the four sites are checked.
+  other build it needs `--unproven`. `patchd` passes it only for a request
+  that carries `"unproven": true`, which the app sends only on the second,
+  confirming press of Patch (an untested build is refused on a plain apply, and
+  the install never passes it). Once its backup exists only the four sites are checked.
+  The new file is written through one descriptor, checked by SHA-256 read-back
+  and renamed over the old one; if the rename fails the file is left as it was
+  (no in-place overwrite).
+- A remount lock is broken only when its holder is gone (or hung for 10
+  minutes); `patchd` waits up to 15 s and then refuses with `try again in two
+  minutes`. If a patched CarPlay keeps crashing and no usable backup exists,
+  boot recovery writes a persistent `failed` mark and stops starting CarPlay
+  after crashes (no reboot storm); the app shows it as `Failed`. The mark clears
+  when the binary is stock again.
   Removal restores the backup's bytes in our edits' regions, or the whole
   backup over a binary of its build the patcher no longer recognises.
+- The Android Auto patch is written only on the proven aapd and aapd.conf,
+  on a car coded `KI_KOMBI_VARIANT` 7, with enough free space on `/` for
+  the backups and a temporary copy. Removal restores both files.
 - `patchd` runs as root. It accepts only `apply` (panel `high|mid`, mode
-  `avb|udp|fifo`), `revert`, `reboot`, `status`, `logs` and the capture
-  commands; no value reaches a shell or a path. It checks `/` is read-only
-  again after every write. It applies no patch and restarts nothing on its
-  own. `reboot` is honoured only while a change is pending.
-- Boot recovery (`recovery.js`, root) changes the binary only through the same
-  revert as Disable map, and only when that revert would change it
-  (`restorable: yes`: a verified backup of the binary's own build). Its one
-  action on a service is `systemctl start carplay.service` after a crash or
-  a SIGKILL `patchd` did not send, bounded, where recmgr loaded `carplay`'s
-  entry this boot; it never stops,
+  `avb|udp|fifo`), `revert`, `aa-apply`, `aa-revert`, `aa-density` and
+  `aa-card` (one of the fixed values, at most one change every 10 s), `reboot`, `status`,
+  `logs` and the capture commands; no value reaches a shell or a path. It
+  checks `/` is read-only again after every write. It applies no patch and
+  restarts nothing on its own. `reboot` is honoured only while a change is
+  pending, one at a time, and at most once every 10 minutes.
+- Boot recovery (`recovery.js`, root) writes back only our backup of the
+  original, verified against the SHA-256 recorded when it was taken, over
+  the backup's own build, and only for a binary its patch record shows as
+  ours or cannot vouch for. Its one action on a service is `systemctl start` of carplay or
+  aapd after a crash or a SIGKILL `patchd` did not send, bounded, where
+  recmgr loaded the service's entry this boot; it never stops,
   kills or restarts anything. Its shutdown record is a drop-in for
   `var-opt-ro.service`, removed with the tool.
 - No debug arming: the services are normal units whitelisted in recmgr.
+- The journal and logs services run as dynamic users (`DynamicUser`, a
+  read-only file system but their folder) in `systemd-journal`, the group
+  that reads the journal and owns `journal/` and `saved/` (mode 2770). Root
+  runs only in node, which the crash handler's list names (the journal
+  folder's creation, a `+` command, which systemd gives no limits), and in
+  the firewall unit (which also takes the read-only snapshot of BMW's crash
+  records for Save logs, with `sqlite3` under the unit's limits). None of the
+  units is ordered against a head-unit unit, and no head-unit unit or boot
+  target waits for the services: a timer starts the journal service, a
+  socket the logs service, the logs service the firewall unit; `timers.target` and `sockets.target` wait only for the
+  timer's and the socket's own start. They restart after a failure (10 s
+  apart, at most 10 starts in 10 minutes). The journal and logs services run
+  at nice 19 with idle I/O and 64 CPU shares, within 20% and 50% of a CPU
+  and 96 and 160 MiB; the firewall unit at nice 10, within 50% of a CPU and
+  64 MiB. All three dump no core for the crash handler (`LimitCORE=1`, which
+  their children such as `journalctl`, `nft` and `sqlite3` inherit).
 - Nothing is mapped on the cluster before the stream's first non-blank
   picture, once its picture has stayed blank for `blank_ms`, or after the
   frames stop. The map never alters the gauges' data.
@@ -394,10 +738,10 @@ unless given `--force`.
 ## Diagnostic capture
 
 CarPlay's projection-config markers are on DLT only during a phone
-connection. Press **Capture logs**, then reconnect the phone; the window lasts
-up to 5 minutes and **Stop capture** ends it early. `patchd` keeps the
-markers until it restarts. The capture service is a root service, so it
-starts only after a reboot following its install.
+connection. Press **Start capture** on the app's Logs page, then reconnect
+the phone; the window lasts up to 5 minutes and **Stop capture** ends it
+early. `patchd` keeps the markers until it restarts. The capture service is
+a root service, so it starts only after a reboot following its install.
 
 `waze-on-cluster-capture.service` sends BMW's DLT control request (service
 `0xf13`, as `dlt-control -u -z 1`) over `/run/dlt-files/dlt-ctrl.sock`, waits
@@ -430,8 +774,9 @@ no guidance metadata, so this shows map pixels, not data-driven directions.
 ## Building and testing
 
 ```sh
-make test                         # host tests: NAL, RTP, keyframe wait, the map feed against
-                                  # cluster-render, the renderer's kit, patch/patchd/recovery/DLT
+make test                         # host tests: NAL, RTP, keyframe wait, the turn-box setting, the map
+                                  # feed against cluster-render, the renderer's kit, patch/patchd/recovery/DLT,
+                                  # the journal and logs services
 make test-x86                     # the C++ tests with the unit's toolchain in Docker (SSE2 paths)
 make target                       # build/target/waze-on-cluster in Docker, imports checked
 make test-firmware ROOTFS=<dir>   # DLT capture against the unit's own dlt-daemon in Docker
@@ -447,7 +792,10 @@ The patch tests run against a copy of the unit's `/usr/bin/carplay`
 (carplay 22.28.3, sha256
 `ddb33e33161387c6479c391684b3d019b0de54ecfcee8d6877eca94aa62f3e50`) named by
 `CARPLAY_BIN`; without it they are skipped (`SKIP`). The locator's test runs
-on synthetic builds without it. The repository carries no BMW binary. `test-firmware` runs the unit's own dlt-daemon, libdlt and
+on synthetic builds without it. `aapd_test.js` runs against copies of the
+unit's `/usr/bin/aapd` and `/etc/aapd.conf` (the SHAs above) named by
+`AAPD_BIN` and `AAPD_CONF`, and is skipped without them. The repository
+carries no BMW binary. `test-firmware` runs the unit's own dlt-daemon, libdlt and
 dlt-receive from `ROOTFS`, an extracted root file system of the unit.
 
 ## License

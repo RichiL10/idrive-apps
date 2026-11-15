@@ -21,6 +21,9 @@
  */
 'use strict';
 
+var car = require('./head_unit_env.js');   /* a HIGH head unit, coded KI_KOMBI_VARIANT 7, for every patcher and patchd this runs */
+var record = require('../patch_record.js');
+
 var fs = require('fs');
 var os = require('os');
 var net = require('net');
@@ -161,6 +164,22 @@ function edit123Only() {
     return b;   /* resolution immediates left stock */
 }
 
+/* A crash restart cut across a revert: with CRASH_REPLACED, carplay starts
+ * from the file the revert replaces, as the patcher starts; with
+ * CRASH_WRITTEN, from the file it wrote, as the patcher ends (before patchd
+ * puts its running file back). */
+var CRASH_REPLACED = path.join(dir, 'crash-replaced'), CRASH_WRITTEN = path.join(dir, 'crash-written');
+var CRASH_HOOK = path.join(dir, 'crash-hook.js');
+fs.writeFileSync(CRASH_HOOK, [
+    "var fs = require('fs'), cp = require('child_process'), path = require('path');",
+    "var P = " + JSON.stringify(PROC) + ", T = " + JSON.stringify(TGT) + ";",
+    "function start() { cp.execFileSync('rm', ['-rf', path.join(P, '4242')]); fs.mkdirSync(path.join(P, '4242')); fs.linkSync(T, path.join(P, '4242', 'exe')); }",
+    "function once(f) { if (!fs.existsSync(f)) return false; fs.unlinkSync(f); return true; }",
+    "if (/carplay_patch\\.js$/.test(process.argv[1] || '') && process.argv[2] === 'revert') {",
+    "    if (once(" + JSON.stringify(CRASH_REPLACED) + ")) start();",
+    "    process.on('exit', function () { if (once(" + JSON.stringify(CRASH_WRITTEN) + ")) start(); });",
+    "}",
+].join('\n') + '\n');
 var SOCK = path.join(dir, 'sock', 'patch.sock');
 var patchd = cp.spawn(process.execPath, [PATCHD], {
     env: Object.assign({}, process.env, {
@@ -179,8 +198,10 @@ var patchd = cp.spawn(process.execPath, [PATCHD], {
         WOC_DLT_RECEIVE: path.join(dir, 'no-dlt-receive'),
         WOC_DLT_RETRY_MS: '600000',
         WOC_REBOOT_CMD: REBOOT,
+        WOC_STATE_DIR: path.join(dir, 'var'),
         WOC_REMOUNT_LOCK: path.join(dir, 'sock', 'remount.lock'),
         WOC_PROC: PROC,
+        NODE_OPTIONS: '--require=' + CRASH_HOOK,
     }),
     stdio: ['ignore', 'ignore', 'inherit'],
 });
@@ -202,7 +223,7 @@ function session(cmd, done) {
             while ((i = buf.indexOf('\n')) >= 0) {
                 var m = JSON.parse(buf.slice(0, i));
                 buf = buf.slice(i + 1);
-                if (m.ev !== 'status') continue;
+                if (m.ev !== 'status' && m.ev !== 'refused') continue;
                 if (!sent) { sent = true; c.write(JSON.stringify(cmd) + '\n'); continue; }
                 if (done(m)) { clearTimeout(timer); c.destroy(); resolve(m); return; }
             }
@@ -368,7 +389,33 @@ async function main() {
         !fs.existsSync(path.join(dir, 'sock', 'activation-pending')), JSON.stringify(r));
     ok('undo: no systemctl call', newCalls().length === 0);
 
-    /* Disable map on what an older release patched where the locator now
+    /* Remove patch of a waiting patch, cut across by a crash restart. Every
+     * file carplay runs keeps a name, so / goes read-only again, and the
+     * state is the true one. */
+    function held() { return ['', '.1', '.2'].filter(function (s) { return fs.existsSync(TGT + '.woc-running' + s); }); }
+    function exeIno() { return fs.statSync(path.join(PROC, '4242', 'exe')).ino; }
+    function freshStart() { fs.writeFileSync(TGT, SRCBUF); ['', '.1', '.2'].forEach(function (s) { try { fs.unlinkSync(TGT + '.woc-running' + s); } catch (e) {} }); nextStart(); }
+    setRecmgr(['HBAdasMgu'], true);
+    [TGT + '.woc-orig', TGT + '.woc-orig.json'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
+    freshStart();
+    r = await op({ cmd: 'apply', panel: 'high', mode: 'avb' });
+    var patchedIno = fs.statSync(TGT).ino;
+    fs.writeFileSync(CRASH_REPLACED, '');
+    r = await session({ cmd: 'revert' }, function (m) { return m.state !== 'busy' && m.reason !== 'reverting'; });
+    ok('crash restart from the waiting patch during its removal: the removal waits, the patch kept linked, / read-only', r.pending === 'revert' && r.carplay === 'deferred' &&
+        r.state !== 'error' && fs.readFileSync(TGT).equals(SRCBUF) && exeIno() === patchedIno && fs.statSync(TGT + '.woc-running').ino === patchedIno &&
+        held().length === 1 && /\bro\b/.test(fs.readFileSync(MOUNTS, 'utf8')), JSON.stringify(r) + ' ' + held().join(','));
+    freshStart();
+    r = await op({ cmd: 'apply', panel: 'high', mode: 'avb' });
+    fs.writeFileSync(CRASH_WRITTEN, '');
+    r = await session({ cmd: 'revert' }, function (m) { return m.state !== 'busy' && m.reason !== 'reverting'; });
+    ok('crash restart from the reverted file before the put-back: it stays linked, nothing waits, / read-only', r.state === 'original' && !r.pending &&
+        !r.carplay && fs.readFileSync(TGT).equals(SRCBUF) && fs.readFileSync(path.join(PROC, '4242', 'exe')).equals(SRCBUF) &&
+        fs.statSync(TGT + '.woc-running').ino === exeIno() && fs.statSync(TGT).ino !== exeIno() && held().length === 1 &&
+        !fs.existsSync(path.join(dir, 'sock', 'activation-pending')) && /\bro\b/.test(fs.readFileSync(MOUNTS, 'utf8')), JSON.stringify(r) + ' ' + held().join(','));
+    ok('crash restarts during a removal: no systemctl call', newCalls().length === 0);
+    freshStart();
+    /* CarPlay's Remove patch button on what an older release patched where the locator now
      * refuses a site (with its backup and record): the original back, carplay
      * restarted. */
     if (require('crypto').createHash('sha256').update(SRCBUF).digest('hex') === 'ddb33e33161387c6479c391684b3d019b0de54ecfcee8d6877eca94aa62f3e50') {
@@ -382,7 +429,7 @@ async function main() {
             dummy = dummyCarplay();
             setUnit('ok', dummy.pid);
             r = await op({ cmd: 'revert' });
-            ok(fx[k].name + ': Disable map restores the original, carplay restarted', r.carplay === 'restarted' && fs.readFileSync(TGT).equals(fx[k].original) &&
+            ok(fx[k].name + ': CarPlay\'s Remove patch button restores the original, carplay restarted', r.carplay === 'restarted' && fs.readFileSync(TGT).equals(fx[k].original) &&
                 /\bro\b/.test(fs.readFileSync(MOUNTS, 'utf8')), JSON.stringify(r));
             newCalls();
         }
@@ -390,7 +437,45 @@ async function main() {
         [TGT + '.woc-orig', TGT + '.woc-orig.json'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
     }
 
-    /* reboot with a pending activation: a normal system reboot, once. A second
+    /* CarPlay's Patch button on a car coded otherwise than KI_KOMBI_VARIANT
+     * 7, or whose coding cannot be read: patchd reports the conflict as
+     * Android Auto does and asks for the user's confirmation (S3): a plain
+     * apply is refused, nothing written; the confirmed one patches, and the
+     * patch is recorded unproven (boot recovery restores it after one failed
+     * start), on trial when the coding cannot be read. On a variant-7 car the
+     * first patch is on trial and needs no confirmation. */
+    setRecmgr(['HBAdasMgu'], true);
+    var cases = [[9, undefined, 'not supported on this car (KI_KOMBI_VARIANT 9)'], [7, 0x0b, 'cluster coding unreadable'],
+        [null, undefined, 'cluster coding unreadable'], [7, undefined, null]];
+    for (var q = 0; q < cases.length; q++) {
+        var cq = cases[q], what = cq[0] === null ? 'no coding' : 'coding ' + cq[0] + (cq[1] !== undefined ? ' flags 0x' + cq[1].toString(16) : '');
+        [TGT + '.woc-orig', TGT + '.woc-orig.json', record.recordPath(TGT)].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
+        freshStart();
+        car.coding(cq[0], cq[1]);
+        r = await status();
+        ok(what + ': patchd reports ' + (cq[2] || 'no conflict'), r.state === 'original' && (r.conflict || null) === cq[2], JSON.stringify(r));
+        if (cq[2]) {
+            ok(what + ': patchd asks for the confirmation', r.unproven === true, JSON.stringify(r));
+            r = await op({ cmd: 'apply', panel: 'high', mode: 'avb' });
+            ok(what + ': a plain apply is refused, nothing written', r.state === 'error' && /needs your confirmation/.test(r.reason || '') &&
+                !fs.existsSync(TGT + '.woc-orig') && record.current(TGT) === null, JSON.stringify(r));
+        }
+        r = await op(cq[2] ? { cmd: 'apply', panel: 'high', mode: 'avb', unproven: true } : { cmd: 'apply', panel: 'high', mode: 'avb' });
+        var rc = record.current(TGT);
+        /* on trial unless the coding reads another variant */
+        var onTrial = cq[0] !== 9;
+        ok(what + ': CarPlay\'s Patch button (confirmed) patches it, recorded ' + (onTrial ? 'on trial' : 'unproven'), r.carplay === 'deferred' && slot() === 'bcf2f7ff' && !!rc &&
+            rc.patched === true && rc.proven === false && (rc.trial === true) === onTrial, JSON.stringify([r, rc]));
+        nextStart();
+        r = await status();
+        ok(what + ': after the start it reads patched, the conflict still named', r.state === 'patched' && (r.conflict || null) === cq[2], JSON.stringify(r));
+        car.coding(7);
+    }
+    [TGT + '.woc-orig', TGT + '.woc-orig.json', record.recordPath(TGT)].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
+    freshStart();
+    newCalls();
+
+    /* reboot with a pending activation: one head-unit restart. A second
      * request is refused while that one is in progress; carplay is never killed
      * or restarted (no systemctl call), and apply/revert are refused meanwhile.
      * Set up a fresh deferred patch on the stock list first. */
@@ -403,12 +488,12 @@ async function main() {
     rb = await rebootCmd({ cmd: 'reboot' });
     ok('reboot: accepted while an activation is pending', rb.ok === true, JSON.stringify(rb));
     for (var w = 0; w < 100 && rebootCount() < 1; w++) await sleep(20);
-    ok('reboot: a normal system reboot was issued once', rebootCount() === 1);
+    ok('reboot: one head-unit restart was asked for', rebootCount() === 1);
     rb = await rebootCmd({ cmd: 'reboot' });
     ok('reboot: a second request is refused (already in progress)', rb.ok === false && /already in progress/.test(rb.reason || ''), JSON.stringify(rb));
-    ok('reboot: still only one reboot issued', rebootCount() === 1);
-    r = await session({ cmd: 'apply', panel: 'high', mode: 'avb' }, function (m) { return m.state === 'busy' || m.state === 'error'; });
-    ok('reboot: apply refused while a restart is in progress', r.state === 'busy' && /restart is in progress/.test(r.reason || ''), JSON.stringify(r));
+    ok('reboot: still only one restart asked for', rebootCount() === 1);
+    r = await session({ cmd: 'apply', panel: 'high', mode: 'avb' }, function (m) { return m.ev === 'refused' || m.state === 'error'; });
+    ok('reboot: apply refused while a restart is in progress', r.ev === 'refused' && /restart is in progress/.test(r.reason || ''), JSON.stringify(r));
     ok('reboot: no systemctl call (carplay not stopped or restarted)', newCalls().length === 0, 'unexpected systemctl calls');
 
     var all = fs.readFileSync(CALLS, 'utf8');

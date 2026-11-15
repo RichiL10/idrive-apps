@@ -4,23 +4,45 @@
 # collect-logs.sh — gather what a report of the map on the cluster needs into
 # one archive, to send back. Run it on the head unit as root:
 #
-#   sh /var/opt/waze-on-cluster/current/collect-logs.sh
+#   sh /var/opt/waze-on-cluster/current/collect-logs.sh [-o <folder>]
 #
-# It writes /tmp/woc-logs-<UTC date and time>.tar.gz and prints its path:
-# both tools' log files (with their .1), the renderer's and the capture's
-# status files, this boot's journal of the tools and of carplay (what the
-# journal still holds), the list of boots, the carplay patch probe (where its
-# edit sites are in this carplay), the tools' folders, their local settings,
-# the time and the uptime. Anything missing is left out. It changes
-# nothing on the unit. POSIX sh, for the unit's shell.
+# It writes woc-logs-<UTC date and time>.tar.gz into the folder (/tmp by
+# default) and prints its path: both tools' log files (with their .1), the
+# journal lines the journal service keeps (journal.log and its rotations),
+# the renderer's and the capture's status files, this boot's journal of the
+# tools and of carplay (what the journal still holds), the list of boots,
+# the carplay patch probe (where its edit sites are in this carplay), the
+# tools' folders, their local settings, the time and the uptime, the aapd
+# patch's status (aapd_patch.js status: its build, edits and backups, and the
+# cluster coding), and what logs_extra.js reads: the patch records, the aapd
+# boot recovery's state, the restart records the boot step kept, the cluster
+# coding's KI_KOMBI_VARIANT, the deploy tool's versions and state, and BMW's
+# restart records, recmgr's crash table and the list of kept core dumps (root's
+# to read: the logs service gets them from the snapshot its firewall unit
+# takes as root, in SNAPSHOT; run by root, it takes them itself). Every file
+# of the archive is scrubbed of VINs last (logs_extra.js scrub; nothing else
+# is scrubbed, and without logs_extra.js there is no archive). Anything
+# missing is left out. It changes nothing on the unit but the archive.
+# POSIX sh, for the unit's shell.
 set -u
 umask 077
 
+SNAPSHOT=${WOC_LOGS_SNAPSHOT:-/run/waze-on-cluster-logs}
+
+OUTDIR=/tmp
+if [ "${1:-}" = -o ] && [ -n "${2:-}" ]; then
+    OUTDIR=$2
+elif [ $# -gt 0 ]; then
+    echo "usage: collect-logs.sh [-o <folder>]" >&2
+    exit 2
+fi
+
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 NAME=woc-logs-$STAMP
-OUT=/tmp/$NAME.tar.gz
+OUT=$OUTDIR/$NAME.tar.gz
 STAGE=$(mktemp -d /tmp/woc-logs.XXXXXX) || { echo "collect-logs: cannot make a folder in /tmp" >&2; exit 1; }
-trap 'rm -rf "$STAGE"' EXIT
+PART=
+trap 'rm -rf "$STAGE"; [ -z "$PART" ] || rm -f "$PART"' EXIT
 trap 'exit 1' INT TERM
 DIR=$STAGE/$NAME
 mkdir -p "$DIR"
@@ -38,6 +60,9 @@ for tool in cluster-render waze-on-cluster; do
     done
     copy "/var/opt/$tool/$tool.local.conf" "$tool.local.conf"
 done
+for f in /var/opt/waze-on-cluster/journal/journal.log*; do
+    copy "$f" "kept-${f##*/}"
+done
 copy /var/opt/waze-on-cluster/boot-recovery.json boot-recovery.json
 copy /var/opt/waze-on-cluster/shutdown boot-recovery-shutdown
 
@@ -49,19 +74,38 @@ for f in status.json probe.txt; do
 done
 
 if command -v journalctl >/dev/null 2>&1; then
-    for unit in cluster-render waze-on-cluster waze-on-cluster-patchd waze-on-cluster-boot waze-on-cluster-recovery carplay; do
+    for unit in cluster-render waze-on-cluster waze-on-cluster-patchd waze-on-cluster-boot waze-on-cluster-recovery \
+            waze-on-cluster-capture waze-on-cluster-journal waze-on-cluster-journal.timer waze-on-cluster-logs \
+            waze-on-cluster-logs-fw carplay; do
         journalctl -b -o short-precise --no-pager -u "$unit" > "$DIR/journal-$unit.txt" 2>/dev/null
     done
     journalctl --list-boots --no-pager > "$DIR/boots.txt" 2>/dev/null
 fi
 
 HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+NODE=$(command -v node || echo /usr/bin/node)
+# The scrub is not best-effort: without its tool there is no archive. The
+# report and snapshot steps below are.
+if [ ! -f "$HERE/logs_extra.js" ]; then
+    echo "collect-logs: logs_extra.js is missing, cannot scrub the archive" >&2
+    exit 1
+fi
 if [ -f "$HERE/carplay_patch.js" ]; then
-    NODE=$(command -v node || echo /usr/bin/node)
     "$NODE" "$HERE/carplay_patch.js" probe > "$DIR/carplay-probe.txt" 2>&1
 fi
+if [ -f "$HERE/aapd_patch.js" ]; then
+    "$NODE" "$HERE/aapd_patch.js" status > "$DIR/aapd-status.txt" 2>&1
+fi
+"$NODE" "$HERE/logs_extra.js" report "$DIR" > /dev/null 2>&1
+if [ "$(id -u 2>/dev/null)" = 0 ]; then
+    "$NODE" "$HERE/logs_extra.js" snapshot "$DIR" > /dev/null 2>&1
+else
+    for f in "$SNAPSHOT"/*; do
+        copy "$f" "${f##*/}"
+    done
+fi
 
-ls -l /var/opt/cluster-render /var/opt/waze-on-cluster > "$DIR/ls.txt" 2>&1
+ls -l /var/opt/cluster-render /var/opt/waze-on-cluster /var/opt/waze-on-cluster/journal /var/opt/waze-on-cluster/saved > "$DIR/ls.txt" 2>&1
 
 {
     echo "date: $(date 2>/dev/null)"
@@ -69,9 +113,28 @@ ls -l /var/opt/cluster-render /var/opt/waze-on-cluster > "$DIR/ls.txt" 2>&1
     echo "uptime: $(uptime 2>/dev/null)"
 } > "$DIR/time.txt"
 
-if ! tar -cf "$STAGE/$NAME.tar" -C "$STAGE" "$NAME" 2>/dev/null || ! gzip -c "$STAGE/$NAME.tar" > "$OUT"; then
-    rm -f "$OUT"
+# Last: nothing is packed that has not been through the VIN scrub.
+if ! "$NODE" "$HERE/logs_extra.js" scrub "$DIR"; then
+    echo "collect-logs: could not scrub the archive" >&2
+    exit 1
+fi
+
+# The archive is made inside STAGE (ours, mode 700), never under a name another
+# user can guess in a shared folder. OUT must not be a folder or a link; the
+# finished file goes to OUT through a file made there with a random name (mktemp
+# creates it, never follows a link), so OUT appears whole or not at all. The file
+# is made 0640 before it is published: the output folder's group (the logs
+# service's) reads it. It is published with rename(2) itself: mv would move it
+# into OUT if a folder appeared there since the check above.
+if [ -d "$OUT" ] || [ -L "$OUT" ]; then
+    echo "collect-logs: $OUT is a folder or a link, not writing there" >&2
+    exit 1
+fi
+if ! tar -cf "$STAGE/$NAME.tar" -C "$STAGE" "$NAME" 2>/dev/null || ! gzip -c "$STAGE/$NAME.tar" > "$STAGE/$NAME.tar.gz" ||
+        ! PART=$(mktemp "$OUTDIR/.$NAME.part.XXXXXX") || ! cat "$STAGE/$NAME.tar.gz" > "$PART" || ! chmod 0640 "$PART" ||
+        ! "$NODE" -e 'require("fs").renameSync(process.argv[1], process.argv[2])' "$PART" "$OUT" 2>/dev/null; then
     echo "collect-logs: could not write $OUT" >&2
     exit 1
 fi
+PART=
 echo "$OUT"

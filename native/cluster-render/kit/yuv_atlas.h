@@ -37,9 +37,10 @@ namespace crk {
 inline uint32_t atlas_height(uint32_t h) { return h + h / 2; }
 
 /* Packs an NV12 picture (Y plane, then interleaved U,V at half size in both
- * directions) of w x h into the w x atlas_height(h) atlas at out. */
+ * directions) of w x h into the w x atlas_height(h) atlas at out, each level
+ * rounded as round_levels() rounds it with bits (0: exact), in one pass. */
 void pack_nv12_atlas(const uint8_t *y, size_t y_pitch, const uint8_t *uv, size_t uv_pitch, uint32_t w, uint32_t h,
-                     uint8_t *out);
+                     uint8_t *out, unsigned bits);
 
 /* Copies n bytes from src to dst with each Y, U or V level rounded to the
  * nearest multiple of 2^bits (bits 0-3; 255 stays 255), so each byte is at

@@ -1,0 +1,14 @@
+{
+  "cluster-render": {
+    "title": "Renderizador do painel",
+    "description": "Desenha as camadas de todos os apps no painel de instrumentos e no HUD, compartilhando as posições da tela e um único orçamento de envio"
+  },
+  "waze-on-cluster": {
+    "title": "Waze no painel",
+    "description": "Mostra o mapa do CarPlay ou do Android Auto no painel de instrumentos: um auxiliar com permissões root aplica os patches reversíveis de carplay e aapd onde cada um é compatível, e a captura, ativa desde a inicialização, decodifica o H.264 do mapa e o desenha pelo renderizador do painel sempre que o fluxo chega"
+  },
+  "robertn_waze_cluster": {
+    "title": "Waze no painel",
+    "description": "Coloca o mapa do Waze do CarPlay no painel de instrumentos: ative o patch pelo HMI e o mapa acompanha o CarPlay"
+  }
+}

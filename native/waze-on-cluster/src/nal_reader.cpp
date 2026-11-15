@@ -109,6 +109,16 @@ void NalReader::push(const uint8_t *data, size_t len, bool end_of_au, const Sink
     size_t keep = in_nal_ ? nal_start : (buf_.size() > 2 ? buf_.size() - 2 : 0);
     buf_.erase(buf_.begin(), buf_.begin() + keep);
     scan_ = i - keep;
+    /* A NAL unit with no next start code within kMaxAuBytes: drop it and
+     * resynchronise at the next start code instead of buffering without
+     * bound. The last two bytes may begin that start code, and stay. */
+    if (buf_.size() > kMaxAuBytes) {
+        const uint8_t tail[2] = {buf_[buf_.size() - 2], buf_[buf_.size() - 1]};
+        std::vector<uint8_t>(tail, tail + 2).swap(buf_);
+        scan_ = 0;
+        in_nal_ = false;
+        overflows_++;
+    }
 }
 
 void NalReader::flush(const Sink &sink)
@@ -146,6 +156,18 @@ void NalReader::end_nal(const uint8_t *nal, size_t len, const Sink &sink)
         Bits bits(nal + 1, len - 1);
         uint32_t first_mb, slice_type;
         b = bits.ue(&first_mb) && bits.ue(&slice_type) && slice_type % 5 == 1;
+    }
+
+    /* Bound the access unit being assembled: a stream that never sends a
+     * slice (parameter sets or SEI only) must not grow it forever. Dropping
+     * it loses at most one picture; the decoder restarts at the next SPS if
+     * it has to. */
+    if (au_.size() + len + 4 > kMaxAuBytes) {
+        std::vector<uint8_t>().swap(au_);
+        au_vcl_ = au_sps_ = au_idr_ = au_b_ = false;
+        overflows_++;
+        if (len + 4 > kMaxAuBytes)
+            return;
     }
 
     static const uint8_t start_code[4] = {0, 0, 0, 1};

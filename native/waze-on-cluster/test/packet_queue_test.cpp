@@ -10,10 +10,12 @@
  * the wait bounded and decodes every frame, and a fast one shows every
  * frame. */
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <future>
 #include <thread>
 
+#include "../src/arrival_time.h"
 #include "../src/packet_queue.h"
 
 using namespace woc;
@@ -101,6 +103,20 @@ int main()
             order = order && q.pop(&p, 0) && id(p) == i && p.dropped == 0 && p.source == (i < 5 ? 1 : 2);
         ok("packets come out in order, with their sizes and sources", order && p.data.size() == 1400);
         ok("an empty queue times out", !q.pop(&p, 10));
+    }
+    {
+        /* Review N3: the RTP idle reset is told when a packet ARRIVED (its pop
+         * time less its wait), so a decoder that stalls does not look like a silent wire. */
+        ok("arrival_ms: pop time less the wait", arrival_ms(10000, 2500000) == 7500 && arrival_ms(10000, 0) == 10000);
+        ok("arrival_ms: a wait under a millisecond counts as none", arrival_ms(10000, 999) == 10000);
+        ok("arrival_ms: a wait of over the idle reset (1 s) puts the arrival before the reset window",
+           arrival_ms(5000, 1500000) == 3500);
+        PacketQueue q(8, 1 << 20);
+        push_n(q, 0, 1, 100, 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        PacketQueue::Packet p;
+        ok("a packet taken after a wait", q.pop(&p, 0) && p.waited_us >= 50000);
+        ok("arrival_ms of a popped packet is that much before the pop", arrival_ms(1000, p.waited_us) <= 950);
     }
     {
         /* 8 slots, 12 pushed: the 4 oldest go, and packet 4 says so. */

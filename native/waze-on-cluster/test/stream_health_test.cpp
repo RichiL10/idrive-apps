@@ -54,8 +54,8 @@ int main()
     h.keyframe_wait(kWall + 8000, 1999);
     ok("nothing decoded for under 2 s: not lost", !h.lost());
     h.keyframe_wait(kWall + 9000, 2000);
-    ok("from 2 s: lost, reconnect, the detail says since when",
-       h.lost() && h.reason() == "Stream lost — reconnect CarPlay" &&
+    ok("from 2 s: lost, the detail says since when",
+       h.lost() && h.reason() == "Stream lost" &&
            h.detail() == "the stream arrives with nothing decoded since 12:39:57");
     h.keyframe_wait(kWall + 10400, 3001);   /* sampled a little off the second */
     ok("the episode's start is fixed once", h.detail() == "the stream arrives with nothing decoded since 12:39:57");
@@ -71,11 +71,11 @@ int main()
     const bool whole = mid.reason().empty();
     mid.keyframe_wait(kWall + 1000, 2000);
     ok("started mid-stream: whole until the wait reaches 2 s, then lost",
-       whole && mid.reason() == "Stream lost — reconnect CarPlay");
+       whole && mid.reason() == "Stream lost");
 
     h.waiting(8000, kWall + 7000, true);
     ok("the decoder giving up: lost whatever the wait",
-       h.lost() && h.reason() == "Stream lost — reconnect CarPlay" &&
+       h.lost() && h.reason() == "Stream lost" &&
            h.detail() == "the decoder gave up its sequence at 12:39:57 and waits for a keyframe");
     ok("a loss while waiting keeps it waiting",
        h.loss(9500, kWall + 8500, "avb", 20, 22, 2, 0) ==
@@ -91,6 +91,34 @@ int main()
        m.losses == 4 && m.lost == 11 && m.corrupted == 3);
     const StreamHealth::Minute none = h.take_minute();
     ok("and starts over", none.losses == 0 && none.lost == 0 && none.corrupted == 0);
+
+    StreamHealth caps;
+    ok("no overflow: nothing logged or counted", caps.overflow(1000, "RTP fragment buffer (FU-A)", 0).empty());
+    ok("an overflow is logged with what and how many",
+       caps.overflow(1000, "RTP fragment buffer (FU-A)", 1) ==
+           "waze: the RTP fragment buffer (FU-A) overran its size cap (1 dropped); resynchronising at the next start");
+    caps.overflow(1001, "decoder's NAL/access unit buffer", 2);
+    ok("an overflow does not make the stream lost or give it a reason", !caps.lost() && caps.reason().empty());
+    const StreamHealth::Minute cm = caps.take_minute();
+    ok("the minute counts every buffer dropped", cm.overflows == 3 && cm.losses == 0);
+    ok("and starts over", caps.take_minute().overflows == 0);
+
+    /* Review N2: the RTP layer's drops reach the log and the minute line. */
+    StreamHealth rtp;
+    ok("no RTP events: nothing logged or counted", rtp.rtp_events(1000, 0, 0, 0, 0).empty());
+    ok("RTP events are logged with their counts",
+       rtp.rtp_events(1000, 2, 1, 0, 0) ==
+           "waze: RTP: 2 late or duplicate packets dropped, 1 stray, 0 new streams, 0 resets after silence");
+    ok("an idle reset is logged", rtp.rtp_events(1001, 0, 0, 0, 1).find("1 resets after silence") != std::string::npos);
+    ok("a new stream is logged", rtp.rtp_events(1002, 0, 0, 1, 0).find("1 new streams") != std::string::npos);
+    ok("only a few RTP lines a minute", rtp.rtp_events(1003, 1, 0, 0, 0).empty());
+    ok("the RTP events do not make the stream lost", !rtp.lost() && rtp.reason().empty());
+    ok("the RTP lines do not use up the loss lines", !rtp.loss(1004, kWall, "avb", 1, 2, 1, 0).empty());
+    const StreamHealth::Minute rm = rtp.take_minute();
+    ok("the minute counts every RTP event, logged or not",
+       rm.late == 3 && rm.stray == 1 && rm.streams == 1 && rm.idle_resets == 1);
+    ok("and starts over", rtp.take_minute().late == 0);
+    ok("the next minute logs RTP events again", !rtp.rtp_events(61001, 1, 0, 0, 0).empty());
 
     StreamHealth burst;
     unsigned logged = 0;

@@ -9,6 +9,17 @@ After=local-fs.target cluster-render.socket
 # vsomeip identity (README.md "Identity and packaging"); only one of them
 # can run.
 Conflicts=cluster-demo.service
+# Restart=on-failure below restarts the renderer after a failure exit (a poll()
+# error, an invalid dcsm_liveness_ms, RAMSES or DCSM not up at boot). With
+# RestartSec=5 systemd's default start limit (5 starts in 10 s) is never
+# reached, so a fault that never clears would restart it for ever. 30 starts in
+# 10 minutes still covers a slow boot, then the unit stays failed; the next
+# head-unit start or `systemctl reset-failed` clears it. Once the limit is hit
+# systemd probably also fails cluster-render.socket (not run on a car), so the
+# map stays down until then. Kiro test change; the keys need systemd 230 or
+# later, the head unit runs 237.
+StartLimitIntervalSec=600
+StartLimitBurst=30
 
 [Service]
 # uid 5000 is the only uid the unit's vsomeip security allows to request
@@ -20,10 +31,11 @@ User=hmi_5000
 Group=hmi_5000
 RuntimeDirectory=cluster-render
 RuntimeDirectoryMode=0755
-# The log file's directory (log_file), on /var/opt so it outlives reboots,
-# made as root ("+"); a failure ("-") only leaves the service without the
-# file.
-ExecStartPre=-+/bin/sh -c 'mkdir -p /var/opt/cluster-render/log && chown hmi_5000:hmi_5000 /var/opt/cluster-render/log'
+# The log file's directory (log_file) and the mapping guard's (guard_path),
+# on /var/opt so they outlive reboots, made as root ("+"); a failure ("-")
+# only leaves the service without the file or the guard's memory across
+# restarts.
+ExecStartPre=-+/bin/sh -c 'mkdir -p /var/opt/cluster-render/log /var/opt/cluster-render/state && chown hmi_5000:hmi_5000 /var/opt/cluster-render/log /var/opt/cluster-render/state'
 ExecStart=/var/opt/cluster-render/current/cluster-render -c /var/opt/cluster-render/current/cluster-render.conf
 Restart=on-failure
 # At boot RAMSES or DCSM may not be up yet; 5 s keeps the retries clear of

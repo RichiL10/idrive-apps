@@ -230,4 +230,23 @@ void Control::send(const std::string &json_line)
         drop_owner();
 }
 
+void write_sibling_file(const std::string &fifo_path, const char *name, const std::string &content)
+{
+    std::string::size_type slash = fifo_path.find_last_of('/');
+    if (slash == std::string::npos)
+        return;
+    std::string path = fifo_path.substr(0, slash) + "/" + name;
+    std::string tmp = path + ".tmp";
+    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    std::string line = content + "\n";
+    ssize_t n = write(fd, line.data(), line.size());
+    close(fd);
+    if (n == (ssize_t)line.size())
+        rename(tmp.c_str(), path.c_str());
+    else
+        unlink(tmp.c_str());
+}
+
 }  // namespace woc
