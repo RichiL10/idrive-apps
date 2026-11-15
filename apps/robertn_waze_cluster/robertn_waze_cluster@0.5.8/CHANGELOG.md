@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+Kiro test build, on top of 0.5.8:
+
+- New **Show map** checkbox in General (`Show map` in every language of the
+  app). Unticked, the map is off the cluster at once and BMW's own map and turn
+  box show, with no CarPlay reconnect, no patch change and no head-unit restart;
+  ticked again, the map comes back with the phone's next frame. While it is off
+  the Cluster map row reads `Cluster map: Off`. It sends
+  `{"cmd":"map","shown":0|1}` and follows the `map_shown` of the render's
+  status; the row is greyed and unticked while the service does not report
+  `map_shown` and while no patch is in effect.
+
+Requires a waze-on-cluster with `map_shown` (after 0.8.9) for the checkbox to
+act; with 0.8.9 it stays greyed and everything else works as before.
+
 ## 0.5.8
 
 Kiro test build (not an upstream release; see KIRO-NOTES.md). Upstream 0.5.7

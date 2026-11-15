@@ -12,6 +12,7 @@
 namespace woc {
 
 const char *const MapFeed::kWaiting = "Waiting for the phone's map";
+const char *const MapFeed::kOff = "Switched off in the app";
 
 namespace {
 
@@ -100,7 +101,7 @@ void MapFeed::make_layer()
     lo_.y = (int)q.y;
     lo_.w = q.w;
     lo_.h = q.h;
-    lo_.visible = live_ && !frozen_ && picture_ == Picture::Shown;
+    lo_.visible = wanted();
     show_due_ = false;
     refused_.clear();
     layer_state_ = "stalled";
@@ -229,7 +230,20 @@ void MapFeed::set_stream(bool live, bool frozen, Picture picture)
     live_ = live;
     frozen_ = frozen;
     picture_ = picture;
-    const bool visible = live && !frozen && picture == Picture::Shown;
+    apply_visible();
+}
+
+void MapFeed::set_shown(bool shown)
+{
+    if (shown == shown_)
+        return;
+    shown_ = shown;
+    apply_visible();
+}
+
+void MapFeed::apply_visible()
+{
+    const bool visible = wanted();
     if (!layer_ || (lo_.visible || show_due_) == visible)
         return;
     show_due_ = visible;
@@ -277,12 +291,17 @@ FeedStatus MapFeed::status(const std::string &decode, const std::string &stream)
     s.upload_cap_kb = cap_kb_;
     s.upload_reason = budget_reason_;
     s.guide_hold = cfg_.guide_hold;
+    s.shown = shown_;
     auto g = client_.guide_disabled.find(cfg_.target);
     s.guide_disabled = client_.connected() && g != client_.guide_disabled.end() && g->second;
     char cap[96] = "";
     if (cap_kb_ && cap_kb_ < max_kb_)
         std::snprintf(cap, sizeof cap, ", upload cap %u KB/s", cap_kb_);
-    if (!refused_.empty()) {
+    if (!shown_) {
+        s.state = "idle";
+        s.reason = kOff;
+        s.page = decode;
+    } else if (!refused_.empty()) {
         s.state = "error";
         s.reason = refused_;
         s.page = decode;

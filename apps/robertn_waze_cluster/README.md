@@ -66,7 +66,7 @@ One `LT_State_Wide` list in three sections, each under a header row
 (`LT_Label_Header_1Row`). CarPlay and Android Auto have the same rows with
 the same words; no row repeats the header's name. Every info row reads
 `Name: Value`, the value starting with a capital (`Zoom: —` while there
-is none), and every on/off setting is a `Hide …` checkbox. Every row
+is none), and every on/off setting is a checkbox, `Show map` or a `Hide …` checkbox. Every row
 stays where it is: one that cannot act now is greyed, and while `patchd`
 runs any operation (`busy`), every operation in both sections is. A greyed
 row pressed sends nothing; a greyed checkbox keeps its label. The
@@ -98,6 +98,7 @@ supported, HIGH F included.
 | | Zoom out / Zoom in | 10 dpi a press (150-400): out shows more map; enabled while patched, nothing is pending and the 10 s between changes has passed |
 | | Hide phone's turn card | a checkbox, ticked while the turn card on disk is hidden, or as asked while its change runs: the phone's own turn card cropped off the map; `(after restart)` as for the zoom; enabled as Zoom out and Zoom in |
 | **General** | Cluster map | `Cluster map: <state>`, the map the shared render draws for either phone: `Off` unless CarPlay's or Android Auto's patch is in effect (on disk with nothing pending, as the last status outside a change said; a running or failed change keeps it), `Starting…`, `Showing Waze map — 16 frames/s`, `Waiting for the phone`, `Waiting for the phone's map`, `Stream lost`, `Frozen`, `Error`, `Unavailable` (the map service is down, or refuses the head unit) |
+| | Show map | a checkbox: ticked, the map shows on the cluster whenever the phone streams it (the default); unticked, the map is off the cluster at once, the stock map and BMW's turn box showing, with no CarPlay reconnect, no patch change and no head-unit restart, and the map service keeps the choice across restarts. Ticking it again brings the map back with the phone's next frame. While it is unticked the Cluster map row reads `Cluster map: Off`. Greyed and unticked until the map service reports it (a service before the switch does not) and while no patch is in effect |
 | | Hide BMW's turn box | a checkbox: ticked, BMW's turn-by-turn box on the cluster stays hidden while the map shows (the default); unticked, it shows. A press changes it at once and the map service keeps it. Greyed and unticked until the map service reports it and while the cluster renderer keeps the box shown |
 | | Logs | opens the Logs page |
 | | Restart head unit | the Node State Manager's normal head-unit restart; shown while a written change, CarPlay's or Android Auto's, waits for the next head-unit start; enabled while nothing runs and the restart limit (one every 10 minutes) allows it |
@@ -148,10 +149,12 @@ the Logs page is, and retries each once a second; the tools keep running
 when it closes them.
 
 - **Render** `/dev/shm/waze-on-cluster/ctl.sock`. The app sends
-  `{"cmd":"guide","hide":0|1}` (Hide BMW's turn box). The tool sends
-  `{"ev":"status","state","target","page","reason","upload_cap_kb_per_s","upload_reason","hide_bmw_guidance","guide_disabled"}`
-  (`state` idle, starting, showing, frozen or error; `hide_bmw_guidance` 0
-  or 1; `guide_disabled` 1 while the cluster renderer keeps the box shown),
+  `{"cmd":"guide","hide":0|1}` (Hide BMW's turn box) and
+  `{"cmd":"map","shown":0|1}` (Show map). The tool sends
+  `{"ev":"status","state","target","page","reason","upload_cap_kb_per_s","upload_reason","hide_bmw_guidance","map_shown","guide_disabled"}`
+  (`state` idle, starting, showing, frozen or error; `hide_bmw_guidance` and
+  `map_shown` 0 or 1, absent from a service before them;
+  `guide_disabled` 1 while the cluster renderer keeps the box shown),
   and `{"ev":"log","line"}`, which the app does not show.
 - **Patch daemon** `/dev/shm/waze-on-cluster/patch.sock` (root). The app sends
   `{"cmd":"apply","panel":"high","mode":"avb"}`, `{"cmd":"revert"}`,

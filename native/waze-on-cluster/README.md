@@ -185,13 +185,33 @@ layer's `guide_hold` and keeps the choice in
 written whole and renamed into place), which outlives restarts and updates
 and replaces `hide_bmw_guidance` (1) of the settings. The service makes the
 folder, owned by `hmi_5000`, at each start. A value other than 0 or 1, or a
-state file that does not read, hides the box, with a warning in the log.
+state file that does not read, hides the box, with a warning in the log; the
+same file keeps the choice of **Show map** (below).
 The status event carries the choice as `hide_bmw_guidance`, and
 `guide_disabled` 1 while cluster-render's mapping guard keeps the hold off
 (cluster-render README "Mapping guard"): the box then shows whatever the
 choice. With a
 cluster-render before 0.3.7, which has no `guide_hold`, the switch changes
 nothing.
+
+**Map on the cluster.** The app's **Show map** checkbox takes the map off the
+cluster and puts it back at once: no CarPlay reconnect, no patch change and no
+head-unit restart. The app sends `{"cmd":"map","shown":0|1}` on the control
+socket (a value other than 0 or 1 is refused with a warning). While the map is
+off its layer is hidden as when the stream is not live: the renderer lets the
+slot go, the stock map and BMW's turn box come back, the guide hold is released
+and nothing is sent to the renderer. Capture, decoding and the stream's
+tracking go on, so the map is back with the next frame, drawn from the newest
+one, when it is switched on. The status event is `idle` with the reason
+"Switched off in the app" and carries the choice as `map_shown` (0 or 1; the
+app takes a service without it as not switchable). The choice is kept in the
+same state file as the turn box's, which holds both keys and is rewritten
+whole for either change, and replaces `map_shown` (1) of the settings. It
+survives a restart of the service and of the renderer: the map comes back up
+off and stays off until it is switched on. A value other than 0 or 1, or a
+state file that does not read, shows the map (and hides the box), with a warning
+in the log; a state file from a version before `map_shown` leaves the settings'
+value.
 
 Then connect the iPhone to CarPlay. Waze needs its server-side flag 1006 for
 the alternate display. The phone sends SPS, PPS and an IDR only at the start

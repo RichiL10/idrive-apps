@@ -12,12 +12,13 @@
  *
  *   Render control socket (RENDER_PATH)
  *     app  -> tool  {"cmd":"guide","hide":0|1}  BMW's turn box hidden while the map shows, or not
+ *                   {"cmd":"map","shown":0|1}  the map on the cluster, or off it (no reconnect, no patch change)
  *     tool -> app   {"ev":"status","state":"idle"|"starting"|"showing"|"frozen"|"error"|"unsupported",
- *                    "target","page","reason","hide_bmw_guidance","guide_disabled"}
+ *                    "target","page","reason","hide_bmw_guidance","map_shown","guide_disabled"}
  *                   (unsupported: the head unit refuses the tool, which stays idle)
- *                   (idle's reason: why a live stream shows no map; hide_bmw_guidance 0|1,
- *                    absent from a tool before the switch; guide_disabled 1: the cluster
- *                    renderer keeps BMW's turn box shown whatever the switch)
+ *                   (idle's reason: why a live stream shows no map; hide_bmw_guidance and
+ *                    map_shown 0|1, absent from a tool before the switch; guide_disabled 1: the
+ *                    cluster renderer keeps BMW's turn box shown whatever the switch)
  *                   {"ev":"log"}, {"ev":"slots"}   ignored here
  *
  *   Patch daemon socket (PATCH_PATH; root helper, group tm_oap_app)
@@ -497,6 +498,9 @@ class WazeClusterControl extends EventEmitter {
             return t('Unavailable');
         }
         const rs = this.renderStatus;
+        if (rs && rs.map_shown === 0) {
+            return t('Off');
+        }
         switch (rs && rs.state) {
         case 'starting':
             return t('Starting…');
@@ -542,6 +546,28 @@ class WazeClusterControl extends EventEmitter {
         const hide = this.hideGuidance();
         if (hide !== null && !this.guidanceUnavailable()) {
             this.render.send({ cmd: 'guide', hide: hide ? 0 : 1 });
+        }
+    }
+
+    /* ---- the map on the cluster ---- */
+    /* Whether the render shows the map on the cluster, as it last said; null
+     * while it has not (not connected, or a tool without the switch). */
+    mapShown() {
+        const rs = this.renderStatus;
+        return rs && (rs.map_shown === 0 || rs.map_shown === 1) ? rs.map_shown === 1 : null;
+    }
+
+    /* The switch works while the render says whether it shows the map and a
+     * patch is in effect, which is what the map row reads Off without. */
+    canToggleMapShown() {
+        return this.mapShown() !== null && (this._inEffect.carplay || this._inEffect.androidAuto);
+    }
+
+    /* Flips the map on and off the cluster; the render's next status shows
+     * it. Nothing while it cannot. */
+    toggleMapShown() {
+        if (this.canToggleMapShown()) {
+            this.render.send({ cmd: 'map', shown: this.mapShown() ? 0 : 1 });
         }
     }
 

@@ -17,9 +17,12 @@
  * enabled only while unpatched and CarPlay's Remove patch button only while patched;
  * pressing every button sends the render nothing; Android Auto's Status,
  * Zoom and the Hide phone's turn card checkbox; info rows as Name: Value;
- * the Cluster map row in General; Hide BMW's turn box ticked as the render
- * reports, each press one guide command to the render, greyed and unticked,
- * its label kept, while the cluster renderer holds the box shown;
+ * the Cluster map row in General; Show map ticked as the render reports,
+ * each press one map command to the render, Cluster map: Off while it is
+ * unticked, greyed and unticked, its label kept, for a render that does not
+ * say; Hide BMW's turn box ticked as the render reports, each press one
+ * guide command to the render, greyed and unticked, its label kept, while
+ * the cluster renderer holds the box shown;
  * hiding the page closes both sockets; a page opened again reads the
  * render's current state; a pending patch, from the daemon and, before the
  * daemon runs, from its marker; a failed restart on the restart's own line,
@@ -218,7 +221,7 @@ async function main() {
         'wocHeadCarPlay CarPlay', 'wocStatus Status: Connecting…', 'wocEnable Patch', 'wocDisable Remove patch',
         'wocHeadAa Android Auto', 'wocAaStatus Status: Connecting…', 'wocAaEnable Patch', 'wocAaDisable Remove patch',
         'wocAaZoom Zoom: —', 'wocAaZoomOut Zoom out', 'wocAaZoomIn Zoom in', "wocAaCard Hide phone's turn card",
-        'wocHeadGeneral General', 'wocMap Cluster map: Off', "wocGuide Hide BMW's turn box", 'wocLogs Logs', 'wocRestart Restart head unit',
+        'wocHeadGeneral General', 'wocMap Cluster map: Off', 'wocMapShown Show map', "wocGuide Hide BMW's turn box", 'wocLogs Logs', 'wocRestart Restart head unit',
         'wocRestartStatus '],
         'the main page: three sections, in order');
     assert.deepStrictEqual(xmlIds('1').map(([id, type]) => `${id} ${type}`).sort(),
@@ -228,7 +231,7 @@ async function main() {
     assert.deepStrictEqual(['wocHeadCarPlay', 'wocHeadAa', 'wocHeadGeneral'].map((n) => widgets[n]), Array(3).fill('LT_Label_Header_1Row'),
         'the section headers are header rows');
     assert(!main.some(([, , name]) => /^wocRow|^wocSetup|^wocCapture/.test(name)), 'no log rows, setup line or capture on the main page');
-    assert.deepStrictEqual(['wocAaCard', 'wocGuide'].map((n) => widgets[n]), ['LT_CheckBox_1Row', 'LT_CheckBox_1Row'], 'the Hide settings are checkboxes');
+    assert.deepStrictEqual(['wocAaCard', 'wocMapShown', 'wocGuide'].map((n) => widgets[n]), Array(3).fill('LT_CheckBox_1Row'), 'the on/off settings are checkboxes');
     /* every info row reads "Name: Value" */
     assert(main.filter(([, type, name]) => type === 'label' && !/^wocHead|^wocRestartStatus$/.test(name))
         .every(([, , , text]) => /^[A-Z][a-z ]+: [A-Z\u2014]/.test(text)), 'info rows as Name: Value');
@@ -268,7 +271,7 @@ async function main() {
         assert(!logs.some((l) => /^error/.test(l)), logs.filter((l) => /^error/.test(l)).join('\n'));
         const bound = logs.filter((l) => l.startsWith('info: BIND OK: ')).map((l) => l.split(' ')[3]).sort();
         assert.deepStrictEqual(bound, ['wocAaCard', 'wocAaDisable', 'wocAaEnable', 'wocAaZoomIn', 'wocAaZoomOut', 'wocCapture', 'wocDisable', 'wocEnable',
-            'wocGuide', 'wocLogs', 'wocLogsSave', 'wocRestart'], 'bound buttons and checkbox');
+            'wocGuide', 'wocLogs', 'wocLogsSave', 'wocMapShown', 'wocRestart'], 'bound buttons and checkboxes');
         assert.strictEqual(byName.wocRestart.visible, false, 'restart button hidden while the map shows');
         console.log('ok   a page opened while the map is up shows it');
 
@@ -344,6 +347,36 @@ async function main() {
             guide.text === "Hide BMW's turn box");
         console.log('ok   held off by the cluster renderer: greyed and unticked, its label kept, presses send nothing');
 
+        /* Show map: ticked while the render shows the map, unticked and Off in the
+         * map row while it does not, one map command a press */
+        const mapBox = byName.wocMapShown;
+        await until('the map switch enabled, ticked', () => mapBox.enabled === true && mapBox.selected === true &&
+            mapBox.text === 'Show map' && byName.wocMap.text.startsWith('Cluster map: Showing'));
+        mapBox.press();
+        await until('unticked by the render', () => render.shown === 0 && mapBox.selected === false && byName.wocMap.text === 'Cluster map: Off');
+        assert.deepStrictEqual(render.received, [{ cmd: 'map', shown: 0 }], 'one map command');
+        assert.strictEqual(mapBox.enabled, true, 'still enabled: it brings the map back');
+        await sleep(450);
+        mapBox.press();
+        await until('ticked again', () => render.shown === 1 && mapBox.selected === true && byName.wocMap.text.startsWith('Cluster map: Showing'));
+        assert.deepStrictEqual(render.received[1], { cmd: 'map', shown: 1 });
+        render.received.length = 0;
+        console.log('ok   Show map: ticked as the render says, each press flips it through the render, Cluster map: Off while unticked');
+
+        /* a service that does not say (before the switch): greyed, unticked, silent */
+        render.shown = null;
+        render.announce(render.state, render.reason);
+        await until('old service', () => mapBox.enabled === false && mapBox.selected === false && mapBox.text === 'Show map' &&
+            byName.wocMap.text.startsWith('Cluster map: Showing'));
+        await sleep(450);
+        mapBox.press();
+        await sleep(100);
+        assert.deepStrictEqual(render.received, [], 'no command to a service without the switch');
+        render.shown = 1;
+        render.announce(render.state, render.reason);
+        await until('service with the switch again', () => mapBox.enabled === true && mapBox.selected === true);
+        console.log('ok   a service without map_shown: Show map greyed and unticked, its label kept, presses send nothing');
+
         byName.ST_OnlineApps_WazeCluster.emit('visible', { visible: false });
         await until('sockets closed', () => render._clients.size === 0 && patch._clients.size === 0);
         console.log('ok   hiding the page closes both sockets');
@@ -404,7 +437,7 @@ async function main() {
         assert.deepStrictEqual([...shownOrHidden].sort(), ['wocRestart', 'wocRestartStatus'], 'only the restart\'s rows are shown and hidden');
         Object.values(components).filter((d) => !/^wocRestart/.test(d.name) && d.type !== 'title')
             .forEach((d) => assert.strictEqual(byName[d.name].visible, true, `${d.name} stays on the page`));
-        ['wocEnable', 'wocDisable', 'wocAaEnable', 'wocAaDisable', 'wocAaZoomOut', 'wocAaZoomIn', 'wocAaCard', 'wocGuide']
+        ['wocEnable', 'wocDisable', 'wocAaEnable', 'wocAaDisable', 'wocAaZoomOut', 'wocAaZoomIn', 'wocAaCard', 'wocMapShown', 'wocGuide']
             .forEach((n) => assert.deepStrictEqual([...byName[n].enabledSeen].sort(), [false, true], `${n} greyed and enabled in place`));
         const valueRow = /^[A-Z][a-z ]+: [A-Z0-9\u2014]/;
         ['wocStatus', 'wocAaStatus', 'wocAaZoom', 'wocMap', 'wocRestartStatus']
@@ -498,18 +531,18 @@ async function main() {
         const de = require('../src/locales.js').find((l) => l.code === 'de');
         const deWords = de.words;
         de.words = { Patch: 'Patchen', 'Remove patch': 'Patch entfernen', General: 'Allgemein', 'Save logs': 'Logs speichern',
-            'Status: {0}': 'Zustand: {0}', 'Saved logs: {0}': 'Gespeicherte Logs: {0}', "Hide BMW's turn box": 'BMW-Abbiegebox ausblenden' };
+            'Status: {0}': 'Zustand: {0}', 'Saved logs: {0}': 'Gespeicherte Logs: {0}', "Hide BMW's turn box": 'BMW-Abbiegebox ausblenden', 'Show map': 'Karte anzeigen' };
         const before = ['wocStatus', 'wocAaStatus', 'wocMap', 'wocLogsStatus'].map((n) => byName[n].text);
         displayLanguage('DEUTSCH');
         await until('German', () => byName.wocEnable.text === 'Patchen' && byName.wocAaDisable.text === 'Patch entfernen' &&
             byName.wocHeadGeneral.text === 'Allgemein' && byName.wocLogsSave.text === 'Logs speichern' &&
-            byName.wocGuide.text === 'BMW-Abbiegebox ausblenden' && byName.wocStatus.text === before[0].replace(/^Status:/, 'Zustand:') &&
+            byName.wocGuide.text === 'BMW-Abbiegebox ausblenden' && byName.wocMapShown.text === 'Karte anzeigen' && byName.wocStatus.text === before[0].replace(/^Status:/, 'Zustand:') &&
             byName.wocAaStatus.text === before[1].replace(/^Status:/, 'Zustand:') && byName.wocLogsStatus.text.startsWith('Gespeicherte Logs: '));
         assert.strictEqual(byName.wocMap.text, before[2], 'a word German lacks: its English');
         assert.strictEqual(byName.wocAaZoomIn.text, 'Zoom in', 'a word German lacks: its English');
         displayLanguage('ENGLISCH__US');
         await until('English again', () => byName.wocEnable.text === 'Patch' && byName.wocHeadGeneral.text === 'General' &&
-            byName.wocLogsSave.text === 'Save logs' && byName.wocGuide.text === "Hide BMW's turn box" && byName.wocStatus.text === before[0]);
+            byName.wocLogsSave.text === 'Save logs' && byName.wocGuide.text === "Hide BMW's turn box" && byName.wocMapShown.text === 'Show map' && byName.wocStatus.text === before[0]);
         de.words = deWords;
         console.log('ok   a display language change writes every row again in its words, English for a word it lacks');
         await lserver.close();

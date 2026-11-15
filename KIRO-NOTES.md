@@ -31,6 +31,7 @@ Overrides go in `/var/opt/waze-on-cluster/waze-on-cluster.local.conf` and
 | iDrive 7 upload ceiling (Kiro S9c) | `upload_kb_per_s = 4500` (cluster-render.conf:261; upstream 5500) | `upload_kb_per_s = 5500` restores upstream (shared with iDrive 8) |
 | DCSM liveness gate (Kiro S9a) | `dcsm_liveness_ms = 3000` (iDrive 7 only) | `dcsm_liveness_ms = 0`; otherwise 1000..9000 |
 | Take-over allowlist (Kiro S9d) | `map_take_over_contents = 0x01000300` | empty list = take-over off |
+| Map on the cluster (0.8.10, Unreleased) | `map_shown = 1` (waze-on-cluster.conf) | `map_shown = 0`, or the app's Show map checkbox (no restart) |
 | Unproven-build confirmation (S3/S10) | always required | no switch (on purpose) |
 | Render restart cap (S5) | 30 starts per 600 s | edit the unit |
 | Target / panel | `target = map`, panel mode never on by default | unchanged from upstream |
@@ -107,6 +108,25 @@ Left as they are, on purpose:
   How to clear it: `mount -o remount,ro /`, then any change, a status read, a boot step or a watcher tick clears the
   marker; a head-unit start clears it too (tmpfs). A dead holder's lock does not outlive the process, the marker does.
 - Not on a car: the unit's `ExecStart=-` makes the boot step's exit 1 informational; CarPlay still starts after it.
+
+## 0.8.10, Unreleased: Show map (lane O)
+
+Built on this base, not ported: upstream's "Show on: Off" (idrive-apps PR #112, app 0.6.6) sits on the 0.9.0 machinery
+for where the map shows (cluster and HUD feeds, `map.state.conf`, per-profile settings), which this build does not have.
+Only the user feature is here: a switch that takes the map off the cluster and back with no CarPlay reconnect, patch
+change or head-unit restart.
+
+- Service: `{"cmd":"map","shown":0|1}`, `map_shown` in the conf and in the status; `MapFeed::set_shown` hides the layer
+  as when the stream is not live (slots released, stock map and BMW's turn box back, guide hold released, nothing sent)
+  while decoding and stream tracking go on; the newest frame goes before the layer is visible again.
+  Files: `src/map_feed.*`, `src/main.cpp`, `src/state_settings.*` (replaces `guide_setting.*`; one state file, both keys
+  written whole by temp file, fsync and rename; a bad or unreadable value is the safe one: map shown, turn box hidden).
+- App: the Show map checkbox (`wocMapShown`, id 31), greyed without `map_shown` in the status or with no patch in effect;
+  the map row reads `Cluster map: Off` while it is off. One new word, `Show map`, in all 32 locales.
+- Tests: `test/map_feed_test.cpp` (`map_switch`), `test/state_settings_test.cpp`, app `test_control.js`, `test_page.js`,
+  `test_i18n.js`.
+- Not verified on a car or head unit. Across a service restart the choice is read from the state file; across a renderer
+  restart the layer is made again hidden.
 
 ## NOT verified
 
