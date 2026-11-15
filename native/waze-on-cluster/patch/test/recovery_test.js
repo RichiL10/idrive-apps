@@ -1740,7 +1740,8 @@ function runBootStep(w, name, bootId, env) {
     const t0 = Date.now();
     const r = cp.spawnSync(process.execPath, [RECOVERY_PATH, 'boot', name], {
         env: Object.assign({}, process.env, { WOC_CARPLAY: w.T.carplay.target, WOC_AAPD: w.T.aapd.target, WOC_AAPD_CONF: w.T.aapd.files[1],
-            WOC_RECOVERY_STATE: w.T.carplay.state, WOC_PATCH_SOCK: path.join(w.dir, 'shm', 'patch.sock'), WOC_BOOT_ID: path.join(w.dir, 'boot_id') }, env || {}),
+            WOC_RECOVERY_STATE: w.T.carplay.state, WOC_PATCH_SOCK: path.join(w.dir, 'shm', 'patch.sock'), WOC_BOOT_ID: path.join(w.dir, 'boot_id'),
+            WOC_RESTART_RECORDS: path.join(w.dir, 'var', 'restart-records') }, env || {}),
         encoding: 'utf8', timeout: 60000,
     });
     r.ms = Date.now() - t0;
@@ -1777,6 +1778,86 @@ test('the boot step exits 0 whatever fails, so the service\'s start goes ahead',
     assert.strictEqual(runBootStep(w, 'nothing', 'B').status, 1, 'an unknown service fails (G2-2)');
 });
 
+test('the carplay boot step keeps recmgr\'s and crashhandler\'s restart records by boot, the last 5 boots by count, scrubbed and cut; none, nothing', () => {
+    const w = makeWorld();
+    w.install('carplay', 'original');
+    const sin = path.join(w.dir, 'sin'), keep = path.join(w.dir, 'var', 'restart-records');
+    const env = { WOC_SIN_DIR: sin, WOC_RESTART_RECORDS: keep };
+    const listed = () => fs.readdirSync(keep).sort();
+    /* as root the step makes the folder group systemd-journal; here, the
+     * test's own uid and group stand in */
+    const groups = path.join(w.dir, 'group');
+    fs.writeFileSync(groups, 'systemd-journal:x:' + process.getgid() + ':\n');
+    const opts = { uid: process.getuid(), groupFile: groups };
+    const keepNow = (id) => recovery.keepRestartRecords(w.T.carplay, keep, id, opts);
+    /* no record: nothing written, not even the folder, by the boot step itself */
+    let r = runBootStep(w, 'carplay', 'boot-0', env);
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert(!fs.existsSync(keep), 'no folder without a record');
+    assert.strictEqual(keepNow('boot-0'), 0);
+    assert(!fs.existsSync(keep));
+    /* both records: one with a VIN, one over the cap with a VIN across it */
+    const VIN = 'WBA8E9C50GK123456';
+    fs.writeFileSync(path.join(sin, 'recmgr', 'restartInfo.xml'), '<restartInfo vin="' + VIN + '">recmgr</restartInfo>\n');
+    const at = recovery.RECORD_MAX - 70;
+    fs.writeFileSync(path.join(sin, 'crashhandler', 'restartInfo.xml'), 'z'.repeat(at) + ' ' + VIN + ' ' + 'z'.repeat(5000));
+    fs.mkdirSync(keep);
+    fs.writeFileSync(path.join(keep, '9-boot-x-recmgr.xml.tmp'), 'left by a cut-off write');
+    assert.strictEqual(keepNow('boot-1'), 2);
+    assert.deepStrictEqual(listed(), ['1-boot-1-crashhandler.xml', '1-boot-1-recmgr.xml'], 'a stray temporary file removed');
+    assert.strictEqual(fs.readFileSync(path.join(keep, '1-boot-1-recmgr.xml'), 'utf8'), '<restartInfo vin="<VIN>">recmgr</restartInfo>\n');
+    const big = fs.readFileSync(path.join(keep, '1-boot-1-crashhandler.xml'), 'utf8');
+    assert(Buffer.byteLength(big) <= recovery.RECORD_MAX && big.indexOf('WBA8E9') < 0 && /\.\.\. \(cut at \d+ bytes\)\n$/.test(big), big.slice(-100));
+    assert.strictEqual(fs.statSync(keep).mode & 0o7777, 0o2770, 'the folder as the kept journal\'s');
+    listed().forEach((n) => assert.strictEqual(fs.statSync(path.join(keep, n)).mode & 0o777, 0o640, n));
+    /* a second run in the same boot adds nothing */
+    assert.strictEqual(keepNow('boot-1'), 0);
+    /* six more boots with a record, the files kept so far dated a year ahead
+     * (the clock unset at the boot step): those of the newest 5 boots stay */
+    fs.unlinkSync(path.join(sin, 'crashhandler', 'restartInfo.xml'));
+    for (let i = 2; i <= 7; i++) {
+        const ahead = Date.now() / 1000 + 365 * 86400;
+        listed().forEach((n) => fs.utimesSync(path.join(keep, n), ahead, ahead));
+        keepNow('boot-' + i);
+    }
+    assert.deepStrictEqual(listed(), ['3-boot-3-recmgr.xml', '4-boot-4-recmgr.xml', '5-boot-5-recmgr.xml', '6-boot-6-recmgr.xml', '7-boot-7-recmgr.xml']);
+    /* the boot step: only the carplay one keeps them, and a failure (here the
+     * group, or a folder it cannot make) is a line in its log, the boot check as ever */
+    assert(!/restart record/.test(runBootStep(w, 'aapd', 'boot-8', env).stdout));
+    fs.writeFileSync(path.join(w.dir, 'not-a-folder'), '');
+    r = runBootStep(w, 'carplay', 'boot-8', Object.assign({}, env, { WOC_RESTART_RECORDS: path.join(w.dir, 'not-a-folder', 'x') }));
+    assert.strictEqual(r.status, 0);
+    assert(/restart records not kept: /.test(r.stdout) && /carplay boot check: idle/.test(r.stdout), r.stdout);
+});
+
+test('kept restart records: a boot id that is no safe name is "unknown", a record that is a link is not read, a planted temporary file is never written through, both VIN forms are scrubbed', () => {
+    const w = makeWorld();
+    w.install('carplay', 'original');
+    const sin = path.join(w.dir, 'sin'), keep = path.join(w.dir, 'var', 'restart-records');
+    const groups = path.join(w.dir, 'group');
+    fs.writeFileSync(groups, 'systemd-journal:x:' + process.getgid() + ':\n');
+    const opts = { uid: process.getuid(), groupFile: groups };
+    const keepNow = (id) => recovery.keepRestartRecords(w.T.carplay, keep, id, opts);
+    /* a link in place of a record is no record: it is not followed */
+    const secret = path.join(w.dir, 'secret');
+    fs.writeFileSync(secret, 'TOKEN-ghp_0123456789');
+    fs.symlinkSync(secret, path.join(sin, 'recmgr', 'restartInfo.xml'));
+    assert.strictEqual(keepNow('boot-1'), 0);
+    assert(!fs.existsSync(keep), 'nothing written for a link');
+    fs.unlinkSync(path.join(sin, 'recmgr', 'restartInfo.xml'));
+    /* the long and the short VIN, in the record and in a longer run of letters */
+    fs.writeFileSync(path.join(sin, 'recmgr', 'restartInfo.xml'), '<a>wba8e9c50gk123456</a><b>K123456</b><c>GK12345</c><d>idWBA8E9C50GK123456x</d>\n');
+    assert.strictEqual(keepNow('../../etc/x'), 1);
+    assert.deepStrictEqual(fs.readdirSync(keep), ['1-unknown-recmgr.xml']);
+    assert.strictEqual(fs.readFileSync(path.join(keep, '1-unknown-recmgr.xml'), 'utf8'), '<a><VIN></a><b><VIN></b><c><VIN></c><d>id<VIN>x</d>\n');
+    /* a temporary file name planted as a link is removed, not written through */
+    const victim = path.join(w.dir, 'victim');
+    fs.writeFileSync(victim, 'keep me');
+    fs.symlinkSync(victim, path.join(keep, '2-boot-2-recmgr.xml.tmp'));
+    assert.strictEqual(keepNow('boot-2'), 1);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'keep me');
+    assert.deepStrictEqual(fs.readdirSync(keep).sort(), ['1-unknown-recmgr.xml', '2-boot-2-recmgr.xml']);
+});
 test('a boot step out of time puts / back read-only and releases the lock before it exits', () => {
     const w = makeWorld();
     w.install('carplay', 'unproven');

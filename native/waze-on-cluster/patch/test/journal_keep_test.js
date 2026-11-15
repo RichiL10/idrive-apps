@@ -40,6 +40,46 @@ async function until(what, fn) {
     console.log('ok   rotation: at most FILES files, none past FILE_MAX, oldest dropped, stray rotations removed');
 })();
 
+/* sync (the boot's first minutes): every write is followed by an
+ * fdatasync of a read-only descriptor, the write's own closed by then; the
+ * files only grow by appends, and the caps and rotation hold. */
+(function () {
+    var dir = fresh('sync'), ring = new jk.Ring(dir, { files: 4, fileMax: 1000 });
+    var realOpen = fs.openSync, realSync = fs.fdatasyncSync, realClose = fs.closeSync, open = {}, events = [];
+    fs.openSync = function (p, flags) {
+        var fd = realOpen.apply(fs, arguments);
+        open[fd] = flags;
+        if (flags === 'a') events.push('write');
+        return fd;
+    };
+    fs.closeSync = function (fd) { delete open[fd]; return realClose.apply(fs, arguments); };
+    fs.fdatasyncSync = function (fd) {
+        assert.strictEqual(open[fd], 'r', 'synced through a read-only descriptor');
+        assert(!Object.keys(open).some(function (k) { return open[k] !== 'r'; }), 'no descriptor open for writing while it syncs');
+        events.push('sync');
+        return realSync.apply(fs, arguments);
+    };
+    try {
+        ring.append([line(0, 90), line(1, 90)], true);
+        var ino = fs.statSync(ring.name(0)).ino, before = fs.readFileSync(ring.name(0));
+        ring.append([line(2, 90)], true);
+        var after = fs.readFileSync(ring.name(0));
+        assert.strictEqual(fs.statSync(ring.name(0)).ino, ino, 'the same file');
+        assert(after.slice(0, before.length).equals(before) && after.length === before.length + 90, 'appended, nothing rewritten');
+        for (var i = 3; i < 200; i += 3) ring.append([line(i, 90), line(i + 1, 90), line(i + 2, 90)], true);
+        var plain = events.length;
+        ring.append([line(300, 90)]);
+    } finally {
+        fs.openSync = realOpen; fs.fdatasyncSync = realSync; fs.closeSync = realClose;
+    }
+    var writes = events.slice(0, plain).filter(function (e) { return e === 'write'; }).length;
+    assert(writes > 67, 'a batch that rotates is written in two');
+    assert.strictEqual(events.slice(0, plain).join(' '), new Array(writes + 1).join('write sync ').trim(), 'each write synced before the next');
+    assert.deepStrictEqual(events.slice(plain), ['write'], 'without sync: the write alone');
+    assert.deepStrictEqual(files(dir), ['journal.log', 'journal.log.1', 'journal.log.2', 'journal.log.3']);
+    files(dir).forEach(function (n) { assert(fs.statSync(path.join(dir, n)).size <= 1000, n); });
+    console.log('ok   sync: each write fdatasynced through a read-only descriptor, appended only, the caps hold');
+})();
 /* The shipped caps under a flood: lines of LINE_MAX from both kinds, each
  * ten times its rate, for half an hour. The files stay within 10 files and
  * 4 MB and keep every line let through in the last 10 minutes. */
@@ -157,6 +197,28 @@ async function until(what, fn) {
         ['backlog', '--after-cursor=c3'], 'this boot so far, then followed from its last cursor');
     console.log('ok   the service writes this boot so far, then follows from the last entry\'s cursor');
 
+    /* The service syncs in the first EARLY_S seconds of uptime only: a
+     * preload gives it an uptime and counts the fdatasyncs. */
+    var preload = path.join(tmp, 'preload.js'), syncLog = path.join(tmp, 'syncs');
+    fs.writeFileSync(preload, 'var os = require("os"), fs = require("fs"), real = fs.fdatasyncSync;\n' +
+        'os.uptime = function () { return Number(process.env.WOC_TEST_UPTIME); };\n' +
+        'fs.fdatasyncSync = function (fd) { fs.appendFileSync(process.env.WOC_TEST_SYNCS, "s\\n"); return real.apply(fs, arguments); };\n');
+    async function syncs(uptime) {
+        var d = fresh('uptime' + uptime);
+        fs.writeFileSync(syncLog, '');
+        put(backlogFile, [1, 2].map(function (i) { return entry(i); }));
+        put(liveFile, []);
+        var p = cp.spawn(process.execPath, ['-r', preload, path.join(__dirname, '..', 'journal_keep.js')], { stdio: 'ignore',
+            env: Object.assign({}, env, { WOC_JOURNAL_DIR: d, WOC_TEST_UPTIME: String(uptime), WOC_TEST_SYNCS: syncLog }) });
+        await until('lines at uptime ' + uptime, function () { return all(d).length === 2; });
+        await stop(p);
+        return fs.readFileSync(syncLog, 'utf8').split('\n').filter(Boolean).length;
+    }
+    assert(await syncs(5) >= 1, 'synced 5 s after boot');
+    assert(await syncs(jk.EARLY_S - 1) >= 1, 'synced just inside the early window');
+    assert.strictEqual(await syncs(jk.EARLY_S), 0, 'not synced from EARLY_S on');
+    assert.strictEqual(await syncs(3600), 0, 'not synced late in the boot');
+    console.log('ok   the service syncs in the first ' + jk.EARLY_S + ' s of uptime and not after');
     /* a restart: the backlog holds what the files have and more; only the newer is written */
     put(backlogFile, [1, 2, 3, 4, 5, 6].map(function (i) { return entry(i); }));
     put(liveFile, []);

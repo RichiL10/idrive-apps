@@ -134,6 +134,11 @@
       "mode": "0644"
     },
     {
+      "path": "logs_extra.js",
+      "from": "patch/logs_extra.js",
+      "mode": "0644"
+    },
+    {
       "path": "group_dir.js",
       "from": "patch/group_dir.js",
       "mode": "0644"

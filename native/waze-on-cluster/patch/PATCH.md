@@ -779,7 +779,13 @@ oneshot wanted by `multi-user.target`, `Before=carplay.service`, which
 previous start's shutdown record, `restart-requested`, the other service's
 state, whether our backup exists, the patch record, a `stat` of the
 binary and, with no shutdown record, a `stat` of the two restart records,
-and nothing else; it reads the binary only to restore it.
+and nothing else; it reads the binary only to restore it. Before its decision
+the carplay step also copies the two restart records' text, when it finds any,
+into `/var/opt/waze-on-cluster/restart-records/` for Save logs (`keepRestartRecords`:
+each record read past 64 KiB, VIN-scrubbed, cut to 64 KiB, mode 0640 in a 2770
+folder of group `systemd-journal`, the last 5 boots kept). That copy decides
+nothing, never follows a link, and when it fails the step logs a line and goes
+on.
 
 A start counts as failed only on evidence of a crash. The evidence is the
 restart record recmgr or crashhandler writes when it asks for a head-unit
