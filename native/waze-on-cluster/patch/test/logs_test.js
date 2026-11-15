@@ -168,10 +168,12 @@ function get(url, opts) {
     fs.mkdirSync(capDir);
     old.forEach(function (t, k) { fs.writeFileSync(path.join(capDir, 'woc-logs-' + t + '.tar.gz'), Buffer.alloc(k === 1 ? 9 << 20 : 1024)); });
     fs.writeFileSync(path.join(capDir, '.woc-logs-20260101T000007Z.tar.gz.part'), 'partial');
+    fs.writeFileSync(path.join(capDir, '.woc-logs-20260101T000008Z.part.a1B2c3'), 'partial of collect-logs.sh (mktemp suffix)');
     fs.writeFileSync(path.join(capDir, 'keep.txt'), 'not ours');
     var c = start('caps');
     var ca = await connect(c.sock);
     assert(!fs.existsSync(path.join(capDir, '.woc-logs-20260101T000007Z.tar.gz.part')), 'a partial archive is removed at start');
+    assert(!fs.existsSync(path.join(capDir, '.woc-logs-20260101T000008Z.part.a1B2c3')), 'a partial archive with collect-logs.sh random suffix is removed at start');
     assert.strictEqual(logs.archives(capDir).length, logs.ARCHIVES, 'the oldest past the count removed at start');
     fs.writeFileSync(sizeFile, String(12 << 20));
     ca.send({ cmd: 'save' });
