@@ -20,7 +20,8 @@
 # restart records, recmgr's crash table and the list of kept core dumps (root's
 # to read: the logs service gets them from the snapshot its firewall unit
 # takes as root, in SNAPSHOT; run by root, it takes them itself). Every file
-# of the archive is scrubbed of VINs last (logs_extra.js scrub). Anything
+# of the archive is scrubbed of VINs last (logs_extra.js scrub; nothing else
+# is scrubbed, and without logs_extra.js there is no archive). Anything
 # missing is left out. It changes nothing on the unit but the archive.
 # POSIX sh, for the unit's shell.
 set -u
@@ -39,9 +40,9 @@ fi
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 NAME=woc-logs-$STAMP
 OUT=$OUTDIR/$NAME.tar.gz
-PART=$OUTDIR/.$NAME.tar.gz.part
 STAGE=$(mktemp -d /tmp/woc-logs.XXXXXX) || { echo "collect-logs: cannot make a folder in /tmp" >&2; exit 1; }
-trap 'rm -rf "$STAGE"; rm -f "$PART"' EXIT
+PART=
+trap 'rm -rf "$STAGE"; [ -z "$PART" ] || rm -f "$PART"' EXIT
 trap 'exit 1' INT TERM
 DIR=$STAGE/$NAME
 mkdir -p "$DIR"
@@ -83,21 +84,25 @@ fi
 
 HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
 NODE=$(command -v node || echo /usr/bin/node)
+# The scrub is not best-effort: without its tool there is no archive. The
+# report and snapshot steps below are.
+if [ ! -f "$HERE/logs_extra.js" ]; then
+    echo "collect-logs: logs_extra.js is missing, cannot scrub the archive" >&2
+    exit 1
+fi
 if [ -f "$HERE/carplay_patch.js" ]; then
     "$NODE" "$HERE/carplay_patch.js" probe > "$DIR/carplay-probe.txt" 2>&1
 fi
 if [ -f "$HERE/aapd_patch.js" ]; then
     "$NODE" "$HERE/aapd_patch.js" status > "$DIR/aapd-status.txt" 2>&1
 fi
-if [ -f "$HERE/logs_extra.js" ]; then
-    "$NODE" "$HERE/logs_extra.js" report "$DIR" > /dev/null 2>&1
-    if [ "$(id -u 2>/dev/null)" = 0 ]; then
-        "$NODE" "$HERE/logs_extra.js" snapshot "$DIR" > /dev/null 2>&1
-    else
-        for f in "$SNAPSHOT"/*; do
-            copy "$f" "${f##*/}"
-        done
-    fi
+"$NODE" "$HERE/logs_extra.js" report "$DIR" > /dev/null 2>&1
+if [ "$(id -u 2>/dev/null)" = 0 ]; then
+    "$NODE" "$HERE/logs_extra.js" snapshot "$DIR" > /dev/null 2>&1
+else
+    for f in "$SNAPSHOT"/*; do
+        copy "$f" "${f##*/}"
+    done
 fi
 
 ls -l /var/opt/cluster-render /var/opt/waze-on-cluster /var/opt/waze-on-cluster/journal /var/opt/waze-on-cluster/saved > "$DIR/ls.txt" 2>&1
@@ -109,13 +114,21 @@ ls -l /var/opt/cluster-render /var/opt/waze-on-cluster /var/opt/waze-on-cluster/
 } > "$DIR/time.txt"
 
 # Last: nothing is packed that has not been through the VIN scrub.
-if [ -f "$HERE/logs_extra.js" ] && ! "$NODE" "$HERE/logs_extra.js" scrub "$DIR"; then
+if ! "$NODE" "$HERE/logs_extra.js" scrub "$DIR"; then
     echo "collect-logs: could not scrub the archive" >&2
     exit 1
 fi
 
-if ! tar -cf "$STAGE/$NAME.tar" -C "$STAGE" "$NAME" 2>/dev/null || ! gzip -c "$STAGE/$NAME.tar" > "$PART" ||
-        ! mv "$PART" "$OUT"; then
+# The archive is made inside STAGE (ours, mode 700), never under a name another
+# user can guess in a shared folder. OUT must not be a folder or a link; the
+# finished file goes to OUT through a file made there with a random name (mktemp
+# creates it, never follows a link), so OUT appears whole or not at all.
+if [ -d "$OUT" ] || [ -L "$OUT" ]; then
+    echo "collect-logs: $OUT is a folder or a link, not writing there" >&2
+    exit 1
+fi
+if ! tar -cf "$STAGE/$NAME.tar" -C "$STAGE" "$NAME" 2>/dev/null || ! gzip -c "$STAGE/$NAME.tar" > "$STAGE/$NAME.tar.gz" ||
+        ! PART=$(mktemp "$OUTDIR/.$NAME.part.XXXXXX") || ! cat "$STAGE/$NAME.tar.gz" > "$PART" || ! mv "$PART" "$OUT"; then
     echo "collect-logs: could not write $OUT" >&2
     exit 1
 fi

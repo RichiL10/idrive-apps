@@ -60,7 +60,8 @@ SERVICES.forEach(function (name) {
 var fw = unit('waze-on-cluster-logs-fw.service');
 assert(!fw.User, 'the firewall unit runs as root, in its own service so LimitCORE covers nft');
 assert.deepStrictEqual(fw.BindsTo, ['waze-on-cluster-logs.service']);
-assert.deepStrictEqual(fw.ExecStopPost, ['/usr/bin/node /var/opt/waze-on-cluster/current/logs_fw.js close']);
+/* the comment in the unit: a failed step never fails the unit, so the cleanup's "-" too */
+assert.deepStrictEqual(fw.ExecStopPost, ['-/usr/bin/node /var/opt/waze-on-cluster/current/logs_fw.js close']);
 assert.deepStrictEqual(fw.ExecStart, ['/usr/bin/node /var/opt/waze-on-cluster/current/logs_fw.js watch']);
 var logs = unit('waze-on-cluster-logs.service');
 assert(list(logs, 'Wants').indexOf('waze-on-cluster-logs-fw.service') >= 0 && list(logs, 'After').indexOf('waze-on-cluster-logs-fw.service') >= 0);
@@ -78,11 +79,23 @@ assert.deepStrictEqual(fw.ExecStartPre, ['-/usr/bin/node /var/opt/waze-on-cluste
 ['logs_extra.js'].forEach(function (n) {
     assert(c.files.some(function (f) { return f.path === n && f.from === 'patch/' + n; }), n + ' installed');
 });
-/* The start limits of the journal and firewall units are unchanged. */
+/* The start limits of the journal and firewall units are unchanged, and in
+ * [Unit], where systemd 237 reads them (unit() flattens the sections). */
+function sections(name) {
+    var cur = '', s = {};
+    fs.readFileSync(path.join(root, 'systemd', name), 'utf8').split('\n').forEach(function (l) {
+        var m = /^\[(\w+)\]$/.exec(l);
+        if (m) { cur = m[1]; s[cur] = s[cur] || []; } else if (cur) s[cur].push(l);
+    });
+    return s;
+}
 ['waze-on-cluster-journal.service', 'waze-on-cluster-logs-fw.service'].forEach(function (n) {
-    var u = unit(n);
+    var u = unit(n), s = sections(n);
     assert.deepStrictEqual([u.StartLimitIntervalSec, u.StartLimitBurst], [['600'], ['10']], n);
-});assert(c.enable.some(function (e) { return e.unit === 'waze-on-cluster-journal.timer' && e.target === 'timers.target'; }));
+    assert(s.Unit.indexOf('StartLimitIntervalSec=600') >= 0 && s.Unit.indexOf('StartLimitBurst=10') >= 0, n + ': the start limits are in [Unit]');
+    assert(!s.Service.some(function (l) { return /^StartLimit/.test(l); }), n + ': no StartLimit key in [Service], where systemd 237 ignores it');
+});
+assert(c.enable.some(function (e) { return e.unit === 'waze-on-cluster-journal.timer' && e.target === 'timers.target'; }));
 assert(c.enable.some(function (e) { return e.unit === 'waze-on-cluster-logs.socket' && e.target === 'sockets.target'; }));
 assert(!c.enable.some(function (e) { return /journal\.service|logs(-fw)?\.service/.test(e.unit); }), 'no service enabled on its own');
 /* The deploy tool restarts the journal service on an update and checks it is

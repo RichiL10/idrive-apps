@@ -33,8 +33,15 @@ var i;
         ['vin=' + VIN.toLowerCase() + ';', 'vin=<VIN>;'],
         [VIN, '<VIN>'],
         [VIN + '\n' + VIN, '<VIN>\n<VIN>'],
-        ['K123456 and GK12345', '<VIN> and <VIN>'],
-        ['(GK12345)', '(<VIN>)'],
+        /* a short VIN needs its label or a full VIN in the same text: a crash or build id such as A123456 stays */
+        ['crash A123456 build AB12345 (GK12345) K123456', 'crash A123456 build AB12345 (GK12345) K123456'],
+        ['vin: K123456, "fgnr":"FK67620" <vin7>GK12345</vin7> owner_vin=1234567', 'vin: <VIN>, "fgnr":"<VIN>" <vin7><VIN></vin7> owner_vin=<VIN>'],
+        ['Fahrgestellnummer: PA12345 chassis 7A12345 VIN 5G12345', 'Fahrgestellnummer: <VIN> chassis <VIN> VIN <VIN>'],
+        ['vinyl records, vin version, devin A123456, vin A1234567', 'vinyl records, vin version, devin A123456, vin A1234567'],
+        [VIN + ' then K123456 and (k123456) not K1234567', '<VIN> then <VIN> and (<VIN>) not K1234567'],
+        ['WBA 5R71 070F K67620 / FK67620', '<VIN> / <VIN>'],
+        ['WBA-5R7-1070-FK6-7620 and W B A 5R71 070F K67620', '<VIN> and <VIN>'],
+        ['WBA 5R71 070F, 1HG CM82 633A 004352, WBA  5R71 070F K67620', 'WBA 5R71 070F, 1HG CM82 633A 004352, WBA  5R71 070F K67620'],
         ['id' + VIN + 'x', 'id<VIN>x'],
         ['5UXTR9C5XJ1234567', '<VIN>'],
         ['WMWXU3C53B1234567', '<VIN>'],
@@ -46,14 +53,14 @@ var i;
         'ABCDEFGHJKLMNPRSTUVWXYZ', 'restartInfo', '1234567', 'KI_KOMBI_VARIANT 7', '0x1d43eb'].forEach(function (s) {
         assert.strictEqual(extra.scrub(s), s, s);
     });
-    console.log('ok   scrub: 17- and 7-character VINs (also lower case, and inside a run for a BMW or MINI maker code); ids, times and words stay');
+    console.log('ok   scrub: 17-character VINs (also lower case, in a run or in groups for a BMW or MINI maker code), their last 7 characters, labelled 7-character fields; ids, times and words stay');
 })();
 
 /* journalctl prints a VIN into the unit journals (a file the scrub step meets
  * last); sqlite3 comes below, per case. */
-fs.writeFileSync(path.join(bin, 'journalctl'), '#!/bin/sh\ncase " $* " in *" -u carplay "*) echo "carplay[7]: vin WBA8E9C50GK123456 short GK12345 ok";; esac\nexit 0\n', { mode: 0o755 });
+fs.writeFileSync(path.join(bin, 'journalctl'), '#!/bin/sh\ncase " $* " in *" -u carplay "*) echo "carplay[7]: vin WBA8E9C50GK123456 short K123456 crash A123456 ok";; esac\nexit 0\n', { mode: 0o755 });
 var ENV = Object.assign({}, process.env, { PATH: bin + ':' + process.env.PATH });
-var SECRETS = ['ghp_FAKEtoken0123456789abcdefghijklmnop', 'hunter2-wifi-passphrase', 'BEGIN PRIVATE KEY', 'WBA8E9C50GK123456',
+var SECRETS = ['ghp_FAKEtoken0123456789abcdefghijklmnop', 'hunter2-wifi-passphrase', 'BEGIN PRIVATE KEY', 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASC', 'ghp_FAKEstatetoken', 'WBA8E9C50GK123456',
     'GK12345', '48.137154', '11.576124', 'CORE-DUMP-BYTES'];
 var U = path.join(dir, 'unit'), CUR = path.join(dir, 'current'), SNAP = path.join(dir, 'snapshot');
 function mk(rel, text) {
@@ -62,6 +69,8 @@ function mk(rel, text) {
     fs.writeFileSync(f, text);
     return f;
 }
+/* a private key block, and a token under a key the report does not pick */
+var PEM = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\n';
 fs.mkdirSync(CUR);
 fs.copyFileSync(SCRIPT, path.join(CUR, 'collect-logs.sh'));
 fs.readdirSync(path.join(__dirname, '..')).filter(function (n) { return /\.js$/.test(n); }).forEach(function (n) {
@@ -81,16 +90,17 @@ fs.mkdirSync(path.join(U, 'var/opt/mgu-deploy/versions/0.8.9'), { recursive: tru
 fs.symlinkSync('versions/0.8.9', path.join(U, 'var/opt/mgu-deploy/current'));
 ['waze-on-cluster@0.9.7', 'cluster-render@0.4.3'].forEach(function (t) {
     var id = t.split('@')[0], v = t.split('@')[1];
-    mk('var/opt/' + id + '/versions/' + v + '/component.json', JSON.stringify({ id: id, kind: 'tool', version: v, token: 'ghp_FAKEtoken0123456789abcdefghijklmnop' }));
+    mk('var/opt/' + id + '/versions/' + v + '/component.json', JSON.stringify({ id: id, kind: 'tool', version: v, token: 'ghp_FAKEtoken0123456789abcdefghijklmnop', privateKey: PEM }));
     fs.symlinkSync('versions/' + v, path.join(U, 'var/opt', id, 'current'));
 });
 var stash = [];
 for (i = 0; i < 6000; i++) stash.push({ path: '/var/opt/x/' + i });
 mk('var/opt/mgu-deploy/state.json', JSON.stringify({
-    tools: { 'waze-on-cluster': { version: '0.9.7', firmware: 'S18A-23-07-550', token: 'ghp_FAKEtoken0123456789abcdefghijklmnop' } },
+    tools: { 'waze-on-cluster': { version: '0.9.7', firmware: 'S18A-23-07-550', token: 'ghp_FAKEtoken0123456789abcdefghijklmnop', key: PEM } },
     apps: { robertn_store: { uid: 12001, version: '1.4.0', passphrase: 'hunter2-wifi-passphrase' } },
     pending_reboot: [{ id: 'waze-on-cluster', reason: 'new units', boot: 'boot-now' }, { id: 'cluster-render', reason: 'done', boot: 'boot-old' }],
     lastBounceAt: 1794170000,
+    github_token: 'ghp_FAKEstatetoken', config: { key: PEM },
     vin: 'WBA8E9C50GK123456', position: { lat: 48.137154, lon: 11.576124 }, data_stash: stash }));
 assert(fs.statSync(path.join(U, 'var/opt/mgu-deploy/state.json')).size > 100 * 1024, 'the state is longer than a file may be in the archive');
 mk('var/opt/mgu-deploy/config.json', '{"token":"ghp_FAKEtoken0123456789abcdefghijklmnop"}\n');
@@ -161,7 +171,7 @@ assert(dumps.some(function (l) { return /Z  core\.1794170822\.carplay\.4222\.gz$
 assert(dumps.indexOf('-- /var/opt/kerneldump (the newest 100 of 130)') >= 0, 'at most 100 a folder');
 assert.strictEqual(dumps.filter(function (l) { return / {2}dump-\d+$/.test(l); }).length, 100);
 /* the VIN scrub reaches every file, the unit journals too */
-assert.strictEqual(get('journal-carplay.txt'), 'carplay[7]: vin <VIN> short <VIN> ok\n');
+assert.strictEqual(get('journal-carplay.txt'), 'carplay[7]: vin <VIN> short <VIN> crash A123456 ok\n', 'the last 7 of a VIN found goes, a crash id stays');
 var everything = fs.readdirSync(A).map(get).join('\n');
 SECRETS.forEach(function (x) { assert(everything.indexOf(x) < 0, 'the archive holds ' + x); });
 /* the files logs_extra writes keep to the cap, whatever the source */
@@ -256,5 +266,83 @@ rr = cp.spawnSync('sh', [path.join(CUR2, 'collect-logs.sh'), '-o', out2], { env:
 assert.strictEqual(rr.status, 1, rr.stdout + rr.stderr);
 assert(/could not scrub/.test(rr.stderr) && fs.readdirSync(out2).length === 0, 'no archive: ' + fs.readdirSync(out2));
 console.log('ok   a failed scrub: no archive is written');
+
+/* scrub <dir>: the last 7 of a VIN found in any file go from all of them; a file named with a VIN is renamed, so
+ * no VIN is left in the archive's member names */
+var nd = path.join(dir, 'names');
+fs.mkdirSync(nd);
+fs.writeFileSync(path.join(nd, 'a.txt'), 'owner WBA8E9C50GK123456, crash A123456, short K123456\n');
+fs.writeFileSync(path.join(nd, 'run-WBA8E9C50GK123456.json'), 'c1');
+fs.writeFileSync(path.join(nd, 'status-K123456.json'), 'c2');
+fs.writeFileSync(path.join(nd, 'kept-WBA-5R7-1070-FK6-7620.log'), 'c3');
+fs.writeFileSync(path.join(nd, 'crash-A123456.txt'), 'c4');
+fs.writeFileSync(path.join(nd, 'journal-carplay.txt'), 'c5 FK67620\n');
+rr = cp.spawnSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'scrub', nd], { env: XENV, encoding: 'utf8' });
+assert.strictEqual(rr.status, 0, rr.stderr);
+var left = fs.readdirSync(nd).sort();
+assert.deepStrictEqual(left.filter(function (n) { return !/^file-\d+$/.test(n); }), ['a.txt', 'crash-A123456.txt', 'journal-carplay.txt'], left.join(' '));
+assert.deepStrictEqual(left.filter(function (n) { return /^file-\d+$/.test(n); }).map(function (n) { return fs.readFileSync(path.join(nd, n), 'utf8'); }).sort(), ['c1', 'c2', 'c3']);
+assert.strictEqual(fs.readFileSync(path.join(nd, 'a.txt'), 'utf8'), 'owner <VIN>, crash A123456, short <VIN>\n');
+assert.strictEqual(fs.readFileSync(path.join(nd, 'journal-carplay.txt'), 'utf8'), 'c5 <VIN>\n', 'the last 7 of a spaced VIN found in a name');
+assert.strictEqual(fs.readFileSync(path.join(nd, 'crash-A123456.txt'), 'utf8'), 'c4');
+console.log('ok   scrub <dir>: files named with a VIN are renamed file-<n>; a crash id in a name or text stays');
+var members = cp.execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' });
+assert(!/WBA8E9C50GK123456|K123456/i.test(members), 'no VIN in the archive\'s member names');
+
+/* the report and the snapshot never emit a token or a private key of the files they do not pick from: a token
+ * and a key block in state.json under other keys, in a component manifest, in the deploy tool's config and the
+ * updater's files (the free text of the files they do copy is copied as it is) */
+var leaks = path.join(dir, 'leaks');
+fs.mkdirSync(leaks);
+fs.mkdirSync(path.join(leaks, 'snap'));
+fs.mkdirSync(path.join(leaks, 'rep'));
+mk('var/opt/mgu-updater/key.pem', PEM);
+cp.execFileSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'snapshot', path.join(leaks, 'snap')], { env: XENV });
+cp.execFileSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'report', path.join(leaks, 'rep')], { env: XENV });
+var emitted = fs.readdirSync(path.join(leaks, 'rep')).map(function (n) { return fs.readFileSync(path.join(leaks, 'rep', n), 'utf8'); })
+    .concat(fs.readdirSync(path.join(leaks, 'snap')).map(function (n) { return fs.readFileSync(path.join(leaks, 'snap', n), 'utf8'); })).join('\n');
+assert(/tool waze-on-cluster 0\.9\.7 firmware/.test(emitted), 'the report ran');
+['ghp_FAKE', 'PRIVATE KEY', 'MIIEvQIBADANBgkq', 'hunter2'].forEach(function (x) { assert(emitted.indexOf(x) < 0, 'emitted: ' + x); });
+console.log('ok   report and snapshot: a token and a private key under a key or in a file they do not pick are not emitted');
+
+/* a symlink planted at the name the old script wrote its root-opened temporary file to is neither followed nor
+ * touched, and the archive is written; an output name that is a link or a folder is refused */
+var out3 = path.join(dir, 'out-oldname'), victim = mk('victim', 'precious\n');
+fs.mkdirSync(out3);
+fs.writeFileSync(path.join(bin, 'date'), '#!/bin/sh\ncase "$*" in *+%Y%m%dT%H%M%SZ*) echo 20261101T000000Z;; *) exec /bin/date "$@";; esac\n', { mode: 0o755 });
+var old = path.join(out3, '.woc-logs-20261101T000000Z.tar.gz.part');
+fs.symlinkSync(victim, old);
+rr = cp.spawnSync('sh', [path.join(CUR, 'collect-logs.sh'), '-o', out3], { env: XENV, encoding: 'utf8' });
+assert.strictEqual(rr.status, 0, rr.stdout + rr.stderr);
+assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'precious\n', 'the link\'s target is untouched');
+assert.strictEqual(fs.readlinkSync(old), victim, 'the link is as it was');
+var made = path.join(out3, 'woc-logs-20261101T000000Z.tar.gz');
+assert.strictEqual(rr.stdout.trim(), made);
+assert(fs.lstatSync(made).isFile() && !fs.lstatSync(made).isSymbolicLink(), 'a regular file');
+cp.execFileSync('tar', ['-tzf', made]);
+assert.deepStrictEqual(fs.readdirSync(out3).sort(), ['.woc-logs-20261101T000000Z.tar.gz.part', 'woc-logs-20261101T000000Z.tar.gz'], 'no other file left');
+['link', 'folder'].forEach(function (kind) {
+    var o = path.join(dir, 'out-' + kind);
+    fs.mkdirSync(o);
+    var target = path.join(o, 'woc-logs-20261101T000000Z.tar.gz');
+    if (kind === 'link') fs.symlinkSync(victim, target); else fs.mkdirSync(target);
+    var r4 = cp.spawnSync('sh', [path.join(CUR, 'collect-logs.sh'), '-o', o], { env: XENV, encoding: 'utf8' });
+    assert.strictEqual(r4.status, 1, r4.stdout + r4.stderr);
+    assert(/folder or a link/.test(r4.stderr), r4.stderr);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'precious\n');
+    assert.deepStrictEqual(fs.readdirSync(o), ['woc-logs-20261101T000000Z.tar.gz'], 'nothing else written');
+});
+console.log('ok   collect-logs: a link at the old temporary name is not followed; a link or a folder as the output is refused');
+
+/* the scrub does not fail open: without logs_extra.js there is no archive */
+var CUR3 = path.join(dir, 'current3');
+fs.mkdirSync(CUR3);
+fs.readdirSync(CUR).filter(function (n) { return n !== 'logs_extra.js'; }).forEach(function (n) { fs.copyFileSync(path.join(CUR, n), path.join(CUR3, n)); });
+var out5 = path.join(dir, 'out-noextra');
+fs.mkdirSync(out5);
+rr = cp.spawnSync('sh', [path.join(CUR3, 'collect-logs.sh'), '-o', out5], { env: XENV, encoding: 'utf8' });
+assert.notStrictEqual(rr.status, 0, rr.stdout + rr.stderr);
+assert(/logs_extra\.js is missing/.test(rr.stderr) && fs.readdirSync(out5).length === 0, 'no archive: ' + rr.stderr + fs.readdirSync(out5));
+console.log('ok   collect-logs: no logs_extra.js, no archive');
 
 try { fs.rmSync ? fs.rmSync(dir, { recursive: true, force: true }) : null; } catch (e) { /* left in tmp */ }

@@ -2163,11 +2163,11 @@ test('kept restart records: a boot id that is no safe name is "unknown", a recor
     assert.strictEqual(keepNow('boot-1'), 0);
     assert(!fs.existsSync(keep), 'nothing written for a link');
     fs.unlinkSync(path.join(sin, 'recmgr', 'restartInfo.xml'));
-    /* the long and the short VIN, in the record and in a longer run of letters */
-    fs.writeFileSync(path.join(sin, 'recmgr', 'restartInfo.xml'), '<a>wba8e9c50gk123456</a><b>K123456</b><c>GK12345</c><d>idWBA8E9C50GK123456x</d>\n');
+    /* the long VIN, the short one after a VIN label (a crash id stays), in the record and in a longer run of letters */
+    fs.writeFileSync(path.join(sin, 'recmgr', 'restartInfo.xml'), '<a>wba8e9c50gk123456</a><vin>K123456</vin><vin7>GK12345</vin7><c>A123456</c><d>idWBA8E9C50GK123456x</d>\n');
     assert.strictEqual(keepNow('../../etc/x'), 1);
     assert.deepStrictEqual(fs.readdirSync(keep), ['1-unknown-recmgr.xml']);
-    assert.strictEqual(fs.readFileSync(path.join(keep, '1-unknown-recmgr.xml'), 'utf8'), '<a><VIN></a><b><VIN></b><c><VIN></c><d>id<VIN>x</d>\n');
+    assert.strictEqual(fs.readFileSync(path.join(keep, '1-unknown-recmgr.xml'), 'utf8'), '<a><VIN></a><vin><VIN></vin><vin7><VIN></vin7><c>A123456</c><d>id<VIN>x</d>\n');
     /* a temporary file name planted as a link is removed, not written through */
     const victim = path.join(w.dir, 'victim');
     fs.writeFileSync(victim, 'keep me');
