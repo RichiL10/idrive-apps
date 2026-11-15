@@ -17,6 +17,23 @@ waze-on-cluster 0.7.10) onto the new upstream code, with their tests. Versions: 
 cluster-render 0.3.12, robertn_waze_cluster 0.5.8. Target car: BMW G20 330i xDrive, iDrive 7, CarPlay only,
 no HUD, no Android Auto.
 
+## 0.8.10 in one page
+
+waze-on-cluster 0.8.10 and robertn_waze_cluster 0.5.9 are 0.8.9 plus four pieces of work (cluster-render stays 0.3.12).
+Still a TEST BUILD: nothing here has run on a car.
+
+| Piece | What it does | Where |
+|---|---|---|
+| Held names (upstream 0.9.2, ported) | Every file a process runs keeps a name through a patch change, so `/` can go read-only again; an unreadable process counts as running | lane H, `patchd.js`, `remount_lock.js` |
+| Variant-7 gate and trial (upstream 0.9.6, ported) | CarPlay's automatic patch only on a car coded KI_KOMBI_VARIANT 7; a first patch is on trial: one failed start restores the original, a clean boot proves it | lane T, `carplay_patch.js`, `recovery.js`, `patch_record.js` |
+| Crash evidence (upstream 0.9.8, 0.9.9, ported) | Journal of short starts kept; restart records kept at boot; Save logs gets crash evidence, VIN-scrubbed | lane J, `logs_extra.js`, `journal_keep.js`, `collect-logs.sh` |
+| Show map (ours, idea from upstream PR #112) | The app can take the map off the cluster and back without a reconnect, a patch change or a restart | lane O, `state_settings.*`, `map_feed.*`, the app's General page |
+
+Five independent reviews (two gpt-5.6-sol and two gpt-5.6-terra on the merge, one gpt-5.6-sol on the fixes) found
+real defects; all that could harm the car or lose a safeguard were fixed with tests, the rest is listed in
+"Known limitations of 0.8.10". Final run on the committed tree, all eight suites exit 0: waze-host 1123 passed
+(0.8.9: 878), waze-x86 476 (402), app 78 (73), cr-host 967, cr-x86 940, cr-target 3, waze-target 1,
+release-check 3 (reproducible builds).
 ## Defaults and one-line off switches
 
 Overrides go in `/var/opt/waze-on-cluster/waze-on-cluster.local.conf` and
@@ -109,7 +126,7 @@ Left as they are, on purpose:
   marker; a head-unit start clears it too (tmpfs). A dead holder's lock does not outlive the process, the marker does.
 - Not on a car: the unit's `ExecStart=-` makes the boot step's exit 1 informational; CarPlay still starts after it.
 
-## 0.8.10, Unreleased: Show map (lane O)
+## 0.8.10, lane O: Show map
 
 Built on this base, not ported: upstream's "Show on: Off" (idrive-apps PR #112, app 0.6.6) sits on the 0.9.0 machinery
 for where the map shows (cluster and HUD feeds, `map.state.conf`, per-profile settings), which this build does not have.
