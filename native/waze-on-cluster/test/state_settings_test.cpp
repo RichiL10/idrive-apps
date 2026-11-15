@@ -4,7 +4,8 @@
  * The turn box: hidden by default; the configuration's 0 shows it; a value
  * other than 0 or 1 hides it; the app's choice kept across a restart and
  * replacing the configuration's; a state file without the setting, or one
- * that cannot be read, hides it; the shipped waze-on-cluster.conf hides it;
+ * that cannot be read, hides it; one without the setting leaving the
+ * configuration's value; the shipped waze-on-cluster.conf hides it;
  * a choice other than 0 or 1 refused; a state file that cannot be written
  * leaving the choice in effect.
  * The map: shown by default; the configuration's 0 takes it off the cluster;
@@ -12,7 +13,9 @@
  * and replacing the configuration's; a state file written by a version
  * without the key leaving the configuration's value; one that cannot be read,
  * or with a bad value, showing it; the shipped configuration shows it.
- * Both: either change keeps the other choice in the file, written whole. */
+ * Both: each key is in the state file only once the app changed it (or the
+ * file held it), so a key the app never set keeps following the configuration;
+ * the file is written whole, and its folder synced after the rename. */
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -40,6 +43,21 @@ static std::string slurp(const std::string &path)
     std::stringstream ss;
     ss << f.rdbuf();
     return ss.str();
+}
+
+/* The folder sync of a test: how often it was called, with which folder, and
+ * the state file's content at that moment (the rename is done by then). */
+static const std::string kSyncedFile = "/tmp/woc-state-test-" + std::to_string(getpid()) + ".conf";
+static int sync_calls;
+static std::string sync_dir, sync_content;
+static bool sync_result = true;
+
+static bool record_sync(const std::string &dir)
+{
+    sync_calls++;
+    sync_dir = dir;
+    sync_content = slurp(kSyncedFile);
+    return sync_result;
 }
 
 /* What the service does with a control line {"cmd":"map","shown":...}: the value
@@ -86,7 +104,8 @@ int main()
     std::ofstream(path) << "hide_bmw_guidance = maybe\n";
     ok("a saved value other than 0 or 1: hidden", StateSettings("0", "1", path).hide());
     std::ofstream(path) << "garbage\n";
-    ok("a state file without the setting: hidden", StateSettings("0", "1", path).hide());
+    ok("a state file without the setting: the configuration's",
+       !StateSettings("0", "1", path).hide() && StateSettings("1", "1", path).hide());
     std::ofstream(path) << "hide_bmw_guidance = 0\n";
     chmod(path.c_str(), 0);
     if (access(path.c_str(), R_OK) != 0) {   /* root reads it anyway */
@@ -150,14 +169,33 @@ int main()
                !map_command(&s, "{\"cmd\":\"map\",\"shown\":0") && s.shown());
     }
 
-    /* both keys, written whole, whichever changes */
+    /* a key is in the file only once the app changed it, or the file held it */
     unlink(path.c_str());
     {
-        StateSettings s("0", "1", path);   /* the configuration's turn box 0 is what the file takes */
+        StateSettings s("0", "1", path);
         s.set_shown("0");
     }
-    ok("both: the map's change writes both keys, the turn box as it was in effect",
-       slurp(path) == "hide_bmw_guidance = 0\nmap_shown = 0\n");
+    ok("both: the map first writes only the map", slurp(path) == "map_shown = 0\n");
+    {
+        StateSettings s("1", "1", path);   /* the owner edited the local conf's turn box from 0 to 1 */
+        ok("both: the edited configuration wins for the turn box, the map as saved", s.hide() && !s.shown());
+        ok("both: and with it at 0 again", !StateSettings("0", "1", path).hide());
+        s.set_shown("1");
+    }
+    ok("both: a second map change still leaves the turn box out", slurp(path) == "map_shown = 1\n");
+    unlink(path.c_str());
+    {
+        StateSettings s("1", "1", path);
+        s.set_hide("0");
+    }
+    ok("both: the turn box first writes only the turn box", slurp(path) == "hide_bmw_guidance = 0\n");
+    ok("both: the map follows the configuration meanwhile",
+       !StateSettings("0", "0", path).shown() && StateSettings("0", "1", path).shown());
+    {
+        StateSettings s("1", "1", path);
+        s.set_shown("0");
+    }
+    ok("both: then the map: both kept, written whole", slurp(path) == "hide_bmw_guidance = 0\nmap_shown = 0\n");
     {
         StateSettings s("1", "1", path);
         ok("both: read back, the saved choices over the configuration's", !s.hide() && !s.shown());
@@ -174,10 +212,75 @@ int main()
     std::ofstream(path) << "hide_bmw_guidance = 0\n";   /* a file of a version before map_shown */
     {
         StateSettings s("1", "0", path);
+        ok("both: a file of a version before the key: the turn box as saved, the map as configured",
+           !s.hide() && !s.shown());
         s.set_hide("1");
     }
-    ok("both: a file of a version before the key gets it from the configuration's value",
-       slurp(path) == "hide_bmw_guidance = 1\nmap_shown = 0\n");
+    ok("both: and its map stays out of the file until the app sets it", slurp(path) == "hide_bmw_guidance = 1\n");
+    std::ofstream(path) << "garbage\nhide_bmw_guidance = 0\n  map_shown = 0\nmap_shown=0\nfoo = 1\n";
+    {
+        StateSettings s("1", "1", path);
+        ok("both: lines that are not the keys are ignored", !s.hide() && s.shown());
+        s.set_hide("1");
+    }
+    ok("both: and dropped at the next write", slurp(path) == "hide_bmw_guidance = 1\n");
+    std::ofstream(path) << "map_shown = maybe\nhide_bmw_guidance = 5\n";
+    {
+        StateSettings s("0", "0", path);
+        ok("both: bad values: the safe one per key", s.hide() && s.shown());
+        s.set_hide("0");
+    }
+    ok("both: a bad value held is rewritten as the safe one", slurp(path) == "hide_bmw_guidance = 0\nmap_shown = 1\n");
+    std::ofstream(path) << "garbage\n";
+    {
+        StateSettings s("1", "0", path);
+        s.set_shown("1");
+    }
+    ok("both: a file of garbage only: just the key set", slurp(path) == "map_shown = 1\n");
+    std::ofstream(path) << "hide_bmw_guidance = 0\nmap_shown = 0\n";
+    chmod(path.c_str(), 0);
+    if (access(path.c_str(), R_OK) != 0) {   /* root reads it anyway */
+        {
+            StateSettings s("0", "0", path);
+            ok("both: a file that cannot be read: both safe values", s.hide() && s.shown());
+            s.set_shown("0");   /* unwritable too here (the folder is not): only the key set is written */
+        }
+        chmod(path.c_str(), 0644);
+        ok("both: and holds neither key before the app sets one", slurp(path) == "map_shown = 0\n");
+    }
+    unlink(path.c_str());
+
+    /* the folder is synced after the rename; a failed sync keeps the choice */
+    {
+        StateSettings s("1", "1", path, record_sync);
+        ok("sync: nothing before a change", sync_calls == 0);
+        ok("sync: a change syncs the folder once, with the new file already in place",
+           s.set_shown("0") && sync_calls == 1 && sync_dir == "/tmp" && sync_content == "map_shown = 0\n" &&
+               access((path + ".tmp").c_str(), F_OK) != 0);
+        ok("sync: the other key too, the same way",
+           s.set_hide("0") && sync_calls == 2 && sync_content == "hide_bmw_guidance = 0\nmap_shown = 0\n");
+        sync_result = false;
+        ok("sync: a folder that cannot be synced: the choice stays in effect, the file stays",
+           s.set_shown("1") && s.shown() && sync_calls == 3 &&
+               slurp(path) == "hide_bmw_guidance = 0\nmap_shown = 1\n");
+        ok("sync: a refused value syncs nothing", !s.set_shown("2") && sync_calls == 3);
+        sync_result = true;
+    }
+    {
+        sync_calls = 0;
+        StateSettings b("1", "1", "/nonexistent-dir/state.conf", record_sync);
+        ok("sync: a state file that cannot be written never reaches the folder sync",
+           b.set_hide("0") && !b.hide() && sync_calls == 0);
+    }
+    unlink(path.c_str());
+    {
+        StateSettings real("1", "1", path);   /* the real folder sync */
+        ok("sync: the real one on the state file's folder", real.set_shown("1") && slurp(path) == "map_shown = 1\n");
+        const std::string bare = "woc-state-test-" + std::to_string(getpid()) + ".conf";   /* the working folder */
+        StateSettings in_cwd("1", "1", bare);
+        ok("sync: the real one on a bare file name", in_cwd.set_shown("0") && slurp(bare) == "map_shown = 0\n");
+        unlink(bare.c_str());
+    }
     unlink(path.c_str());
     std::printf(failures ? "%d FAILED\n" : "all ok\n", failures);
     return failures ? 1 : 0;

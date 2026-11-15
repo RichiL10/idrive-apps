@@ -187,7 +187,9 @@ box** checkbox turns that off and on at once, with no restart: the app sends
 layer's `guide_hold` and keeps the choice in
 `/var/opt/waze-on-cluster/state/waze-on-cluster.state.conf` (`state_file`,
 written whole and renamed into place), which outlives restarts and updates
-and replaces `hide_bmw_guidance` (1) of the settings. The service makes the
+and replaces `hide_bmw_guidance` (1) of the settings once the app has set it:
+until then the settings' value applies at every start, so an edit of
+`waze-on-cluster.local.conf` takes effect. The service makes the
 folder, owned by `hmi_5000`, at each start. A value other than 0 or 1, or a
 state file that does not read, hides the box, with a warning in the log; the
 same file keeps the choice of **Show map** (below).
@@ -204,18 +206,27 @@ head-unit restart. The app sends `{"cmd":"map","shown":0|1}` on the control
 socket (a value other than 0 or 1 is refused with a warning). While the map is
 off its layer is hidden as when the stream is not live: the renderer lets the
 slot go, the stock map and BMW's turn box come back, the guide hold is released
-and nothing is sent to the renderer. Capture, decoding and the stream's
+and nothing new is queued for the renderer. A frame already being written to
+the renderer's socket when the switch is made still completes (at most one
+frame), then the layer is hidden: the client has no way to cancel a frame
+under way. Capture, decoding and the stream's
 tracking go on, so the map is back with the next frame, drawn from the newest
 one, when it is switched on. The status event is `idle` with the reason
 "Switched off in the app" and carries the choice as `map_shown` (0 or 1; the
 app takes a service without it as not switchable). The choice is kept in the
-same state file as the turn box's, which holds both keys and is rewritten
-whole for either change, and replaces `map_shown` (1) of the settings. It
+same state file as the turn box's. The file is rewritten whole (temporary
+file, sync, rename, then a sync of its folder) for either change, and holds a
+key only once the app has changed that key: operating Show map does not pin
+`hide_bmw_guidance`, nor the turn box checkbox `map_shown`, so the settings'
+value of a key the app never set keeps applying at every start. The app's
+choice replaces `map_shown` (1) of the settings. It
 survives a restart of the service and of the renderer: the map comes back up
 off and stays off until it is switched on. A value other than 0 or 1, or a
 state file that does not read, shows the map (and hides the box), with a warning
-in the log; a state file from a version before `map_shown` leaves the settings'
-value.
+in the log; a state file without a key (one from a version before `map_shown`
+has only `hide_bmw_guidance`) leaves the settings' value of that key. If the
+folder cannot be synced after the rename, the choice stays in effect and the
+log warns that it may not survive a power loss.
 
 Then connect the iPhone to CarPlay. Waze needs its server-side flag 1006 for
 the alternate display. The phone sends SPS, PPS and an IDR only at the start

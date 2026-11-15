@@ -117,13 +117,20 @@ Only the user feature is here: a switch that takes the map off the cluster and b
 change or head-unit restart.
 
 - Service: `{"cmd":"map","shown":0|1}`, `map_shown` in the conf and in the status; `MapFeed::set_shown` hides the layer
-  as when the stream is not live (slots released, stock map and BMW's turn box back, guide hold released, nothing sent)
-  while decoding and stream tracking go on; the newest frame goes before the layer is visible again.
-  Files: `src/map_feed.*`, `src/main.cpp`, `src/state_settings.*` (replaces `guide_setting.*`; one state file, both keys
-  written whole by temp file, fsync and rename; a bad or unreadable value is the safe one: map shown, turn box hidden).
+  as when the stream is not live (slots released, stock map and BMW's turn box back, guide hold released, nothing new
+  queued) while decoding and stream tracking go on; the newest frame goes before the layer is visible again.
+  Known limit: cluster-render's client cannot cancel a frame it is already writing, so a frame under way when the switch
+  is made still completes (at most one frame), then the layer is hidden. A cancel needs a change in cluster-render, not
+  made in this release.
+  Files: `src/map_feed.*`, `src/main.cpp`, `src/state_settings.*` (replaces `guide_setting.*`; one state file written
+  whole by temp file, fsync, rename and a fsync of the folder; a bad or unreadable value is the safe one: map shown,
+  turn box hidden). Each key is in the file only once the app changed it (or the file already held it), so operating
+  one switch does not freeze the other's value from `waze-on-cluster.local.conf`; a key the app never set follows the
+  conf at every start.
 - App: the Show map checkbox (`wocMapShown`, id 31), greyed without `map_shown` in the status or with no patch in effect;
   the map row reads `Cluster map: Off` while it is off. One new word, `Show map`, in all 32 locales.
-- Tests: `test/map_feed_test.cpp` (`map_switch`), `test/state_settings_test.cpp`, app `test_control.js`, `test_page.js`,
+- Tests: `test/map_feed_test.cpp` (`map_switch`), `test/state_settings_test.cpp` (per-key provenance, folder sync
+  through a test seam; the real fsync of a folder is not observable on the host), app `test_control.js`, `test_page.js`,
   `test_i18n.js`.
 - Not verified on a car or head unit. Across a service restart the choice is read from the state file; across a renderer
   restart the layer is made again hidden.

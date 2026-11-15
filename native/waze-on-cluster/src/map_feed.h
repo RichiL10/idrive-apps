@@ -21,7 +21,8 @@
  * The app can also switch the map off (set_shown): the layer is then hidden
  * exactly as when the stream is not live, whatever the stream does, while
  * frames are still taken and the stream still tracked, so the map is back
- * with the next frame when it is switched on. Nothing is sent while off.
+ * with the next frame when it is switched on. Nothing new is queued while
+ * off; a frame already being written to the renderer completes.
  *
  * Only what the renderer needs goes: a frame whose picture is the last one
  * again goes as a repeat (the client's), and nothing goes while the layer
@@ -110,7 +111,7 @@ public:
     void set_guide_hold(bool hold);
     /* Whether the map may show at all, from now on; on at the start. Off,
      * the layer is hidden at once (the renderer lets the slot go, the stock
-     * map and the turn box come back, nothing is sent) and the status is
+     * map and the turn box come back, nothing new is queued) and the status is
      * idle; frames and the stream are still tracked, so the newest frame
      * goes before the layer is visible again. */
     void set_shown(bool shown);
