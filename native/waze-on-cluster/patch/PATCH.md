@@ -4,7 +4,10 @@ Four reversible edits to `/usr/bin/carplay` let waze-on-cluster receive the
 CarPlay instrument-cluster map, at the size it displays, on a head unit coded
 `KI_KOMBI_VARIANT` 7. `carplay_patch.js` applies, verifies and reverts them;
 `patchd.js` runs it for the app and the install hooks, `woc-patch.sh` from a
-shell.
+shell. The script does not take patchd's remount lock or keep the running
+binary named: do not run it while the app is patching. When `/` does not go
+read-only again after it, it says so on stderr and exits non-zero (restart the
+head unit).
 
 ## Supported head units
 
@@ -805,7 +808,12 @@ follows aapd only on a unit that has it.
   `KI_KOMBI_VARIANT` 7, whose patch has run healthy on this car; the
   record of the first patch of such a build has `proven: false` and
   `trial: true`, and a revert of a patch that ran healthy records
-  `healthy: true`.
+  `healthy: true`. A record written by 0.8.9 or earlier is trusted as it
+  says: it has `proven: true` straight after the patch was applied, and
+  stays proven. A patch from those versions that never ran healthy is
+  therefore not put on trial; remove the patch and apply it again to get the
+  trial. Every write of the record uses its own temporary file, made new, so
+  the watcher and `woc-patch.sh` cannot rename each other's.
 - `/var/opt/waze-on-cluster/boot-recovery.json`, written whole: a
   temporary file, fsync'd, renamed over it, the folder fsync'd. A write
   that fails leaves the previous state as it was. It holds:
@@ -845,10 +853,13 @@ binary and, with no shutdown record, a `stat` of the two restart records,
 and nothing else; it reads the binary only to restore it. Before its decision
 the carplay step also copies the two restart records' text, when it finds any,
 into `/var/opt/waze-on-cluster/restart-records/` for Save logs (`keepRestartRecords`:
-each record read past 64 KiB, VIN-scrubbed, cut to 64 KiB, mode 0640 in a 2770
-folder of group `systemd-journal`, the last 5 boots kept). That copy decides
+each record read past 64 KiB, VIN-scrubbed, cut to 64 KiB, mode 0640 in a 2750
+folder of group `systemd-journal`: root writes, the group only reads; a name
+already there that is not a regular file of root's, not writable by the group,
+is replaced; the last 5 boots kept). That copy decides
 nothing, never follows a link, and when it fails the step logs a line and goes
-on.
+on. A folder of more than 200 entries (or too big to hold them, by its size)
+is not listed that boot: the step logs one line and keeps nothing.
 
 A start counts as failed only on evidence of a crash. The evidence is the
 restart record recmgr or crashhandler writes when it asks for a head-unit

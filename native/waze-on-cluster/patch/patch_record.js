@@ -47,13 +47,17 @@ function fsyncPath(p) {
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
+var seq = 0;
+
 /* Records target as it is now with fields ({patched, proven, ...}). Throws
- * when it cannot. */
+ * when it cannot. The temporary file is this write's own (pid and a count,
+ * made new): the watcher and woc-patch.sh write the record without a common
+ * lock, and must not rename each other's. */
 function write(target, fields) {
-    var st = fs.statSync(target), file = recordPath(target), tmp = file + '.tmp';
+    var st = fs.statSync(target), file = recordPath(target), tmp = file + '.' + process.pid + '.' + (++seq) + '.tmp';
     var rec = Object.assign({}, fields, { ino: st.ino, size: st.size, mtime: st.mtime.getTime() });
     try {
-        fs.writeFileSync(tmp, JSON.stringify(rec) + '\n', { mode: 0o644 });
+        fs.writeFileSync(tmp, JSON.stringify(rec) + '\n', { mode: 0o644, flag: 'wx' });
         fsyncPath(tmp);
         fs.renameSync(tmp, file);
     } catch (e) {

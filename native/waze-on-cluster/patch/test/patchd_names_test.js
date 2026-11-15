@@ -293,6 +293,48 @@ async function main() {
         ok('runs: the device in a maps line is major:minor of st.dev (0x801 is 08:01, not 08:02)', got && got[7] === true && got[8] === false, res.stdout + res.stderr);
     })();
 
+    /* ---- an unreadable process counts as running the file: a held name is kept, never removed on it ---- */
+    (function unreadableTest() {
+        var lockDir = path.join(dir, 'lockproc2'), file = path.join(dir, 'unreadable-binary'), link = path.join(dir, 'unreadable-link'), other = path.join(dir, 'unreadable-target');
+        fs.mkdirSync(lockDir);
+        fs.writeFileSync(file, 'x'); fs.linkSync(file, link); fs.writeFileSync(other, 'y');
+        var res = cp.spawnSync(process.execPath, ['-e', [
+            "var lock = require(" + JSON.stringify(path.join(__dirname, '..', 'remount_lock.js')) + "), fs = require('fs'), path = require('path');",
+            "var P = " + JSON.stringify(lockDir) + ", F = " + JSON.stringify(file) + ", L = " + JSON.stringify(link) + ", O = " + JSON.stringify(other) + ", st = fs.statSync(F), out = [];",
+            /* a process that is gone (no maps: ENOENT) does not run it */
+            "fs.mkdirSync(path.join(P, '77'));",
+            "out.push(lock.runs(st), lock.holds(L, O));",
+            /* maps cannot be read (a folder here: EISDIR): it might */
+            "fs.mkdirSync(path.join(P, '77', 'maps'));",
+            "out.push(lock.runs(st), lock.inUse(F), lock.holds(L, O));",
+            /* not as proof of health */
+            "out.push(lock.runs(st, false), lock.inUse(F, false));",
+            /* the target's own file is not a held name */
+            "out.push(lock.holds(F, F));",
+            "console.log(JSON.stringify(out));",
+        ].join('\n')], { env: Object.assign({}, process.env, { WOC_PROC: lockDir }), encoding: 'utf8' });
+        var got = null;
+        try { got = JSON.parse(res.stdout); } catch (e) {}
+        ok('runs: a process that is gone (nothing to read) does not run it, and its name is not held', got && got[0] === false && got[1] === false, res.stdout + res.stderr);
+        ok('runs: a process whose maps cannot be read counts as running it: the name is held, never removed', got && got[2] === true && got[3] === true && got[4] === true, res.stdout + res.stderr);
+        ok('runs: ... except for a caller that takes "runs" as proof of health', got && got[5] === false && got[6] === false, res.stdout + res.stderr);
+        ok('holds: the target\'s own file is no held name', got && got[7] === false, res.stdout + res.stderr);
+    })();
+
+    /* patchd's own start removes a name nothing runs, and keeps it while a process cannot be read */
+    for (var unreadable of [false, true]) {
+        t = unit();
+        var old = path.join(t.d, 'usr', 'old-carplay');
+        fs.writeFileSync(old, 'an older carplay');
+        fs.linkSync(old, t.tgt + '.woc-running');
+        if (unreadable) { fs.mkdirSync(path.join(t.proc, '9999')); fs.mkdirSync(path.join(t.proc, '9999', 'maps')); }
+        await start(t);
+        await sleep(300);
+        ok('start: a name no process runs is removed' + (unreadable ? ', but not while a process cannot be read' : ''),
+            fs.existsSync(t.tgt + '.woc-running') === unreadable, names(t, t.tgt).join());
+        t.child.kill('SIGKILL');
+    }
+
     /* ---- a change written while the service cannot be restarted: the running file stays named ---- */
     t = unit();
     await start(t);
