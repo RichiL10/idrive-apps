@@ -163,6 +163,22 @@ function edit123Only() {
     return b;   /* resolution immediates left stock */
 }
 
+/* A crash restart cut across a revert: with CRASH_REPLACED, carplay starts
+ * from the file the revert replaces, as the patcher starts; with
+ * CRASH_WRITTEN, from the file it wrote, as the patcher ends (before patchd
+ * puts its running file back). */
+var CRASH_REPLACED = path.join(dir, 'crash-replaced'), CRASH_WRITTEN = path.join(dir, 'crash-written');
+var CRASH_HOOK = path.join(dir, 'crash-hook.js');
+fs.writeFileSync(CRASH_HOOK, [
+    "var fs = require('fs'), cp = require('child_process'), path = require('path');",
+    "var P = " + JSON.stringify(PROC) + ", T = " + JSON.stringify(TGT) + ";",
+    "function start() { cp.execFileSync('rm', ['-rf', path.join(P, '4242')]); fs.mkdirSync(path.join(P, '4242')); fs.linkSync(T, path.join(P, '4242', 'exe')); }",
+    "function once(f) { if (!fs.existsSync(f)) return false; fs.unlinkSync(f); return true; }",
+    "if (/carplay_patch\\.js$/.test(process.argv[1] || '') && process.argv[2] === 'revert') {",
+    "    if (once(" + JSON.stringify(CRASH_REPLACED) + ")) start();",
+    "    process.on('exit', function () { if (once(" + JSON.stringify(CRASH_WRITTEN) + ")) start(); });",
+    "}",
+].join('\n') + '\n');
 var SOCK = path.join(dir, 'sock', 'patch.sock');
 var patchd = cp.spawn(process.execPath, [PATCHD], {
     env: Object.assign({}, process.env, {
@@ -184,6 +200,7 @@ var patchd = cp.spawn(process.execPath, [PATCHD], {
         WOC_STATE_DIR: path.join(dir, 'var'),
         WOC_REMOUNT_LOCK: path.join(dir, 'sock', 'remount.lock'),
         WOC_PROC: PROC,
+        NODE_OPTIONS: '--require=' + CRASH_HOOK,
     }),
     stdio: ['ignore', 'ignore', 'inherit'],
 });
@@ -371,6 +388,32 @@ async function main() {
         !fs.existsSync(path.join(dir, 'sock', 'activation-pending')), JSON.stringify(r));
     ok('undo: no systemctl call', newCalls().length === 0);
 
+    /* Remove patch of a waiting patch, cut across by a crash restart. Every
+     * file carplay runs keeps a name, so / goes read-only again, and the
+     * state is the true one. */
+    function held() { return ['', '.1', '.2'].filter(function (s) { return fs.existsSync(TGT + '.woc-running' + s); }); }
+    function exeIno() { return fs.statSync(path.join(PROC, '4242', 'exe')).ino; }
+    function freshStart() { fs.writeFileSync(TGT, SRCBUF); ['', '.1', '.2'].forEach(function (s) { try { fs.unlinkSync(TGT + '.woc-running' + s); } catch (e) {} }); nextStart(); }
+    setRecmgr(['HBAdasMgu'], true);
+    [TGT + '.woc-orig', TGT + '.woc-orig.json'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
+    freshStart();
+    r = await op({ cmd: 'apply', panel: 'high', mode: 'avb' });
+    var patchedIno = fs.statSync(TGT).ino;
+    fs.writeFileSync(CRASH_REPLACED, '');
+    r = await session({ cmd: 'revert' }, function (m) { return m.state !== 'busy' && m.reason !== 'reverting'; });
+    ok('crash restart from the waiting patch during its removal: the removal waits, the patch kept linked, / read-only', r.pending === 'revert' && r.carplay === 'deferred' &&
+        r.state !== 'error' && fs.readFileSync(TGT).equals(SRCBUF) && exeIno() === patchedIno && fs.statSync(TGT + '.woc-running').ino === patchedIno &&
+        held().length === 1 && /\bro\b/.test(fs.readFileSync(MOUNTS, 'utf8')), JSON.stringify(r) + ' ' + held().join(','));
+    freshStart();
+    r = await op({ cmd: 'apply', panel: 'high', mode: 'avb' });
+    fs.writeFileSync(CRASH_WRITTEN, '');
+    r = await session({ cmd: 'revert' }, function (m) { return m.state !== 'busy' && m.reason !== 'reverting'; });
+    ok('crash restart from the reverted file before the put-back: it stays linked, nothing waits, / read-only', r.state === 'original' && !r.pending &&
+        !r.carplay && fs.readFileSync(TGT).equals(SRCBUF) && fs.readFileSync(path.join(PROC, '4242', 'exe')).equals(SRCBUF) &&
+        fs.statSync(TGT + '.woc-running').ino === exeIno() && fs.statSync(TGT).ino !== exeIno() && held().length === 1 &&
+        !fs.existsSync(path.join(dir, 'sock', 'activation-pending')) && /\bro\b/.test(fs.readFileSync(MOUNTS, 'utf8')), JSON.stringify(r) + ' ' + held().join(','));
+    ok('crash restarts during a removal: no systemctl call', newCalls().length === 0);
+    freshStart();
     /* CarPlay's Remove patch button on what an older release patched where the locator now
      * refuses a site (with its backup and record): the original back, carplay
      * restarted. */

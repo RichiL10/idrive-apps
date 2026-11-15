@@ -254,3 +254,21 @@ Ported from upstream d67ea05, dcd61a7, 3f6047e, 5de507e (waze-on-cluster 0.9.8, 
   collect-logs.sh is another feature and is not here.
 - Not verified on a car: that the firmware's `sqlite3` accepts the `file:...?mode=ro` form and reads the database while
   recmgr has it open in WAL mode; the table and column names (`Crash`, `Appl`, `CrashKey`, `AppID`) are upstream's.
+
+## 0.8.10, lane H: every running file keeps a name (port of upstream waze-on-cluster 0.9.2, dd89d64 and a89bbf0)
+
+Ported to our `patchd.js` / `remount_lock.js` (patch side only), with S1..S10 untouched:
+
+- `remount_lock.js` gains `runs(st)` (a process runs an inode when its `exe` is it or `/proc/<pid>/maps` maps it); `inUse` uses it. Acquire, break and guard rules are unchanged (S2).
+- `patchd.js`: `heldNames` (`.woc-running`, `.1`, `.2`), `holdTarget`, `settleHeld`, `staleHeld`, `sameStatAt`, `wroteAny`, `runsStale`. A change links the file it replaces under `.1` when `.woc-running` already names another running file, and the file it wrote under a free extra name while the running file is put back; afterwards each running file keeps a name, the rest go. `dropUnusedRunning` and the removal's `removeWhenUnused` cover all three names.
+- A patcher that fails after writing leaves the change waiting only when a process runs a stale file (binary other than the one on disk; for aapd also a start that read aapd.conf before it changed). With no name free for the written file the running file is not put back over it.
+- Tests: `patch/test/patchd_names_test.js` (new, 31 checks, no firmware needed): the three failure cases, the put-back cases, restart path, removal hand-over, Android Auto with `aa_enabled = 1`, `runs` with maps, CarPlay without a backup; crash-restart cases also in `patchd_patch_test.js` (needs CARPLAY_BIN, skipped here).
+
+Differences from upstream, on purpose:
+
+- Our `patchWith` keeps the order restart first, put-back only when no restart is allowed (upstream puts back first). The put-back logic therefore applies in that branch only. Upstream's `extraRun` (the `extra` hash kept in the pending marker) is an earlier upstream change we do not have; a waiting change's extra files are compared with their state at the start of this change, as in our base.
+- When the file a change replaces cannot be named (`.1` and `.2` hold running files) nothing is written and `/` stays read-only; upstream goes on. This follows the F5 rule: no write without a verified name.
+- `holdTarget` checks that the new name is the target's inode.
+- "Undo only what is ours" (dd89d64 in `aapd_patch.js`, `aapd_conf.js`, `carplay_patch.js`) limits upstream's rebuild of a proven file without a backup, which our base does not have (`stockOriginal` came with upstream 0.9.1). Without a backup our revert writes nothing, so the rule already holds; a test shows it for CarPlay. Not ported: the rebuild itself, the `aapd_test.js` / `undo_test.js` hunks that exercise it.
+- `recovery.js`: upstream 0.9.2 changes it only for aapd's stock hashes (aapd locator of 0.9.1); not ported. Recovery's own `.woc-running` handling is unchanged and does not use `.1` / `.2`.
+- Not run: nothing on a car, no firmware test (`patchd_patch_test.js`, `aapd_test.js`, `undo_test.js` skip without the binaries).
