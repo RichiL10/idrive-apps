@@ -21,7 +21,8 @@
  */
 'use strict';
 
-require('./head_unit_env.js');   /* a HIGH head unit for every patcher and patchd this runs */
+var car = require('./head_unit_env.js');   /* a HIGH head unit, coded KI_KOMBI_VARIANT 7, for every patcher and patchd this runs */
+var record = require('../patch_record.js');
 
 var fs = require('fs');
 var os = require('os');
@@ -392,6 +393,44 @@ async function main() {
         fs.writeFileSync(TGT, SRCBUF);
         [TGT + '.woc-orig', TGT + '.woc-orig.json'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
     }
+
+    /* CarPlay's Patch button on a car coded otherwise than KI_KOMBI_VARIANT
+     * 7, or whose coding cannot be read: patchd reports the conflict as
+     * Android Auto does and asks for the user's confirmation (S3): a plain
+     * apply is refused, nothing written; the confirmed one patches, and the
+     * patch is recorded unproven (boot recovery restores it after one failed
+     * start), on trial when the coding cannot be read. On a variant-7 car the
+     * first patch is on trial and needs no confirmation. */
+    setRecmgr(['HBAdasMgu'], true);
+    var cases = [[9, undefined, 'not supported on this car (KI_KOMBI_VARIANT 9)'], [7, 0x0b, 'cluster coding unreadable'],
+        [null, undefined, 'cluster coding unreadable'], [7, undefined, null]];
+    for (var q = 0; q < cases.length; q++) {
+        var cq = cases[q], what = cq[0] === null ? 'no coding' : 'coding ' + cq[0] + (cq[1] !== undefined ? ' flags 0x' + cq[1].toString(16) : '');
+        [TGT + '.woc-orig', TGT + '.woc-orig.json', record.recordPath(TGT)].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
+        freshStart();
+        car.coding(cq[0], cq[1]);
+        r = await status();
+        ok(what + ': patchd reports ' + (cq[2] || 'no conflict'), r.state === 'original' && (r.conflict || null) === cq[2], JSON.stringify(r));
+        if (cq[2]) {
+            ok(what + ': patchd asks for the confirmation', r.unproven === true, JSON.stringify(r));
+            r = await op({ cmd: 'apply', panel: 'high', mode: 'avb' });
+            ok(what + ': a plain apply is refused, nothing written', r.state === 'error' && /needs your confirmation/.test(r.reason || '') &&
+                !fs.existsSync(TGT + '.woc-orig') && record.current(TGT) === null, JSON.stringify(r));
+        }
+        r = await op(cq[2] ? { cmd: 'apply', panel: 'high', mode: 'avb', unproven: true } : { cmd: 'apply', panel: 'high', mode: 'avb' });
+        var rc = record.current(TGT);
+        /* on trial unless the coding reads another variant */
+        var onTrial = cq[0] !== 9;
+        ok(what + ': CarPlay\'s Patch button (confirmed) patches it, recorded ' + (onTrial ? 'on trial' : 'unproven'), r.carplay === 'deferred' && slot() === 'bcf2f7ff' && !!rc &&
+            rc.patched === true && rc.proven === false && (rc.trial === true) === onTrial, JSON.stringify([r, rc]));
+        nextStart();
+        r = await status();
+        ok(what + ': after the start it reads patched, the conflict still named', r.state === 'patched' && (r.conflict || null) === cq[2], JSON.stringify(r));
+        car.coding(7);
+    }
+    [TGT + '.woc-orig', TGT + '.woc-orig.json', record.recordPath(TGT)].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
+    freshStart();
+    newCalls();
 
     /* reboot with a pending activation: one head-unit restart. A second
      * request is refused while that one is in progress; carplay is never killed

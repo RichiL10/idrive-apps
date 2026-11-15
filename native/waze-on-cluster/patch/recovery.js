@@ -18,13 +18,15 @@
  *   recovery.js        waze-on-cluster-recovery.service: watches both for
  *                      the rest of the boot, records each crash the moment
  *                      it is seen and a healthy start once the service has
- *                      run HEALTHY_MS. Where recmgr loaded a service's entry
+ *                      run HEALTHY_MS. A run that healthy, in a clean boot, of
+ *                      a patch on trial (patch_record.js) records the patch
+ *                      proven. Where recmgr loaded a service's entry
  *                      it also restores at the threshold and starts the
  *                      service again, for as long as the head unit stays up.
  *
  * The boot step decides from small files only: the backup's presence, the
  * patch record (patch_record.js: whether the binary about to start is our
- * patch, and of a proven build), the service's state file, the previous
+ * patch, and whether it counts as proven), the service's state file, the previous
  * boot's shutdown mark and, without one, the restart records of recmgr and
  * crashhandler. It reads a binary only to restore it.
  *
@@ -40,7 +42,8 @@
  * an orderly one (a switch-off, a restart asked for) or one the service
  * never ran in keeps it, and two boots in a row with no record at all
  * count one. A proven patch is restored at 2 failed boots or crashes with
- * no healthy boot between, an unproven one at 1 (THRESHOLD).
+ * no healthy boot between, an unproven one, which includes a first patch on
+ * trial, at 1 (THRESHOLD).
  *
  * shutdown_mark.sh (a var-opt-ro.service drop-in) records at each NSM
  * shutdown, before /var/opt goes read-only, whether each service was
@@ -192,10 +195,11 @@ var PROC = process.env.WOC_PROC || '/proc';
 var boot = require('./boot_id.js');
 var SYSTEMCTL = process.env.WOC_SYSTEMCTL || 'systemctl';
 
-/* Failed boots or crashes before a restore: a build outside the patcher's
- * proven list is restored at its first, a proven one at its second; a
- * binary of the backup's build the record does not describe counts as
- * proven. */
+/* Failed boots or crashes before a restore: a patch the record does not
+ * call proven (a build outside the patcher's proven list, a car without the
+ * proven coding, or a first patch on trial) is restored at its first, a
+ * proven one at its second; a binary of the backup's build the record does
+ * not describe counts as proven. */
 var THRESHOLD = { proven: 2, unknown: 2, unproven: 1 };
 /* A start is healthy once the service has run this long without a break:
  * past the head unit's own start-up (its services up and connected) and a
@@ -209,6 +213,9 @@ var TICK_MS = parseInt(process.env.WOC_RECOVERY_TICK_MS, 10) || 1000;
 var PROBE_MS = 5000;
 var ALIVE_PROBE_MS = 60000;
 var START_DELAYS_MS = [5000, 15000, 60000];
+/* A patch on trial that could not be recorded proven (the remount lock
+ * held, a remount that failed) is tried again this much later. */
+var PROVE_RETRY_MS = 60000;
 /* How far a file's modification time may stray from the clock: file
  * systems stamp with a coarser one. */
 var FS_CLOCK_MS = 1000;
@@ -688,6 +695,35 @@ function abandonRestore(cb) {
     putBack();
 }
 
+/* t's patch on trial recorded proven (patch_record.js): under the shared
+ * remount lock, yielding to patchd (never waited for), with / read-write
+ * only for the record's write and read-only again after (a failure to put
+ * it back sets the ro-failed guard like any window). Under the lock, so
+ * patchd cannot change either meanwhile, the record must still describe the
+ * target on trial and runsTarget() say a process runs the target's own file;
+ * else nothing is remounted or written. The target itself is not touched.
+ * cb(err, written, roErr): err when nothing was written and a later try may
+ * write it; roErr when / stayed read-write after the window (the record may
+ * be written; the guard stands until / is read-only). */
+function proveRecord(t, runsTarget, cb) {
+    takeLock(0, function (err) {
+        if (err) { cb(err); return; }
+        function onTrial() { var rec = record.current(t.target); return !!rec && rec.patched === true && rec.trial === true; }
+        if (!onTrial() || !runsTarget()) { lock.release(); cb(null, false); return; }
+        writing = true;
+        remount(true, function (mErr) {
+            if (mErr) { rwFailed(mErr, function (err2, roErr) { cb(endWindow(err2, roErr)); }); return; }
+            var wErr = null, wrote = false;
+            try {
+                if (onTrial()) { record.write(t.target, { patched: true, proven: true }); wrote = true; }
+            } catch (e) { wErr = e; }
+            remountRo(RO_TRIES, function (roErr) {
+                cb(endWindow(wErr ? new Error('writing: ' + wErr.message) : null, roErr), wrote, roErr);
+            });
+        });
+    });
+}
+
 /* ---- the service's run ---- */
 
 /* t.unit's current run: its id (InvocationID, else the main process's start
@@ -750,6 +786,10 @@ function Recovery(opts) {
     this.bootId = opts.bootId || boot.bootId();
     this._restore = opts.restore || function (fails, cb) { restoreTarget(t, false, fails, cb); };
     this._repairModes = opts.repairModes || function (cb) { repairModes(t, 0, cb); };
+    /* Whether a process runs the target's own file: the run is of the file
+     * the record describes, not of one a change replaced. */
+    var runsTarget = this._runsTarget = opts.runsTarget || function () { return lock.inUse(t.target); };
+    this._prove = opts.prove || function (cb) { proveRecord(t, runsTarget, cb); };
     this._probe = opts.probe || function (cb) { probeTarget(t, cb); };
     this._systemState = opts.systemState || realSystemState;
     this._start = opts.start || function (cb) { startTarget(t, cb); };
@@ -769,6 +809,7 @@ function Recovery(opts) {
     this._activeSince = null;   /* start of the current continuous-active run */
     this._settled = null;       /* the run whose healthy minute needs nothing more */
     this._startAt = null;       /* when the scheduled start is due */
+    this._proveAt = -Infinity;  /* when a patch on trial is next recorded proven */
     /* This boot's ended run, crashes and starts, also kept here so a state
      * file that cannot be written neither repeats a crash nor lifts the start
      * limit; the larger of memory and disk counts. */
@@ -1066,20 +1107,55 @@ Recovery.prototype._ran = function () {
     if (this._armed(st) && !st.arm.ran) { st.arm.ran = true; this._save(st); }
 };
 
-/* A run's healthy minute confirms this boot's arm once. Only the watcher
+/* A run's healthy minute confirms this boot's arm once, and records a
+ * patch on trial that the run runs proven (_trial). Only the watcher
  * changes the arm once the run is up, so after the state was read (or the
- * confirmation saved) the run needs no more reads. */
+ * confirmation saved) and the trial settled the run needs no more reads. */
 Recovery.prototype._healthy = function (now) {
     if (this._activeSince === null || now - this._activeSince < this.healthyMs || this._settled === this._run) return 'watch';
-    var st = this._load();
+    var st = this._load(), action = 'watch', settled = st.read;
     if (this._armed(st) && !st.arm.confirmed) {
         st.arm.confirmed = true;
-        if (this._save(st)) this._settled = this._run;
+        settled = this._save(st);
         this._log(this.target.name + ' healthy');
-        return 'confirmed';
+        action = 'confirmed';
     }
-    if (st.read) this._settled = this._run;
-    return 'watch';
+    if (this._trial(now, st)) settled = false;
+    if (settled) this._settled = this._run;
+    return action;
+};
+
+/* A patch on trial (its record's trial: its build not yet run healthy on
+ * this car) that this healthy run runs from the target's own file is
+ * recorded proven, so from then on it is restored at the proven threshold,
+ * but only in a clean boot: armed this boot (st, the state as read), no
+ * crash of the service in it, and no failed start or crash counted before
+ * it. A trial that crashed stays on trial. A stop waits for the write
+ * (whenRestored). true while the record is being written or is to be tried
+ * again; false when there is nothing to do: no trial, a boot that is not
+ * clean, or the run is of another file than the target's (a change waits
+ * for the next start). */
+Recovery.prototype._trial = function (now, st) {
+    var self = this, t = this.target, rec = record.current(t.target);
+    if (!rec || !rec.patched || !rec.trial) return false;
+    if (!this._armed(st) || st.fails || st.arm.crashes || this._crashes) {
+        this._log(t.name + ' ran its patch healthy, but this boot is not clean (' + (!this._armed(st) ? 'not armed' : 'failed starts and crashes ' +
+            (st.fails + Math.max(st.arm.crashes, this._crashes))) + '): the patch stays on trial');
+        return false;
+    }
+    if (now < this._proveAt) return true;
+    if (!this._runsTarget()) return false;
+    this.restoring = true;
+    this._prove(function (err, wrote, roErr) {
+        self.restoring = false;
+        if (err) {
+            self._proveAt = self._now() + PROVE_RETRY_MS;
+            self._log(t.name + ' ran its patch healthy; recording it proven failed: ' + err.message + '; trying again in ' + PROVE_RETRY_MS / 1000 + ' s');
+        } else if (wrote) self._log(t.name + ' ran its patch healthy: the patch is recorded proven');
+        if (roErr) self._log(roErr.message + ': / stays read-write, and nothing writes it, until it is read-only again');
+        self._restored.splice(0).forEach(function (f) { f(); });
+    });
+    return true;
 };
 
 /* A crash: recorded at once (the next moment can be a reboot), and a patch
@@ -1204,6 +1280,7 @@ Recovery.prototype.onShutdown = function (cb) {
 module.exports = {
     Recovery: Recovery, tally: tally, parseShow: parseShow, targets: targets, TARGETS: TARGETS, THRESHOLD: THRESHOLD,
     RESTORE_BOUND_MS: RESTORE_BOUND_MS, BOOT_BOUND_MS: BOOT_BOUND_MS, BOOT_EXIT_MS: BOOT_EXIT_MS, restoreTarget: restoreTarget, repairModes: repairModes,
+    proveRecord: proveRecord, PROVE_RETRY_MS: PROVE_RETRY_MS,
     realSystemState: realSystemState, failedReason: failedReason, roGuard: roGuard,
 };
 

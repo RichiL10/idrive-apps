@@ -207,3 +207,32 @@ Not covered: `MFXInitEx` failing with a hang / lost device in a GPU-copy session
 - R3-3 (fix5-p, not fixed): while a LIVE patchd owns the guard and the lock (its last `remount,ro` failed), the recovery watcher cannot take that lock, so a CarPlay start that is due after a crash waits (`_startAt` stays due, retried every tick). This needs a `remount,ro` that keeps failing and a CarPlay crash in the same window, so it is rare. It clears when a patchd change heals the guard, when `/` becomes read-only again (the next patchd status read or watcher tick sees it), or at a reboot; it can last until then. Service start is not a root write, but the lock is the only fence there is, and a second fence would add a state.
 - R3-2 (fix5-p, `remount_lock.js`): the lock records the holder's start time (field 22 of `/proc/<pid>/stat`, read once at acquire) after the pid and time. `holderGone` treats an owner whose pid runs but whose start time differs, or cannot be read (any pid but this process's), as dead, so a recycled pid no longer keeps a dead guard owner's lock; `breakable` and `healRo` then break it. The guard marker carries no start time of its own: the owner exemption only applies to a lock whose pid equals the marker's, and that lock carries it. A lock without the start time (older format, or unreadable at acquire) is judged by the pid alone, as before. Test: `remount_lock_test.js` (a fake `/proc` through `WOC_LOCK_PROC`).
 - R3-4 (fix5-p, `patchd.js readState`): the plain-apply precheck reads a FRESH status (`readState(cb, true)` waits for a read in flight and reads again, never the cache of an earlier or initial read) and accepts it only for `known: NO` or `known: yes` with an explicit `proven: yes|no`; output cut after `known: yes` is unreadable and the apply is refused before the remount. Other readers of `readState` are unchanged. The tests use `WOC_TEST_PATCHER` (only with `WOC_TEST`), a fake patcher whose status is cut and, in a second case, slow.
+
+
+
+## 0.8.10, lane T: CarPlay's patch only on a variant-7 car, and a first patch on trial
+
+Ported from upstream 5ea43f4 and 500d75d (waze-on-cluster 0.9.6), adapted to S1..S10. Nothing ran on a car.
+
+What it does:
+- `carplay_patch.js` reads the cluster coding (`aapd_patch.js readCoding`, the same reader Android Auto uses; only `/dev/shm/rawcodingdata` is read, never aapd or aapd.conf). `status` prints `coding:`. `apply` on a coding that is not KI_KOMBI_VARIANT 7, or cannot be read, is refused without `--unproven`. `revert` never looks at the coding.
+- `patchd.js` reports such a car as upstream's Android Auto does ("not supported on this car (KI_KOMBI_VARIANT n)", "cluster coding unreadable") and sets `unproven: true`. S3 stays: a plain apply is refused before anything is remounted ("needs your confirmation"); only `{"unproven": true}` goes through. `patchd.js activate` (the install, and HIGH F's one re-apply) writes nothing on such a car and reports the conflict.
+- The first patch of a proven build is recorded `proven: false, trial: true`. Boot recovery restores it after ONE failed start. When carplay has run the target's own file for 60 s in a clean boot, the watcher records it proven (one write window, `/` read-only again after). A patch recorded proven without trial (an earlier release's, or the watcher's) stays proven across applies; its revert records `healthy: true`, so the next apply of that build is proven at once.
+- On a car coded otherwise than 7, an install puts the record of an earlier release's patch that has not started yet on trial (carplay's bytes are not touched).
+
+What differs from upstream:
+- S3: upstream's Patch button applies a non-7 car after `--unproven` from the app; ours is the same, but a plain apply is also refused in patchd before the remount, and the status carries `unproven`, so the app's confirm step (S10) asks. When the build is unproven AND the coding is not 7, one confirmation covers both and the refusal text names both (`BOTH_REASON`).
+- S4/S6/S1/S2: the watcher's proven-write takes the remount lock without waiting (`takeLock(0)`, S2), never writes the target (S1 untouched), never looks at aapd (S6, tested by a file-access spy), and a patch marked failed (S4) is never proven.
+- `WOC_TEST_PROVEN_BUILD` (only with `WOC_TEST=1`) lists a synthetic build as proven, so `patchd_trial_test.js` runs without firmware. Added to the Makefile test list.
+- No app change in this lane: the app's confirm step already keys on the status field `unproven`.
+
+Record state, failed starts needed, action (`THRESHOLD`, `recovery.js`):
+
+| patch record | failed starts or crashes before the restore | action |
+|---|---|---|
+| `trial: true` (first patch of a proven build on a variant-7 car, or a proven build patched while the coding cannot be read) | 1 | restored; a clean 60 s run records it proven |
+| `proven: true`, no trial (ran healthy, or an earlier release's) | 2 | restored |
+| `proven: false` (build outside the proven list, or a car not coded 7) | 1 | restored; never becomes proven |
+| a patch of the backup's build the record does not describe | 2 | restored |
+| no usable backup and crashing (any of the above) | the same count | persistent failed mark (S4), binary left as it is |
+| a boot with a failed start or crash before the healthy run | none | a trial stays a trial |

@@ -20,10 +20,12 @@
  *   app -> patchd  {"cmd":"status"}
  *                  {"cmd":"apply","panel":"high"|"mid","mode":"fifo"|"udp"|"avb","unproven":true?}
  *                    unproven:true only after the user confirmed patching a
- *                    carplay build outside the proven list (status
- *                    "unproven"); without it the first edit of such a build
- *                    is refused with the reason UNPROVEN_REASON, nothing
- *                    changed (S3). An apply or revert that cannot take the
+ *                    carplay build outside the proven list, or on a car whose
+ *                    cluster coding is not KI_KOMBI_VARIANT 7 or cannot be
+ *                    read (status "unproven"); without it the first edit of
+ *                    such a build, and any edit on such a car, is refused
+ *                    with the reason UNPROVEN_REASON, CODING_REASON or both,
+ *                    nothing changed (S3). An apply or revert that cannot take the
  *                    shared remount lock within 15 s is refused (state
  *                    error), never written without it.
  *                    all modes apply the variant gate + self-start; they differ
@@ -62,8 +64,11 @@
  *                    pending: apply | revert, while a written change waits for
  *                    the next head-unit start (carplay is then deferred)
  *                    unproven: true when the carplay build is outside the
- *                    proven list and not patched yet: Enable map needs the
- *                    user's confirmation, sent as apply's unproven:true
+ *                    proven list and not patched yet, or the cluster coding
+ *                    is not the proven one: Enable map needs the user's
+ *                    confirmation, sent as apply's unproven:true
+ *                    coding: the cluster's KI_KOMBI_VARIANT, null when the
+ *                    coding cannot be read
  *                    failed: text, only while the binary is not the original:
  *                    boot recovery marked the patch failed (carplay crashed
  *                    with it and no backup can restore it; recovery.js)
@@ -87,8 +92,11 @@
  *                    supported on this car (head unit: ...)"; a binary the
  *                    patcher cannot patch, one something else modified, a
  *                    build outside the patcher's proven list that CarPlay's
- *                    Patch button has not patched yet, a carplay.service
- *                    that starts another program)
+ *                    Patch button has not patched yet, a cluster coding
+ *                    other than KI_KOMBI_VARIANT 7: "not supported on this
+ *                    car (KI_KOMBI_VARIANT n)", or "cluster coding
+ *                    unreadable", a carplay.service that starts another
+ *                    program)
  *                  {"ev":"refused","cmd":...,"reason":...}   to the asker: a command
  *                                   not taken (another operation runs, the
  *                                   spacing between changes, a bad value, an
@@ -100,7 +108,10 @@
  *
  *   patchd.js activate     applies what CarPlay's Patch button applies to an original or
  *                          an older patch of ours, unless the user reverted
- *                          it or a conflict stands; writes only, never stops
+ *                          it or a conflict stands (a car not coded
+ *                          KI_KOMBI_VARIANT 7, or whose coding cannot be read,
+ *                          is one: carplay is left as it is, and a patch of an
+ *                          earlier release waiting for its start goes on trial); writes only, never stops
  *                          or restarts carplay: the change waits for the next
  *                          head-unit start (pending apply). Once per unit, on
  *                          HIGH F, it also applies it to the original our
@@ -193,6 +204,10 @@ var LOCK_BUSY_REASON = 'another change to / is running (a boot-recovery restore 
  * its confirm step on the status field `unproven`; this text is for a client
  * that sent a plain apply anyway. Keep "needs your confirmation". */
 var UNPROVEN_REASON = 'untested carplay build: Enable map needs your confirmation; nothing changed';
+/* The same for a car whose cluster coding is not KI_KOMBI_VARIANT 7 or cannot be read. */
+var CODING_REASON = 'cluster coding is not the proven one: Enable map needs your confirmation; nothing changed';
+/* Both at once: one confirmation covers both, so the text names both. */
+var BOTH_REASON = 'untested carplay build and cluster coding is not the proven one: Enable map needs your confirmation; nothing changed';
 
 var clients = [];
 var logLines = [];
@@ -386,7 +401,7 @@ function readState(cb, fresh) {
         return;
     }
     statusInFlight = true;
-    cp.execFile(process.execPath, [PATCHER, 'status', '--target', TARGET], { timeout: tmo(15000) }, function (err, out) {
+    cp.execFile(process.execPath, [PATCHER, 'status', '--target', TARGET, '--coding', CODING], { timeout: tmo(15000) }, function (err, out) {
         statusInFlight = false;
         var text = (out || '') + '';
         var variant = /variant:\s+PATCHED -> IC_(HIGH|MID)/.exec(text);
@@ -406,6 +421,7 @@ function readState(cb, fresh) {
         var proven = !/proven:\s+no/.test(text);
         var restorable = /^restorable:\s+yes$/m.test(text);
         var backup = /backup:\s+(\S+)/.exec(text);
+        var coding = /^coding:\s+KI_KOMBI_VARIANT (\d+)$/m.exec(text);
         var hasBackup = !!backup && backup[1] !== 'none';
         /* "patched" requires every edit: the variant gate, a known sink
          * (redirected to this tool, or stock in avb mode), self-start, and —
@@ -444,15 +460,18 @@ function readState(cb, fresh) {
          * site not found, or one it does not recognise), one something else
          * modified (no backup of ours, not the pristine build), a build
          * outside the proven list that CarPlay's Patch button has not
-         * patched (no backup of ours), or another program started as
-         * carplay. */
+         * patched (no backup of ours), a cluster coding other than the
+         * proven one or one that cannot be read (Android Auto's words), or
+         * another program started as carplay. */
         var hu = headUnit.refused();
-        var conflict = hu ? notSupported(hu)
+        var blocked = hu ? notSupported(hu)
             : err && !text ? 'carplay status unreadable: ' + err.message
             : !known ? 'not patchable' + (unknownWhy ? ': ' + unknownWhy[1] : '')
             : !hasBackup && !pristine ? 'carplay was modified by something else'
             : !hasBackup && !proven ? 'untested carplay build'
-            : foreignStart(CP);
+            : null;
+        var codingWhy = codingConflict(coding), foreign = blocked || codingWhy ? null : foreignStart(CP);
+        var conflict = blocked || codingWhy || foreign;
         /* A change waiting for the next head-unit start: the running carplay is
          * not the binary on disk, so neither state applies to it yet. */
         var carplay = null, binary = state;
@@ -460,10 +479,13 @@ function readState(cb, fresh) {
         if (pending) { state = 'unknown'; mode = null; reason = pending.reason; carplay = 'deferred'; }
         cachedState = { state: state, panel: variant ? variant[1].toLowerCase() : null, mode: mode, res: res, safe: safe, reason: reason, carplay: carplay,
                         pending: pending ? pending.action || 'apply' : null, pendingBy: pending ? pending.by : null,
-                        conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable, proven: proven, recovered: recovered(TARGET),
-                        /* the first edit of this build needs the user's confirmation (S3);
-                         * a modified build is refused by the patcher anyway (a conflict) */
-                        unproven: known && !hasBackup && pristine && !proven,
+                        conflict: conflict, coding: coding ? Number(coding[1]) : null, binary: binary, known: known, backup: hasBackup, restorable: restorable, proven: proven, recovered: recovered(TARGET),
+                        /* the first edit of this build, and any edit on a car whose cluster coding is not
+                         * the proven one or cannot be read, needs the user's confirmation (S3); the
+                         * patcher refuses both without --unproven, and a modified build or one it
+                         * cannot patch is refused by it anyway (a conflict) */
+                        unproven: statusOk && known && ((!hasBackup && pristine && !proven) || (!blocked && !!codingWhy && !foreign)),
+                        unprovenReason: !hasBackup && pristine && !proven ? (codingWhy ? BOTH_REASON : UNPROVEN_REASON) : CODING_REASON,
                         unreadable: !statusOk,
                         /* boot recovery marked the patch failed (S4): crashing, no backup
                          * restores it. Reported only while the binary is not the original:
@@ -536,14 +558,12 @@ function readAaState(cb, fresh) {
         else if (known) st.reason = 'partly patched; Android Auto\'s Patch button applies the rest';
         st.binary = st.state;
         var hu = headUnit.refused();
-        st.conflict = hu ? notSupported(hu)
-            : !coding ? 'cluster coding unreadable'
-            : Number(coding[1]) !== AA_CODING ? 'not supported on this car (KI_KOMBI_VARIANT ' + coding[1] + ')'
-            : st.otherBuild ? 'aapd is another build than our backup'
+        st.conflict = hu ? notSupported(hu) : codingConflict(coding) || (
+              st.otherBuild ? 'aapd is another build than our backup'
             : !known && !backup ? 'untested aapd build'
             : !backup && !pristine ? 'aapd was modified by something else'
             : /^UNKNOWN/.test(geom) && !backup ? 'aapd.conf is not the known original'
-            : foreignStart(AA);
+            : foreignStart(AA));
         st.recovered = recovered(AAPD);
         var pending = readPending(AA);
         if (pending) {
@@ -553,7 +573,14 @@ function readAaState(cb, fresh) {
         done(st);
     });
 }
-var AA_CODING = require('./aapd_patch.js').CODING.proven;
+/* The cluster coding (KI_KOMBI_VARIANT) both patches were proven on, and the
+ * conflict of a coding as a status read's "coding:" line matched it (null
+ * when the line is missing: unreadable), or null on the proven one. */
+var PROVEN_CODING = require('./aapd_patch.js').CODING.proven;
+function codingConflict(coding) {
+    return !coding ? 'cluster coding unreadable'
+        : Number(coding[1]) !== PROVEN_CODING ? 'not supported on this car (KI_KOMBI_VARIANT ' + coding[1] + ')' : null;
+}
 
 /* The conflict of a head unit that refuses our parts, in the words the
  * app shows as not supported. */
@@ -1170,7 +1197,7 @@ function patchWith(t, args, action, blocked, done, run) {
  * install-time activation never does. */
 function apply(panel, mode, noRestart, unproven, done) {
     if (panel !== 'high' && panel !== 'mid') { done(new Error('panel must be high or mid')); return; }
-    var args = ['apply', '--panel', panel, '--target', TARGET, '--yes'].concat(unproven ? ['--unproven'] : []);
+    var args = ['apply', '--panel', panel, '--target', TARGET, '--coding', CODING, '--yes'].concat(unproven ? ['--unproven'] : []);
     if (mode === 'avb') {
         log('apply IC_' + panel.toUpperCase() + ', stock AVB sink (the render joins the media bus)');
     } else if (mode === 'udp') {
@@ -1340,7 +1367,8 @@ function operate(target, label, fn) {
             if (pErr || roErr) {
                 /* The patcher's refusal of a build outside the proven list (S3):
                  * the words the app shows as its confirmation request. */
-                var reason = [pErr && (target === 'carplay' && refused && /not a proven build/.test(refused) ? UNPROVEN_REASON : pErr.message),
+                var reason = [pErr && (target === 'carplay' && refused && /not a proven build/.test(refused) ? UNPROVEN_REASON
+                        : target === 'carplay' && refused && /(cluster coding|KI_KOMBI_VARIANT).*pass --unproven/.test(refused) ? CODING_REASON : pErr.message),
                     roErr && roErr.message].filter(Boolean).join('; ');
                 log(label + ' failed: ' + reason);
                 if (target === 'aa') { aaError = reason; status(null, { state: 'error', reason: reason }); }
@@ -1411,7 +1439,7 @@ function handle(line, sock) {
          * user confirmed it ({"unproven":true}); a plain apply on such a build
          * is refused by the patcher, changing nothing (S3). */
         var unproven = msg.cmd === 'apply' && msg.unproven === true;
-        if (unproven) log('apply: the user confirmed patching a carplay build outside the proven list');
+        if (unproven) log('apply: the user confirmed patching a carplay build outside the proven list or on a car not coded KI_KOMBI_VARIANT 7');
         var go = function () {
             operate('carplay', msg.cmd === 'apply' ? 'applying' : 'reverting',
                 msg.cmd === 'apply' ? function (cb) { apply(panel, mode, false, unproven, cb); } : function (cb) { revert(false, false, cb); });
@@ -1423,7 +1451,7 @@ function handle(line, sock) {
             busy = 'carplay';   /* held while the state is read: no second command meanwhile */
             readState(function (st) {
                 if (st && (st.unproven || st.unreadable)) {
-                    var why = st.unproven ? UNPROVEN_REASON : 'carplay status unreadable; nothing changed';
+                    var why = st.unproven ? st.unprovenReason : 'carplay status unreadable; nothing changed';
                     busy = null;
                     log('apply refused: ' + why + ' (checked before the remount)');
                     status({ state: 'error', reason: why });
@@ -1644,6 +1672,40 @@ function hookStep(which, t, read, run, done) {
     });
 }
 
+/* On a car coded otherwise than KI_KOMBI_VARIANT 7, a patch an earlier
+ * release's install wrote and recorded proven that has not started yet (its
+ * apply pending, or carplay running the file it replaced) has its record
+ * put on trial: boot recovery restores it after one failed start, and its
+ * watcher records it proven once it ran healthy in a clean boot. carplay's
+ * bytes are not touched, nor is the record of a patch that has started (one
+ * that works today keeps its threshold). A write that fails leaves the
+ * record as it was. Runs under the lock the install holds; / goes back
+ * read-only, or the ro-failed guard is set (hookStep's way). cb() when
+ * done. */
+function trialUnstarted(cb) {
+    readState(function (st) {
+        var rec = record.current(TARGET);
+        if (st.coding === null || st.coding === PROVEN_CODING || !rec || rec.patched !== true || rec.proven !== true || rec.trial ||
+            !(st.pending === 'apply' || needed(CP))) { cb(); return; }
+        remount(true, function (mErr) {
+            if (mErr) log('activate: the patch waiting for its start stays recorded proven: remount rw: ' + mErr.message);
+            else {
+                try {
+                    record.write(TARGET, { patched: true, proven: false, trial: true });
+                    log('activate: KI_KOMBI_VARIANT ' + st.coding + ': the patch waiting for its start is recorded on trial');
+                } catch (e) { log('activate: the patch waiting for its start stays recorded proven: ' + e.message); }
+            }
+            remountRo(3, function (roErr) {
+                if (roErr) {
+                    holdRoFailed(roErr.message);
+                    log('WARNING: ' + roErr.message + ' - the next head-unit start mounts / read-only again; until then no writer takes the remount lock (ro-failed)');
+                }
+                cb();
+            });
+        });
+    });
+}
+
 /* Runs activate or deactivate once and exits; the last stdout line is its
  * JSON result. Never stops or restarts carplay or aapd. CarPlay first: when
  * its step fails, Android Auto's does not run, so the install's rollback or
@@ -1697,7 +1759,7 @@ function oneShot(which) {
             finish(1);
             return;
         }
-        hookStep(which, CP, readState, function (op, cb) {
+        (which === 'activate' ? trialUnstarted : function (cb) { cb(); })(function () { hookStep(which, CP, readState, function (op, cb) {
             if (op === 'apply') apply('high', 'avb', true, false, cb); else revert(true, true, cb);
         }, function (code, r) {
             result.status = r.status;
@@ -1742,7 +1804,7 @@ function oneShot(which) {
                 result.aa = aaR;
                 finish(which === 'deactivate' ? aaCode : 0);
             });
-        });
+        }); });
       }, RO);
     });
 }

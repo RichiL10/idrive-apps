@@ -44,13 +44,17 @@ app requires this tool (0.8.9); this tool requires `cluster-render` 0.3.12 and
 hooks and puts the tool's `recmgr` and `crashNames` names, `aapd` among
 them, on the lists. Requirements resolve across catalog sources.
 
-**Install.** The deploy tool runs `patchd.js activate` as root. On a proven
+**Install.** The deploy tool runs `patchd.js activate` as root. On a car coded `KI_KOMBI_VARIANT` 7, with a proven
 carplay build, or one CarPlay's Patch button patched before, it writes the patch
 CarPlay's Patch button writes, keeps the running binary linked, and never stops,
 kills or restarts CarPlay. The Store shows a restart pending; the app shows
 `Status: Patched after restart`. One head-unit start runs the patched
-CarPlay and starts this tool's services. The hook leaves CarPlay as it is,
-and the app says why and offers CarPlay's Patch button, when CarPlay's Remove patch button was used, when
+CarPlay and starts this tool's services. A first patch on a car counts as
+untested until CarPlay has run it for a healthy minute: boot recovery restores
+it after one failed start until then, after two from then on (PATCH.md
+"Boot recovery"). The hook leaves CarPlay as it is,
+and the app says why and offers CarPlay's Patch button, on a car coded
+otherwise or whose coding cannot be read (a confirmation is asked first), when CarPlay's Remove patch button was used, when
 the patcher cannot find or recognise one of its edit sites in the binary or
 something else modified it, when the build is outside the proven list and
 CarPlay's Patch button has not patched it, or when `carplay.service` starts another program.
@@ -126,7 +130,7 @@ that ended with no record (a power cut, or a shutdown inside the window
 with no restart record) is unknown, and two of those in a row count one,
 the accepted cost of catching a loop whose records are lost. It restores
 the original binary before CarPlay starts after the first failed start for
-a build outside the proven list, and for a proven one after the second
+a build outside the proven list, a car not coded 7 and a first patch on trial, and for a proven one after the second
 with no healthy start between, in a second or two, deciding from small
 state files only. CarPlay comes back without the map, its Status row reads
 `Removed — head unit kept restarting`, and its Patch button applies the

@@ -75,7 +75,8 @@ var SAME_BUILD_MAX_DIFF = 2 * EDITS.reduce(function (n, e) { return n + e.origin
 /* /dev/shm/rawcodingdata, the coding image CodingShmApp publishes: a 0x2c
  * byte header (flags at 0x28, 0x09 = valid coding) and the blocks. aapd's
  * and carplay's CodingKOMBI_HUD is the 150 bytes at block offset 0x75a;
- * KI_KOMBI_VARIANT is getBits(0, 0x7e, 1) of it. */
+ * KI_KOMBI_VARIANT is getBits(0, 0x7e, 1) of it. carplay_patch.js reads
+ * it through readCoding too. */
 var CODING = { size: 0x1030, flags: 0x28, valid: 0x09, at: 0x2c + 0x75a, mask: 0x7e, shift: 1, proven: 7 };
 
 var MIN_FREE_MARGIN = 1 << 20;
@@ -93,6 +94,13 @@ function readCoding(p) {
     if (b.length !== CODING.size) return { err: p + ' is ' + b.length + ' bytes, not ' + CODING.size };
     if ((b[CODING.flags] & 0x0f) !== CODING.valid) return { err: 'coding not valid (flags 0x' + b[CODING.flags].toString(16) + ')' };
     return { variant: (b[CODING.at] & CODING.mask) >> CODING.shift };
+}
+
+/* Why a coding readCoding read ({variant} or {err}) is not the proven one,
+ * or null. */
+function codingRefusal(cd) {
+    return cd.err ? 'the cluster coding cannot be read (' + cd.err + ')'
+        : cd.variant !== CODING.proven ? 'KI_KOMBI_VARIANT ' + cd.variant + ' is not the proven cluster coding (' + CODING.proven + ')' : null;
 }
 
 function hexAt(buf, off, len) { return buf.toString('hex', off, off + len); }
@@ -269,9 +277,8 @@ function cmdApply(t, dpi, card, yes) {
     if (hu) die('refusing: ' + hu);
     if (conf.DENSITIES.indexOf(dpi) < 0) die('--dpi must be ' + conf.DENSITY_MIN + '-' + conf.DENSITY_MAX + ' in steps of ' + conf.DENSITY_STEP);
     if (conf.CARDS.indexOf(card) < 0) die('--card must be ' + conf.CARDS.join(' or '));
-    var cd = readCoding(t.coding);
-    if (cd.err) die('refusing: the cluster coding cannot be read (' + cd.err + ')');
-    if (cd.variant !== CODING.proven) die('refusing: KI_KOMBI_VARIANT ' + cd.variant + ' is not the proven cluster coding (' + CODING.proven + ')');
+    var codingWhy = codingRefusal(readCoding(t.coding));
+    if (codingWhy) die('refusing: ' + codingWhy);
 
     var buf = readOr(t.target);
     if (!buf) die('cannot read ' + t.target);
@@ -373,6 +380,6 @@ function main() {
     else { process.stderr.write('usage: aapd_patch.js status|apply|revert [--target <aapd>] [--conf <aapd.conf>] [--coding <shm>] [--dpi <n>] [--card shown|hidden] [--yes] [--force] [--drop-backup]\n'); process.exit(2); }
 }
 
-module.exports = { EDITS: EDITS, CODING: CODING, KNOWN: KNOWN, trusted: trusted, binOther: binOther };
+module.exports = { EDITS: EDITS, CODING: CODING, KNOWN: KNOWN, trusted: trusted, binOther: binOther, readCoding: readCoding, codingRefusal: codingRefusal };
 
 if (require.main === module) main();
