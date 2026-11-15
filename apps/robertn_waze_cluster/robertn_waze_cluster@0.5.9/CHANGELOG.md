@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.9
 
-Kiro test build, on top of 0.5.8:
+Kiro test build (not an upstream release; see KIRO-NOTES.md), on top of 0.5.8:
 
 - New **Show map** checkbox in General (`Show map` in every language of the
   app). Unticked, the map is off the cluster at once and BMW's own map and turn
@@ -13,7 +13,7 @@ Kiro test build, on top of 0.5.8:
   status; the row is greyed and unticked while the service does not report
   `map_shown` and while no patch is in effect.
 
-Requires a waze-on-cluster with `map_shown` (after 0.8.9) for the checkbox to
+Requires waze-on-cluster 0.8.10 (it reports `map_shown`) for the checkbox to
 act; with 0.8.9 it stays greyed and everything else works as before.
 
 ## 0.5.8
