@@ -2233,9 +2233,27 @@ test('kept restart records: the folder is the group\'s to read only, a name plan
     assert.strictEqual(fs.statSync(dest).mode & 0o777, 0o640);
     assert.strictEqual(keepNow('boot-1'), 0, 'our own file stays');
     fs.unlinkSync(dest);
+    /* an empty folder in its place (planted while the parent was group-writable) is removed, the record written */
     fs.mkdirSync(dest);
-    assert.throws(() => keepNow('boot-1'), 'a folder in its place is refused');
+    assert.strictEqual(keepNow('boot-1'), 1, 'an empty folder in its place is replaced');
+    assert(fs.lstatSync(dest).isFile() && fs.readFileSync(dest, 'utf8') === '<r>real</r>\n');
+    /* one that holds something cannot be: that record is skipped with one log line, the other record is still kept */
+    fs.unlinkSync(dest);
+    fs.mkdirSync(dest);
+    fs.writeFileSync(path.join(dest, 'planted'), 'x');
+    fs.writeFileSync(path.join(sin, 'crashhandler', 'restartInfo.xml'), '<c>crash</c>\n');
+    const out1 = [], write1 = process.stdout.write;
+    process.stdout.write = function (s) { out1.push(String(s)); return true; };
+    let skipped;
+    try { skipped = keepNow('boot-1'); } finally { process.stdout.write = write1; }
+    assert.strictEqual(skipped, 1, 'the other record was kept');
+    assert.strictEqual(fs.readFileSync(path.join(keep, '1-boot-1-crashhandler.xml'), 'utf8'), '<c>crash</c>\n');
+    assert(fs.lstatSync(dest).isDirectory() && fs.readdirSync(dest).join() === 'planted', 'the folder is as it was');
+    assert.strictEqual(out1.filter((l) => /restart record not kept: .*1-boot-1-recmgr\.xml cannot be replaced/.test(l)).length, 1, out1.join(''));
+    fs.unlinkSync(path.join(dest, 'planted'));
     fs.rmdirSync(dest);
+    fs.unlinkSync(path.join(keep, '1-boot-1-crashhandler.xml'));
+    fs.unlinkSync(path.join(sin, 'crashhandler', 'restartInfo.xml'));
     /* a folder of more than 200 entries is not listed: nothing kept, no throw, one log line */
     for (let i = 0; i < 400; i++) fs.writeFileSync(path.join(keep, 'x'.repeat(40) + i + '.junk'), '');
     const before = fs.readdirSync(keep).length;
@@ -2395,12 +2413,16 @@ test('woc-patch.sh says so, loudly, and exits non-zero when / does not go read-o
     const w = makeWorld(), script = path.join(__dirname, '..', 'woc-patch.sh'), bin = path.join(w.dir, 'fakebin'), log = path.join(w.dir, 'mount.log');
     fs.mkdirSync(bin);
     const fake = (name, body) => fs.writeFileSync(path.join(bin, name), '#!/bin/sh\n' + body + '\n', { mode: 0o755 });
+    const mounts = path.join(w.dir, 'mounts');
+    const RO = 'rootfs / ext4 ro,relatime 0 0\nproc /proc proc rw 0 0\n', RW = 'rootfs / ext4 rw,relatime 0 0\nproc /proc proc rw 0 0\n';
     fake('sync', 'exit 0');
-    const run = (roWorks, nodeRc) => {
+    /* roWorks: the mount command's exit status; table: what /proc/mounts says afterwards (null: unreadable) */
+    const run = (roWorks, nodeRc, table) => {
         fake('mount', 'echo "$*" >> ' + log + '\ncase "$*" in *remount,ro*) exit ' + (roWorks ? 0 : 32) + ' ;; esac\nexit 0');
         fake('node', 'exit ' + nodeRc);
         fs.writeFileSync(log, '');
-        const r = cp.spawnSync('sh', [script, 'revert'], { encoding: 'utf8', timeout: 20000, env: Object.assign({}, process.env, { PATH: bin + path.delimiter + process.env.PATH }) });
+        if (table === null) { try { fs.unlinkSync(mounts); } catch (e) {} } else fs.writeFileSync(mounts, table === undefined ? (roWorks ? RO : RW) : table);
+        const r = cp.spawnSync('sh', [script, 'revert'], { encoding: 'utf8', timeout: 20000, env: Object.assign({}, process.env, { PATH: bin + path.delimiter + process.env.PATH, WOC_MOUNTS: mounts }) });
         return { status: r.status, err: r.stderr, out: r.stdout, mounts: fs.readFileSync(log, 'utf8').trim().split('\n') };
     };
     const NOT_RO = /error: \/ is still read-write: a running file may hold it; restart the head unit/;
@@ -2414,6 +2436,23 @@ test('woc-patch.sh says so, loudly, and exits non-zero when / does not go read-o
     r = run(true, 3);
     assert(r.status === 3 && !NOT_RO.test(r.err), r.status + ' ' + r.err);
     assert.strictEqual(cp.spawnSync('sh', ['-n', script]).status, 0, 'sh -n');
+    /* a remount that exits 0 and leaves / read-write by the mount table is not a success */
+    r = run(true, 0, RW);
+    assert(r.status !== 0 && NOT_RO.test(r.err), 'mount said 0, the table says rw: ' + r.status + ' ' + r.err);
+    r = run(true, 0, null);
+    assert(r.status !== 0 && NOT_RO.test(r.err), 'an unreadable mount table is not proof: ' + r.status + ' ' + r.err);
+    r = run(true, 3, RW);
+    assert(r.status === 3 && NOT_RO.test(r.err), 'the patcher\'s own status is kept: ' + r.status + ' ' + r.err);
+    r = run(true, 0, 'rootfs / ext4 ro,relatime 0 0\nnone /var tmpfs rw 0 0\nnone /romance tmpfs rw 0 0\n');
+    assert.strictEqual(r.status, 0, 'only the / line counts: ' + r.err);
+    r = run(true, 0, 'rootfs / ext4 rw,errors=remount-ro 0 0\n');
+    assert(r.status !== 0 && NOT_RO.test(r.err), 'ro inside another option is not ro: ' + r.err);
+    /* a failing sync does not skip the remount (set -e in the exit trap) */
+    fake('sync', 'exit 1');
+    r = run(true, 0);
+    assert.deepStrictEqual([r.status, NOT_RO.test(r.err), r.mounts], [0, false, ['-o remount,rw /', '-o remount,ro /']], 'sync failed, the remount still ran: ' + r.err);
+    r = run(true, 0, RW);
+    assert(r.status !== 0 && NOT_RO.test(r.err) && r.mounts.length === 2, 'sync failed and / is still rw: ' + r.err);
 });
 
 test('two writers of one patch record (the watcher, woc-patch.sh) each have their own temporary file: neither renames the other\'s', () => {

@@ -321,6 +321,28 @@ async function main() {
         ok('holds: the target\'s own file is no held name', got && got[7] === false, res.stdout + res.stderr);
     })();
 
+    /* ---- a stat of a NAME that fails for a reason other than "no such name" counts as running: the name is kept ---- */
+    (function statErrorTest() {
+        var lockDir = path.join(dir, 'lockproc3'), file = path.join(dir, 'staterr-binary'), link = path.join(dir, 'staterr-link'), other = path.join(dir, 'staterr-target');
+        fs.mkdirSync(lockDir);
+        fs.writeFileSync(file, 'x'); fs.linkSync(file, link); fs.writeFileSync(other, 'y');
+        var res = cp.spawnSync(process.execPath, ['-e', [
+            "var lock = require(" + JSON.stringify(path.join(__dirname, '..', 'remount_lock.js')) + "), fs = require('fs');",
+            "var F = " + JSON.stringify(file) + ", L = " + JSON.stringify(link) + ", O = " + JSON.stringify(other) + ", out = {}, real = fs.statSync, code = null, bad = null;",
+            "fs.statSync = function (p) { if (code && p === bad) { var e = new Error(code); e.code = code; throw e; } return real.apply(fs, arguments); };",
+            "['ENOENT', 'ENOTDIR', 'ENAMETOOLONG', 'EIO', 'EACCES'].forEach(function (c) {",
+            "  code = c; bad = F; var a = lock.inUse(F), b = lock.inUse(F, false); bad = L; var h = lock.holds(L, O);",
+            "  out[c] = [a, b, h];",
+            "});",
+            "console.log(JSON.stringify(out));",
+        ].join('\n')], { env: Object.assign({}, process.env, { WOC_PROC: lockDir }), encoding: 'utf8' });
+        var got = null;
+        try { got = JSON.parse(res.stdout); } catch (e) {}
+        ok('stat of a name: no such name, not a folder, name too long: no process runs it, the name is not held', got && ['ENOENT', 'ENOTDIR', 'ENAMETOOLONG'].every(function (c) { return got[c][0] === false && got[c][2] === false; }), res.stdout + res.stderr);
+        ok('stat of a name: any other error (EIO, EACCES) counts as running: in use, held', got && ['EIO', 'EACCES'].every(function (c) { return got[c][0] === true && got[c][2] === true; }), res.stdout + res.stderr);
+        ok('stat of a name: ... except for a caller that takes "runs" as proof of health', got && ['EIO', 'EACCES'].every(function (c) { return got[c][1] === false; }), res.stdout + res.stderr);
+    })();
+
     /* patchd's own start removes a name nothing runs, and keeps it while a process cannot be read */
     for (var unreadable of [false, true]) {
         t = unit();

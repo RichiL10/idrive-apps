@@ -286,6 +286,33 @@ assert.strictEqual(fs.readFileSync(path.join(nd, 'a.txt'), 'utf8'), 'owner <VIN>
 assert.strictEqual(fs.readFileSync(path.join(nd, 'journal-carplay.txt'), 'utf8'), 'c5 <VIN>\n', 'the last 7 of a spaced VIN found in a name');
 assert.strictEqual(fs.readFileSync(path.join(nd, 'crash-A123456.txt'), 'utf8'), 'c4');
 console.log('ok   scrub <dir>: files named with a VIN are renamed file-<n>; a crash id in a name or text stays');
+/* scrub <dir>: a file of one VIN repeated to the size limit does not grow the process by its occurrences (the
+ * logs service has 160 MiB; collecting every occurrence took 224 MB of RSS) */
+var big = path.join(dir, 'bigvin');
+fs.mkdirSync(big);
+fs.writeFileSync(path.join(big, 'big.txt'), Buffer.from('WBA8E9C50GK123456 '.repeat(Math.floor(8 * 1024 * 1024 / 18))));
+var memJs = 'var x=require(process.argv[1]),r0=process.memoryUsage().rss;x.scrubDir(process.argv[2]);console.log(process.memoryUsage().rss-r0)';
+rr = cp.spawnSync(process.execPath, ['-e', memJs, path.join(CUR, 'logs_extra.js'), big], { env: XENV, encoding: 'utf8' });
+assert.strictEqual(rr.status, 0, rr.stderr);
+var bigText = fs.readFileSync(path.join(big, 'big.txt'), 'utf8');
+assert(/^(<VIN> )+$/.test(bigText), 'every occurrence replaced');
+assert(Number(rr.stdout) < 80 * 1024 * 1024, 'RSS grew by ' + rr.stdout.trim() + ' bytes');
+console.log('ok   scrub <dir>: 8 MiB of one repeated VIN is scrubbed whole, the process grows by under 80 MB');
+
+/* scrub <dir>: at most 64 distinct last-7 forms are kept; the full VINs past that are replaced, their bare last 7 are not */
+var many = path.join(dir, 'manyvin');
+fs.mkdirSync(many);
+function vinN(n) { return 'WBA8E9C50GK' + String(n).padStart(6, '0'); }
+var lines = [];
+for (i = 1; i <= 70; i++) lines.push('v ' + vinN(i));
+fs.writeFileSync(path.join(many, 'a.txt'), lines.join('\n') + '\n');
+fs.writeFileSync(path.join(many, 'b.txt'), 'first K000001 last K000070\n');
+rr = cp.spawnSync(process.execPath, [path.join(CUR, 'logs_extra.js'), 'scrub', many], { env: XENV, encoding: 'utf8' });
+assert.strictEqual(rr.status, 0, rr.stderr);
+assert(!/WBA8E9C50GK/.test(fs.readFileSync(path.join(many, 'a.txt'), 'utf8')), 'all 70 full VINs replaced');
+assert.strictEqual(fs.readFileSync(path.join(many, 'b.txt'), 'utf8'), 'first <VIN> last K000070\n');
+console.log('ok   scrub <dir>: past 64 distinct VINs the full ones are still replaced, the bare last 7 of the later ones are not');
+
 var members = cp.execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' });
 assert(!/WBA8E9C50GK123456|K123456/i.test(members), 'no VIN in the archive\'s member names');
 
@@ -333,6 +360,36 @@ assert.deepStrictEqual(fs.readdirSync(out3).sort(), ['.woc-logs-20261101T000000Z
     assert.deepStrictEqual(fs.readdirSync(o), ['woc-logs-20261101T000000Z.tar.gz'], 'nothing else written');
 });
 console.log('ok   collect-logs: a link at the old temporary name is not followed; a link or a folder as the output is refused');
+
+/* the published archive is 0640 (the output folder's group reads it; root's mktemp file is 0600); a chmod that
+ * fails is a failure to write the archive. A folder that appears at the output name after the check (a fake gzip
+ * makes it, as another writer of the folder could) is not moved into: the publish fails and leaves nothing in it. */
+var bin2 = path.join(dir, 'bin2');
+fs.mkdirSync(bin2);
+var XENV2 = Object.assign({}, XENV, { PATH: bin2 + ':' + XENV.PATH });
+var STAMPED = 'woc-logs-20261101T000000Z.tar.gz';
+var out6 = path.join(dir, 'out-mode');
+fs.mkdirSync(out6);
+rr = cp.spawnSync('sh', [path.join(CUR, 'collect-logs.sh'), '-o', out6], { env: XENV, encoding: 'utf8' });
+assert.strictEqual(rr.status, 0, rr.stdout + rr.stderr);
+assert.strictEqual(fs.statSync(path.join(out6, STAMPED)).mode & 0o777, 0o640, 'published 0640');
+fs.writeFileSync(path.join(bin2, 'chmod'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+var out7 = path.join(dir, 'out-chmod');
+fs.mkdirSync(out7);
+rr = cp.spawnSync('sh', [path.join(CUR, 'collect-logs.sh'), '-o', out7], { env: XENV2, encoding: 'utf8' });
+assert.strictEqual(rr.status, 1, rr.stdout + rr.stderr);
+assert(/could not write/.test(rr.stderr) && fs.readdirSync(out7).length === 0, 'no archive: ' + fs.readdirSync(out7));
+fs.unlinkSync(path.join(bin2, 'chmod'));
+var realGzip = cp.execFileSync('sh', ['-c', 'command -v gzip'], { env: XENV, encoding: 'utf8' }).trim();
+fs.writeFileSync(path.join(bin2, 'gzip'), '#!/bin/sh\nmkdir "' + path.join(dir, 'out-race', STAMPED) + '"\nexec ' + realGzip + ' "$@"\n', { mode: 0o755 });
+var out8 = path.join(dir, 'out-race');
+fs.mkdirSync(out8);
+rr = cp.spawnSync('sh', [path.join(CUR, 'collect-logs.sh'), '-o', out8], { env: XENV2, encoding: 'utf8' });
+assert.strictEqual(rr.status, 1, rr.stdout + rr.stderr);
+assert(/could not write/.test(rr.stderr), rr.stderr);
+assert.deepStrictEqual(fs.readdirSync(out8), [STAMPED], 'only the folder that was there');
+assert.deepStrictEqual(fs.readdirSync(path.join(out8, STAMPED)), [], 'nothing moved into it');
+console.log('ok   collect-logs: the archive is published 0640; a failed chmod or a folder that appeared at the output name is a failure, nothing left');
 
 /* the scrub does not fail open: without logs_extra.js there is no archive */
 var CUR3 = path.join(dir, 'current3');

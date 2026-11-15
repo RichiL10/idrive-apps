@@ -215,7 +215,9 @@ var RECORD_DIR_BYTES = 4096;
  * of group systemd-journal, root's to write (group_dir.js; opts its uid and
  * group file, for tests), a temporary file made new and renamed into place;
  * a name already there that is not a regular file of that owner, not writable
- * by the group, is replaced, not trusted. Drops those of all but the newest
+ * by the group, is replaced, not trusted (a folder there is removed if empty;
+ * if it cannot be replaced that record is skipped with a log line, the rest
+ * go on). Drops those of all but the newest
  * RECORD_BOOTS boots and stray temporary files; returns how many it copied.
  * Without a record it writes nothing; if the folder cannot be made private it
  * throws before writing. A folder with more than RECORD_ENTRIES entries (or
@@ -248,7 +250,13 @@ function keepRestartRecords(t, dir, id, opts) {
         var had = null;
         try { had = fs.lstatSync(dest); } catch (e) { if (e.code !== 'ENOENT') throw e; }
         if (had && had.isFile() && had.uid === uid && !(had.mode & 0o022)) return;
-        if (had) fs.unlinkSync(dest);
+        if (had) {
+            /* the folder is root's now, but one a group member made while it was group-writable may still stand here */
+            try { if (had.isDirectory()) fs.rmdirSync(dest); else fs.unlinkSync(dest); } catch (e) {
+                log('restart record not kept: ' + dest + ' cannot be replaced (' + (e.code || e.message) + ')');
+                return;
+            }
+        }
         fs.writeFileSync(dest + '.tmp', r.buf, { mode: 0o640, flag: 'wx' });
         fs.chmodSync(dest + '.tmp', 0o640);
         fs.renameSync(dest + '.tmp', dest);

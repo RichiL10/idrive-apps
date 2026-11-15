@@ -109,36 +109,60 @@ var VIN = /(^|[^A-Za-z0-9])([A-HJ-NPR-Z0-9]{17})(?![A-Za-z0-9])/gi;
 var MAKER_VIN = /(?:W[ -]?B[ -]?[ASXY]|W[ -]?M[ -]?W|3[ -]?M[ -]?W|4[ -]?U[ -]?S|5[ -]?U[ -]?[XM]|5[ -]?Y[ -]?M)(?:[ -]?[A-HJ-NPR-Z0-9]){14}/gi;
 var LABELLED = /(^|[^A-Za-z0-9])((?:vin|fgnr|fahrgestell(?:nummer)?|chassis(?:[ _-]?(?:no|nr|number))?)(?:[_-]?(?:short|last7|7))?[\s:="'>]+)([A-Z0-9]{7})(?![A-Za-z0-9])/gi;
 
-/* text with its full VINs replaced; found (an array) gets their last 7 */
+/* The last 7 characters kept to replace elsewhere: distinct ones only, at most
+ * MAX_SHORTS. Past that, a further VIN's own last 7 are not collected: the
+ * full VINs and labelled fields are still replaced, a bare 7-character token
+ * of such a VIN is not. A car has one VIN; the cap bounds memory (the logs
+ * service has 160 MiB) against a file full of different ones. */
+var MAX_SHORTS = 64;
+function addShort(found, s) { if (found.size < MAX_SHORTS) found.add(s); }
+
+/* text.replace(re, fn) for a global re, without the memory String.replace takes
+ * for a callback: it holds every match of the text at once, ~100 MB for an 8 MiB
+ * file of VINs. This keeps the output in pieces joined as it goes. */
+function replaceEach(text, re, fn) {
+    var out = '', parts = [], last = 0, m;
+    re.lastIndex = 0;
+    while ((m = re.exec(text))) {
+        parts.push(text.slice(last, m.index), fn(m[0], m[1], m[2], m[3]));
+        last = m.index + m[0].length;
+        if (parts.length >= 2048) { out += parts.join(''); parts = []; }
+    }
+    return out + parts.join('') + text.slice(last);
+}
+
+/* text with its full VINs replaced; found (a Set) gets their last 7 */
 function replaceVins(text, found) {
-    return String(text).replace(MAKER_VIN, function (m) {
+    return replaceEach(replaceEach(String(text), MAKER_VIN, function (m) {
         var n = m.replace(/[ -]/g, '');
         if (n.length !== m.length && !/[0-9]/.test(n)) return m;
-        if (found) found.push(n.slice(-7).toUpperCase());
+        if (found) addShort(found, n.slice(-7).toUpperCase());
         return '<VIN>';
-    }).replace(VIN, function (m, pre, tok) {
+    }), VIN, function (m, pre, tok) {
         if (!(/[0-9]/.test(tok) && /[A-Z]/i.test(tok))) return m;
-        if (found) found.push(tok.slice(-7).toUpperCase());
+        if (found) addShort(found, tok.slice(-7).toUpperCase());
         return pre + '<VIN>';
     });
 }
 
-/* The last 7 characters of every full VIN in text. */
-function shortsOf(text) {
-    var found = [];
+/* The last 7 characters of every full VIN in text, added to into (a Set) and returned as an array. */
+function shortsOf(text, into) {
+    var found = into || new Set();
     replaceVins(text, found);
-    return found;
+    return Array.from(found);
 }
 
 /* text scrubbed; shorts: more last-7 forms to replace (those of the VINs
  * found in the rest of the archive). */
 function scrub(text, shorts) {
-    var found = (shorts || []).filter(function (s) { return /^[A-Z0-9]{7}$/.test(s); });
-    var t = replaceVins(text, found).replace(LABELLED, function (m, pre, label, tok) {
+    var found = new Set();
+    (shorts || []).forEach(function (s) { if (/^[A-Z0-9]{7}$/.test(s)) addShort(found, s); });
+    var t = replaceEach(replaceVins(text, found), LABELLED, function (m, pre, label, tok) {
         return /[0-9]/.test(tok) ? pre + label + '<VIN>' : m;
     });
-    if (!found.length) return t;
-    return t.replace(new RegExp('(^|[^A-Za-z0-9])(' + found.join('|') + ')(?![A-Za-z0-9])', 'gi'), function (m, pre) { return pre + '<VIN>'; });
+    if (!found.size) return t;
+    var alt = Array.from(found).map(function (s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).join('|');
+    return replaceEach(t, new RegExp('(^|[^A-Za-z0-9])(' + alt + ')(?![A-Za-z0-9])', 'gi'), function (m, pre) { return pre + '<VIN>'; });
 }
 /* A regular file's first cap + OVERREAD bytes as { text, more } (more: the
  * file holds more than that), never through a link; null when absent or not
@@ -327,12 +351,12 @@ function snapshotInPlace() {
  * replaced in all of them; a file whose name holds a VIN is renamed file-<n>
  * (removed if that fails), so no VIN is left in the archive's member names. */
 function scrubDir(dir) {
-    var names = fs.readdirSync(dir), shorts = [], k = 0;
+    var names = fs.readdirSync(dir), shorts = new Set(), k = 0;
     names.forEach(function (n) {
-        shorts = shorts.concat(shortsOf(n));
+        shortsOf(n, shorts);
         try {
             var f = path.join(dir, n), st = fs.lstatSync(f);
-            if (st.isFile() && st.size <= SCRUB_MAX) shorts = shorts.concat(shortsOf(fs.readFileSync(f).toString('utf8')));
+            if (st.isFile() && st.size <= SCRUB_MAX) shortsOf(fs.readFileSync(f).toString('utf8'), shorts);
         } catch (e) { /* handled below */ }
     });
     function neutral() {
@@ -342,18 +366,19 @@ function scrubDir(dir) {
             try { fs.lstatSync(path.join(dir, t)); } catch (e) { return t; }
         } while (true);
     }
+    var shortList = Array.from(shorts);
     names.forEach(function (n) {
         var f = path.join(dir, n);
         try {
             var st = fs.lstatSync(f);
             if (st.isSymbolicLink() || !st.isFile()) { fs.unlinkSync(f); return; }
-            if (scrub(n, shorts) !== n) {
+            if (scrub(n, shortList) !== n) {
                 var g = path.join(dir, neutral());
                 try { fs.renameSync(f, g); } catch (e) { fs.unlinkSync(f); return; }
                 f = g;
             }
             if (st.size > SCRUB_MAX) throw new Error('too large');
-            var before = fs.readFileSync(f).toString('utf8'), after = scrub(before, shorts);
+            var before = fs.readFileSync(f).toString('utf8'), after = scrub(before, shortList);
             if (after !== before) fs.writeFileSync(f, after);
         } catch (e) {
             try { fs.writeFileSync(f, '(left out: ' + (e.message === 'too large' ? 'larger than ' + SCRUB_MAX + ' bytes' : e.code || e.message) + ')\n'); } catch (e2) {

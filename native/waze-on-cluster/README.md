@@ -612,7 +612,7 @@ Its sites:
 sink), no flag (`udp://127.0.0.1:20557`), `--capture` (FIFO) or `--sink
 <url>`, plus `--res WxH|stock`, `--safe WxH+X+Y|full` and `--unproven`. It
 remounts `/` read-write only for the write, and says on stderr (and exits
-non-zero) when `/` does not go read-only again: restart the head unit. It does
+non-zero) when `/` is not read-only again by `/proc/mounts`: restart the head unit. It does
 not take patchd's lock: do not run it while the app is patching. **Never `systemctl stop` or
 `restart` carplay**: CarPlay dumps core on SIGTERM, which power-cycles the
 head unit, and so does any other failed CarPlay end; with the drop-in
@@ -629,6 +629,17 @@ a carplay left `0700` fails to start (`status=203/EXEC`) and the head unit
 restarts in a loop. An apply or revert that finds nothing to change, and
 boot recovery before the service starts, give a file the service's user
 cannot run or read its original's mode and owner.
+
+### If the app refuses a change
+
+The app can refuse an apply or a revert, or leave a patch in place that a
+boot should have restored, with a message such as "processes run both ... and
+... .woc-running" or "every name for a running ... is in use". Nothing was
+written and `/` stayed read-only. Restart the head unit and try again. If it
+persists, an unreadable process may be the cause: send the archive from
+Save logs (the kit's probe lists the processes it could not read). The
+full list of what the app does not handle, and what to do about each, is
+"Known limitations of 0.8.10" in `KIRO-NOTES.md`.
 
 ## The Android Auto patch
 

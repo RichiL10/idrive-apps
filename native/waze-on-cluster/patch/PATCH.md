@@ -475,6 +475,16 @@ file from its own bytes (upstream's rebuild of a proven build, and its
 limit to files with an edit of ours in them, are not in this build), so a
 file another tool changed is left as it is.
 
+### If the app refuses a change
+
+A refusal such as "processes run both ... and ... .woc-running" or "every
+name for a running ... is in use" means nothing was written and `/` stayed
+read-only: a process runs a file that has no free name, or a process's
+`/proc/<pid>/maps` cannot be read, which counts as running it. Boot recovery
+then defers its restore ("processes run both ...; deferring"). Restart the
+head unit; if it persists, send the Save logs archive (the probe lists the
+processes it could not read). "Known limitations of 0.8.10" in
+`KIRO-NOTES.md` lists every such case and what to do.
 ### Install-time activation
 
 The deploy tool (`mgu-deploy` 0.7.0 and later) runs `patchd.js activate` as

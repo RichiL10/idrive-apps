@@ -269,9 +269,11 @@ A record written by 0.8.9 or earlier is trusted as proven: those versions wrote 
 Fix round after the four reviews of the merge:
 - Boot id: `_armed` (`recovery.js`) is false when the boot id is empty or not `[0-9A-Za-z-]+` (`boot_id.js` returns `''` on a read failure). No trial is proven then, and an arm kept from a boot whose id cannot be compared counts as a prior boot. A changed `/proc/stat` btime is not used: the head unit sets its clock after boot, which moves btime within one boot and would tally a healthy boot as a prior one.
 - Patch record: each write uses its own temporary file (`<record>.<pid>.<n>.tmp`, created with `wx`), because the watcher and `woc-patch.sh` write without a common lock.
-- Restart records: `keepRestartRecords` makes the folder 2750 (root writes; the group `systemd-journal` reads; `group_dir.js` takes `opts.mode`), replaces a name that is not a regular file of root's or is group-writable, and does not list a folder of more than 200 entries or bigger than 4096 bytes (Node 8 has no bounded directory read). Readers: `logs_extra.js` snapshot (`logs-fw.service`, root) and `collect-logs.sh` (root) only read. A folder that once grew past 4096 bytes stays that size on ext4, so retention then stays off until the folder is recreated.
+- Restart records: `keepRestartRecords` makes the folder 2750 (root writes; the group `systemd-journal` reads; `group_dir.js` takes `opts.mode`), replaces a name that is not a regular file of root's or is group-writable (an empty folder there is removed; one that cannot be removed skips that record with a log line, the others are kept), and does not list a folder of more than 200 entries or bigger than 4096 bytes (Node 8 has no bounded directory read). Readers: `logs_extra.js` snapshot (`logs-fw.service`, root) and `collect-logs.sh` (root) only read. A folder that once grew past 4096 bytes stays that size on ext4, so retention then stays off until the folder is recreated.
 - Held names (`remount_lock.js`): `runs`, `inUse` and `holds` fail closed. A process whose `maps` cannot be read for any reason but ENOENT/ESRCH, or an unreadable `/proc`, counts as running the file, so `staleHeld`, `settleHeld`, `freeHeld` and `dropUnusedRunning` keep the name. The recovery watcher's health check (`runsTarget`) passes `unknown = false`, since there "runs" is proof, not a reason to keep. Cost: with a stuck, unreadable process and a differing `.woc-running`, the boot restore defers ("processes run both"), not skips. No process can newly start a replaced inode through a held name: nothing executes a `.woc-running*` path, and the target's path names the new inode; the file the change replaces is named under an extra name before the write (`holdTarget`) and checked after (`runsStale`). What was real is only the unreadable-process case.
-- `woc-patch.sh` is not rewritten: its exit trap reports a `/` that stays read-write on stderr and exits non-zero. It does not take patchd's lock.
+- `woc-patch.sh` is not rewritten and takes no lock: its exit trap runs `sync || true`, then `remount,ro`, then reads `/proc/mounts` (`WOC_MOUNTS` in tests) and reports a `/` that is not read-only, or a table it cannot read, on stderr with a non-zero exit.
+- Held names: only ENOENT, ENOTDIR and ENAMETOOLONG of a stat of a held name mean no process; any other stat error counts as running, like an unreadable `maps`.
+- `collect-logs.sh` makes the archive 0640 before it publishes it, and publishes with `rename(2)` through `node` (`mv` would move it into a folder that appeared at the output name). `logs_extra.js` keeps at most 64 distinct last-7 forms of VINs for its second pass and replaces matches without `String.replace`'s callback memory; past 64 distinct VINs the full VINs are still replaced but the bare last 7 of the later ones are not.
 
 ## 0.8.10, crash evidence for a head unit that restarts in a loop (upstream issue #122)
 
@@ -312,12 +314,19 @@ Ported from upstream d67ea05, dcd61a7, 3f6047e, 5de507e (waze-on-cluster 0.9.8, 
 
 ## Known limitations of 0.8.10
 
-- `collect-logs.sh` run by hand as root trusts the runtime folders of the app's user: it checks a file and then opens
-  it, and a process of that user can swap the file in between.
+What each one is, and what the owner does. The README and `patch/PATCH.md` point here ("If the app refuses a change").
+
+- `woc-patch.sh` is the manual shell path and stays so: it takes no remount lock and keeps no running file named, so do not run it while the app patches or reverts. It checks `/proc/mounts` after its last `remount,ro` and, when `/` is not read-only, says so on stderr and exits non-zero. Owner: restart the head unit then.
+- A patch record written by 0.8.9 or earlier is trusted as proven: those versions wrote `proven: true` straight after applying a proven build, and 0.8.10 cannot tell that from a patch that ran healthy. One that never ran healthy is not put on trial. Owner: remove the patch and apply it again to get the trial.
+- A `/proc/<pid>/maps` that cannot be read, of any process, makes the held-name check fail closed (it counts as running the file). Changes can then be refused ("processes run both ...", "every name for a running ... is in use") and the boot restore of a crashing patch is deferred. Owner: restart the head unit. If it persists, report it with the Save logs archive; the kit's probe lists the processes it could not read.
+- An unreadable boot id makes recovery count each restart as a prior boot, so a patch may be removed after a few restarts. That is the safe direction. Owner: apply the patch again once the unit is stable.
+- Restart-records retention is skipped for a boot when the folder holds over 200 entries or is bigger than 4096 bytes (Node 8 has no bounded directory read). An ext4 folder that once grew keeps its size, so the records already kept stay as evidence and no new ones are added. Owner: delete the folder `restart-records` (it is made again) to get new ones.
+- Our boot units are not marked `runsInSafeMode`. In deploy safe mode the boot recovery and the restart records probably do not run (not tested).
+- A patch-record temporary file (`<record>.<pid>.<n>.tmp`) of a process killed in the middle of a write is not cleaned up. Owner: nothing; it is one small file per kill.
+- `collect-logs.sh` run by hand as root trusts the runtime folders of the app's user: it checks a file and then opens it, and a process of that user can swap the file in between.
 - Every OAP app can reach the logs socket and ask for a save and the download address (upstream design, unchanged).
 - `sqlite3` opens the crash database again by its path, after the check that it is a regular file.
 - The core-dump walk reads a folder's whole listing before it applies its cap of 5000 entries.
-
 ## 0.8.10, lane H: every running file keeps a name (port of upstream waze-on-cluster 0.9.2, dd89d64 and a89bbf0)
 
 Ported to our `patchd.js` / `remount_lock.js` (patch side only), with S1..S10 untouched:

@@ -122,14 +122,19 @@ fi
 # The archive is made inside STAGE (ours, mode 700), never under a name another
 # user can guess in a shared folder. OUT must not be a folder or a link; the
 # finished file goes to OUT through a file made there with a random name (mktemp
-# creates it, never follows a link), so OUT appears whole or not at all.
+# creates it, never follows a link), so OUT appears whole or not at all. The file
+# is made 0640 before it is published: the output folder's group (the logs
+# service's) reads it. It is published with rename(2) itself: mv would move it
+# into OUT if a folder appeared there since the check above.
 if [ -d "$OUT" ] || [ -L "$OUT" ]; then
     echo "collect-logs: $OUT is a folder or a link, not writing there" >&2
     exit 1
 fi
 if ! tar -cf "$STAGE/$NAME.tar" -C "$STAGE" "$NAME" 2>/dev/null || ! gzip -c "$STAGE/$NAME.tar" > "$STAGE/$NAME.tar.gz" ||
-        ! PART=$(mktemp "$OUTDIR/.$NAME.part.XXXXXX") || ! cat "$STAGE/$NAME.tar.gz" > "$PART" || ! mv "$PART" "$OUT"; then
+        ! PART=$(mktemp "$OUTDIR/.$NAME.part.XXXXXX") || ! cat "$STAGE/$NAME.tar.gz" > "$PART" || ! chmod 0640 "$PART" ||
+        ! "$NODE" -e 'require("fs").renameSync(process.argv[1], process.argv[2])' "$PART" "$OUT" 2>/dev/null; then
     echo "collect-logs: could not write $OUT" >&2
     exit 1
 fi
+PART=
 echo "$OUT"

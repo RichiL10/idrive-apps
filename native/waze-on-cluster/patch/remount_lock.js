@@ -283,15 +283,22 @@ function runs(st, unknown) {
     });
 }
 
+/* A name that is no file: nothing there, a path part that is no folder, or a
+ * name too long to exist. Any other stat error (EIO, EACCES) says nothing
+ * about a process, and is treated like an unreadable maps. */
+function noName(e) { return e.code === 'ENOENT' || e.code === 'ENOTDIR' || e.code === 'ENAMETOOLONG'; }
+
 function inUse(file, unknown) {
-    try { return runs(fs.statSync(file), unknown); } catch (e) { return false; }
+    var st;
+    try { st = fs.statSync(file); } catch (e) { return noName(e) ? false : unknown !== false; }
+    return runs(st, unknown);
 }
 
 function holds(link, target) {
     var a, b;
-    try { a = fs.statSync(link); } catch (e) { return false; }
+    try { a = fs.statSync(link); } catch (e) { return !noName(e); }
     try { b = fs.statSync(target); } catch (e) { b = null; }
-    return !(b && a.ino === b.ino && a.dev === b.dev) && inUse(link);
+    return !(b && a.ino === b.ino && a.dev === b.dev) && runs(a);
 }
 
 module.exports = { acquire, release, tryAcquire, breakDead, runs, inUse, holds, roFailedReason, markRoFailed, clearRoFailed, ownsLock,

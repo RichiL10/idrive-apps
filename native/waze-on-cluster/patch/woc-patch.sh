@@ -55,13 +55,28 @@ activation() {
 
 cmd=${1:-}; [ $# -gt 0 ] && shift || true
 
+# Whether / is read-only now, by the mount table (WOC_MOUNTS: tests only).
+# Unreadable counts as not read-only: the mount command's exit status is not
+# proof.
+MOUNTS=${WOC_MOUNTS:-/proc/mounts}
+root_is_ro() {
+    opts=
+    [ -r "$MOUNTS" ] || return 1
+    while read -r _dev mp _type o _rest; do
+        if [ "$mp" = / ]; then opts=$o; fi
+    done < "$MOUNTS"
+    case ",$opts," in *,ro,*) return 0 ;; esac
+    return 1
+}
+
 # On any exit: / read-only again. A remount that does not take is an error,
-# said aloud, and the exit status is never 0 then.
+# said aloud, and the exit status is never 0 then. sync is best effort: set -e
+# must not skip the remount.
 back_to_ro() {
     rc=$?
     trap - EXIT
-    sync
-    if ! "$MOUNT" -o remount,ro / 2>/dev/null; then
+    sync || true
+    if ! { "$MOUNT" -o remount,ro / 2>/dev/null && root_is_ro; }; then
         echo "error: / is still read-write: a running file may hold it; restart the head unit" >&2
         [ "$rc" -ne 0 ] || rc=1
     fi
