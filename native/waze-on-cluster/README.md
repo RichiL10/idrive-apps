@@ -417,20 +417,29 @@ uptime, and what a start the head unit reset needs explained
   so a Save logs has them as they were when the Logs page opened;
   `collect-logs.sh` run as root reads them itself.
 
-Each of these files is at most 64 KiB, and in each, text shaped like a VIN
-(17 characters) or a short VIN (7) is replaced by `<VIN>`; a 17-character
-VIN that starts with a BMW or MINI maker code is replaced inside a longer run
-too. As the last step before packing, `collect-logs.sh` passes every file of
-the archive (the tools' logs and the journal lines too) through the same
-replacement; a file over 8 MiB is replaced by a line saying so, and if that
-step fails no archive is written. Left out: the coding image itself, recmgr's
-`UserID` column (7 characters, a short VIN's size), the core dumps' and their
-context files' contents, every other field of the deploy tool's `state.json`
-and component manifests, and the deploy tool's and the updater's other files
-(their tokens, credentials, sources, config and backups). Nothing is read
-from the network, and nothing is written but the archive, the snapshot folder
-and the kept restart records.
-
+Each of these files is at most 64 KiB. The one thing scrubbed from them is a
+VIN, replaced by `<VIN>`: a 17-character VIN (also one in a longer run when it
+starts with a BMW or MINI maker code, and one written as groups apart by single
+spaces or dashes, such as `WBA 5R71 070F K67620`); the last 7 characters of
+any VIN found in the archive, wherever they stand alone; and 7 letters and
+digits (with a digit) that follow `vin`, `fgnr`, `fahrgestell(nummer)` or
+`chassis`. A 7-character crash or build id with none of these stays. As the
+last step before packing, `collect-logs.sh` passes every file of the archive
+(the tools' logs and the journal's lines too) through the same replacement and
+renames a file whose name holds a VIN to `file-<n>`; a file over 8 MiB is
+replaced by a line saying so, and if that step fails, or `logs_extra.js` is
+missing, no archive is written. Tokens, passwords and keys are not scrubbed:
+they are kept out by not collecting the files they sit in, and what is copied
+as it is (the patch records, the restart records, a pending restart's reason)
+is copied without any search for them. Left out: the coding image itself,
+recmgr's `UserID` column (7 characters, a short VIN's size), the core dumps'
+and their context files' contents, every other field of the deploy tool's
+`state.json` and component manifests, and the deploy tool's and the updater's
+other files (their tokens, credentials, sources, config and backups). The
+archive is built in a private folder under `/tmp` and moved to its name when
+finished; the name must not be a folder or a link. Nothing is read from the
+network, and nothing is written but the archive, the snapshot folder and the
+kept restart records.
 Sockets: `/dev/shm/waze-on-cluster/ctl.sock` (the render's status and log,
 and the turn-box switch, group `tm_oap_app`; a connection also starts the
 service),

@@ -281,6 +281,26 @@ Ported from upstream d67ea05, dcd61a7, 3f6047e, 5de507e (waze-on-cluster 0.9.8, 
   collect-logs.sh is another feature and is not here.
 - Not verified on a car: that the firmware's `sqlite3` accepts the `file:...?mode=ro` form and reads the database while
   recmgr has it open in WAL mode; the table and column names (`Crash`, `Appl`, `CrashKey`, `AppID`) are upstream's.
+- Review round (R3), logs: `collect-logs.sh` builds the archive in its private `mktemp -d` folder (no predictable
+  name in `/tmp` or the output folder; the finished file goes to the output name through a `mktemp` file there; an
+  output name that is a folder or a link is refused) and aborts without an archive when `logs_extra.js` is missing.
+  `waze-on-cluster-logs-fw.service` has `ExecStopPost=-`. `scrub` also renames a file whose name holds a VIN to
+  `file-<n>`, replaces the last 7 characters of every full VIN found anywhere in the archive, VINs in groups apart by
+  single spaces or dashes (maker code first) and a 7-character token after `vin`/`fgnr`/`fahrgestell`/`chassis`. It no
+  longer replaces any standalone letter plus 6 digits or 2 letters plus 5 digits (a crash or build id such as A123456
+  stays); `collect_logs_test.js` and one line of `recovery_test.js` tested the old behaviour and now test the stricter
+  one. Only VINs are scrubbed: tokens, keys and config are kept out by not collecting their files, text copied whole
+  (patch and restart records, a pending restart's reason) is not searched for them; tests: a token and a key block in
+  other `state.json` keys, in a manifest and in the updater's files are not emitted. Tests: `collect_logs_test.js`,
+  `units_test.js` (section-aware start limits).
+
+## Known limitations of 0.8.10
+
+- `collect-logs.sh` run by hand as root trusts the runtime folders of the app's user: it checks a file and then opens
+  it, and a process of that user can swap the file in between.
+- Every OAP app can reach the logs socket and ask for a save and the download address (upstream design, unchanged).
+- `sqlite3` opens the crash database again by its path, after the check that it is a regular file.
+- The core-dump walk reads a folder's whole listing before it applies its cap of 5000 entries.
 
 ## 0.8.10, lane H: every running file keeps a name (port of upstream waze-on-cluster 0.9.2, dd89d64 and a89bbf0)
 

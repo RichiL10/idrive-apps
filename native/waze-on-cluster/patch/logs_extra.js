@@ -4,10 +4,12 @@
 'use strict';
 /* logs_extra: the parts of the Save logs archive (collect-logs.sh) that
  * are read with care: only read, each file at most CAP bytes, and every text
- * passed through scrub(), which replaces anything shaped like a VIN (17
- * characters) or a short VIN (7) with <VIN>. Nothing is written but what
- * the commands below name; nothing is read from the network, and no file of
- * a token or credential is opened.
+ * passed through scrub(), which replaces a VIN (17 characters) and its last 7
+ * characters, where a VIN is known or the field is labelled, with <VIN>. It
+ * does nothing about tokens or keys: those are kept out by not reading the
+ * files they sit in. Nothing is written but what the commands below name;
+ * nothing is read from the network, and no file of a token or credential is
+ * opened.
  *
  *   node logs_extra.js report <dir>
  *       as the logs service's user, into dir:
@@ -54,7 +56,9 @@
  *   node logs_extra.js scrub <dir>
  *       the last step of collect-logs.sh, on the folder it is about to pack:
  *       every regular file in it passed through scrub() again (the tools'
- *       logs and the journal's lines too), a file past SCRUB_MAX or one that
+ *       logs and the journal's lines too; the last 7 characters of every VIN
+ *       found in any name or file replaced in all of them; a file named with a
+ *       VIN renamed file-<n>), a file past SCRUB_MAX or one that
  *       cannot be rewritten replaced by a line saying so (exit 1 if even
  *       removing it fails).
  *
@@ -89,19 +93,53 @@ var OPEN_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.co
 
 function r(p) { return ROOT + p; }
 
-/* A VIN (17 of A-HJ-NPR-Z0-9, with a letter and a digit) or a short VIN (a
- * letter and 6 digits, or 2 and 5), standing alone: <VIN>. One that starts
- * with a BMW or MINI maker code is also replaced inside a longer run of
- * letters and digits. */
-var VIN = /(^|[^A-Za-z0-9])([A-HJ-NPR-Z0-9]{17}|[A-Z][0-9]{6}|[A-Z]{2}[0-9]{5})(?![A-Za-z0-9])/gi;
-var MAKER_VIN = /(?:WB[ASXY]|WMW|3MW|4US|5UX|5UM|5YM)[A-HJ-NPR-Z0-9]{14}/gi;
-function scrub(text) {
-    return String(text).replace(MAKER_VIN, '<VIN>').replace(VIN, function (m, pre, tok) {
-        if (tok.length === 17 && !(/[0-9]/.test(tok) && /[A-Z]/i.test(tok))) return m;
+/* What is replaced by <VIN>:
+ *  - a VIN (17 of A-HJ-NPR-Z0-9, with a letter and a digit) standing alone;
+ *  - one that starts with a BMW or MINI maker code, also inside a longer run,
+ *    and written as groups apart by single spaces or dashes (WBA 5R71 070F
+ *    K67620), the maker code itself too, with a digit in it;
+ *  - the last 7 characters of any such VIN found in the text, or in the rest
+ *    of the archive (scrubDir), wherever they stand alone;
+ *  - 7 letters and digits with a digit that follow a label: vin, fgnr,
+ *    fahrgestell(nummer), chassis (as in vin: K123456, "fgnr":"FK67620",
+ *    <vin7>7A12345</vin7>).
+ * A 7-character token with no label and no VIN to derive it from (a crash id,
+ * a build id such as A123456) is evidence and stays. */
+var VIN = /(^|[^A-Za-z0-9])([A-HJ-NPR-Z0-9]{17})(?![A-Za-z0-9])/gi;
+var MAKER_VIN = /(?:W[ -]?B[ -]?[ASXY]|W[ -]?M[ -]?W|3[ -]?M[ -]?W|4[ -]?U[ -]?S|5[ -]?U[ -]?[XM]|5[ -]?Y[ -]?M)(?:[ -]?[A-HJ-NPR-Z0-9]){14}/gi;
+var LABELLED = /(^|[^A-Za-z0-9])((?:vin|fgnr|fahrgestell(?:nummer)?|chassis(?:[ _-]?(?:no|nr|number))?)(?:[_-]?(?:short|last7|7))?[\s:="'>]+)([A-Z0-9]{7})(?![A-Za-z0-9])/gi;
+
+/* text with its full VINs replaced; found (an array) gets their last 7 */
+function replaceVins(text, found) {
+    return String(text).replace(MAKER_VIN, function (m) {
+        var n = m.replace(/[ -]/g, '');
+        if (n.length !== m.length && !/[0-9]/.test(n)) return m;
+        if (found) found.push(n.slice(-7).toUpperCase());
+        return '<VIN>';
+    }).replace(VIN, function (m, pre, tok) {
+        if (!(/[0-9]/.test(tok) && /[A-Z]/i.test(tok))) return m;
+        if (found) found.push(tok.slice(-7).toUpperCase());
         return pre + '<VIN>';
     });
 }
 
+/* The last 7 characters of every full VIN in text. */
+function shortsOf(text) {
+    var found = [];
+    replaceVins(text, found);
+    return found;
+}
+
+/* text scrubbed; shorts: more last-7 forms to replace (those of the VINs
+ * found in the rest of the archive). */
+function scrub(text, shorts) {
+    var found = (shorts || []).filter(function (s) { return /^[A-Z0-9]{7}$/.test(s); });
+    var t = replaceVins(text, found).replace(LABELLED, function (m, pre, label, tok) {
+        return /[0-9]/.test(tok) ? pre + label + '<VIN>' : m;
+    });
+    if (!found.length) return t;
+    return t.replace(new RegExp('(^|[^A-Za-z0-9])(' + found.join('|') + ')(?![A-Za-z0-9])', 'gi'), function (m, pre) { return pre + '<VIN>'; });
+}
 /* A regular file's first cap + OVERREAD bytes as { text, more } (more: the
  * file holds more than that), never through a link; null when absent or not
  * a regular file; throws when it cannot be read. */
@@ -284,15 +322,38 @@ function snapshotInPlace() {
 
 /* Every file in dir scrubbed in place; a link is removed, a file that is too
  * large or cannot be rewritten is replaced by a line saying so (removed if
- * even that fails), so what is packed has had the scrub or is not packed. */
+ * even that fails), so what is packed has had the scrub or is not packed. The
+ * last 7 characters of every full VIN found in the names or contents are
+ * replaced in all of them; a file whose name holds a VIN is renamed file-<n>
+ * (removed if that fails), so no VIN is left in the archive's member names. */
 function scrubDir(dir) {
-    fs.readdirSync(dir).forEach(function (n) {
+    var names = fs.readdirSync(dir), shorts = [], k = 0;
+    names.forEach(function (n) {
+        shorts = shorts.concat(shortsOf(n));
+        try {
+            var f = path.join(dir, n), st = fs.lstatSync(f);
+            if (st.isFile() && st.size <= SCRUB_MAX) shorts = shorts.concat(shortsOf(fs.readFileSync(f).toString('utf8')));
+        } catch (e) { /* handled below */ }
+    });
+    function neutral() {
+        var t;
+        do {
+            t = 'file-' + (++k);
+            try { fs.lstatSync(path.join(dir, t)); } catch (e) { return t; }
+        } while (true);
+    }
+    names.forEach(function (n) {
         var f = path.join(dir, n);
         try {
             var st = fs.lstatSync(f);
             if (st.isSymbolicLink() || !st.isFile()) { fs.unlinkSync(f); return; }
+            if (scrub(n, shorts) !== n) {
+                var g = path.join(dir, neutral());
+                try { fs.renameSync(f, g); } catch (e) { fs.unlinkSync(f); return; }
+                f = g;
+            }
             if (st.size > SCRUB_MAX) throw new Error('too large');
-            var before = fs.readFileSync(f).toString('utf8'), after = scrub(before);
+            var before = fs.readFileSync(f).toString('utf8'), after = scrub(before, shorts);
             if (after !== before) fs.writeFileSync(f, after);
         } catch (e) {
             try { fs.writeFileSync(f, '(left out: ' + (e.message === 'too large' ? 'larger than ' + SCRUB_MAX + ' bytes' : e.code || e.message) + ')\n'); } catch (e2) {
@@ -301,7 +362,6 @@ function scrubDir(dir) {
         }
     });
 }
-
 if (require.main === module) {
     var cmd = process.argv[2], dir = process.argv[3];
     try {
@@ -316,5 +376,5 @@ if (require.main === module) {
     }
 }
 
-module.exports = { scrub: scrub, readSource: readSource, redact: redact, report: report, snapshot: snapshot, scrubDir: scrubDir,
+module.exports = { scrub: scrub, shortsOf: shortsOf, readSource: readSource, redact: redact, report: report, snapshot: snapshot, scrubDir: scrubDir,
     CAP: CAP, ROWS: ROWS, ENTRIES: ENTRIES, SQLITE_MS: SQLITE_MS };
